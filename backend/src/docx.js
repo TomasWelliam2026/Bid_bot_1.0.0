@@ -140,8 +140,11 @@ function run(text, { bold = false, italic = false, size = 10, color = DEFAULT_IN
  * borders, which is the nearest thing WordprocessingML has to a box drawn
  * around flowing text.
  */
-function paragraph(runs, { before = 0, after = 60, indent = 0, hanging = 0, shading = null, borders = {} } = {}) {
-  const parts = [`<w:spacing w:before="${before}" w:after="${after}"/>`];
+function paragraph(runs, { before = 0, after = 60, indent = 0, hanging = 0, shading = null, borders = {}, rightTab = 0 } = {}) {
+  const parts = [];
+  // A right-aligned tab stop, for text that sits hard against the right edge.
+  if (rightTab) parts.push(`<w:tabs><w:tab w:val="right" w:pos="${rightTab}"/></w:tabs>`);
+  parts.push(`<w:spacing w:before="${before}" w:after="${after}"/>`);
   if (indent || hanging) {
     parts.push(`<w:ind w:left="${indent}"${hanging ? ` w:hanging="${hanging}"` : ''}/>`);
   }
@@ -182,6 +185,23 @@ const BLOCK_TAGS = new Set([
   'section', 'article', 'header', 'footer', 'main', 'blockquote',
 ]);
 const isBlock = (node) => node.tag !== '#text' && BLOCK_TAGS.has(node.tag);
+
+/** A4 less the page margins set in buildDocx, in twips: where the right edge of the text is. */
+const TEXT_WIDTH = 11906 - 2 * 1134;
+
+/**
+ * `display: grid; grid-template-columns: 1fr auto` over inline items, split
+ * into the items of the 1fr column and the one in the auto column. Null for
+ * anything else.
+ */
+function rightColumn(node, style) {
+  if (style.display !== 'grid') return null;
+  const tracks = String(style['grid-template-columns'] || '').trim().split(/\s+/);
+  if (tracks.length !== 2 || tracks[1] !== 'auto') return null;
+  const items = (node.children || []).filter((child) => child.tag !== '#text' || child.text.trim());
+  if (items.length < 2 || items.some(isBlock)) return null;
+  return { left: items.slice(0, -1), right: items[items.length - 1] };
+}
 
 const isBold = (style) => Number(style['font-weight']) >= 600 || style['font-weight'] === 'bold';
 
@@ -274,7 +294,16 @@ function styledBlocks(html) {
         continue;
       }
 
-      const inlineRuns = runsOf(child, style, [...ancestors, node]);
+      // A `1fr auto` grid row -- school on the left, years hard right -- is a
+      // right tab stop at the text edge, the years after the tab.
+      const row = rightColumn(child, style);
+      const inlineRuns = row
+        ? [
+            ...runsOf({ ...child, children: row.left }, style, [...ancestors, node]),
+            '<w:r><w:tab/></w:r>',
+            ...runsOf({ ...child, children: [row.right] }, style, [...ancestors, node]),
+          ]
+        : runsOf(child, style, [...ancestors, node]);
       if (!inlineRuns.length && !fill) continue;
 
       const bullet = child.tag === 'li';
@@ -286,6 +315,7 @@ function styledBlocks(html) {
           hanging: bullet ? 200 : 0,
           shading: fill,
           borders: { left, bottom: under },
+          rightTab: row ? TEXT_WIDTH : 0,
         }),
       );
     }

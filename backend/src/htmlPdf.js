@@ -13,7 +13,8 @@ import { applyFont, encodeFor } from './pdf.js';
  * It is a small subset of CSS, sized to the documents this server generates:
  * block flow with margins and padding, backgrounds and single-edge borders,
  * inline runs with their own weight and colour, unordered lists, and the
- * page-break hints. No floats, no grid, no positioning.
+ * page-break hints. No floats and no positioning; of grid, only the one row
+ * the resumes use -- `1fr auto` over inline items, the last one hard right.
  */
 
 /* --- markup ---------------------------------------------------------------- */
@@ -365,11 +366,52 @@ export function renderHtmlToPdf(html, { url } = {}) {
     return out;
   };
 
-  /** Draw runs as wrapped lines. Returns the height used. */
-  const inline = (list, x, width, style) => {
+  /** How wide runs are on one line, in millimetres. */
+  const runsWidth = (list) =>
+    list.reduce((total, run) => {
+      setFont(run.style);
+      const value = run.style['text-transform'] === 'uppercase' ? run.text.toUpperCase() : run.text;
+      return total + advanceOf(text(value.replace(/\s+/g, ' '))) + ((run.spaceBefore || 0) + (run.spaceAfter || 0)) * MM_PER_PT;
+    }, 0);
+
+  /**
+   * `display: grid` with `grid-template-columns: 1fr auto` over inline items:
+   * the school and its years, say. The last item is the auto column, as wide
+   * as its text and hard right; everything before it is the 1fr column and
+   * wraps in what is left. Null for any other grid, which flows as blocks do.
+   */
+  const splitRow = (node, style, ancestors) => {
+    if (style.display !== 'grid') return null;
+    const tracks = resolveVar(style['grid-template-columns'] || '', sheet.variables).trim().split(/\s+/);
+    if (tracks.length !== 2 || tracks[1] !== 'auto') return null;
+    const items = (node.children || []).filter((child) => child.tag !== '#text' || child.text.trim());
+    if (items.length < 2 || items.some(isBlock)) return null;
+
+    const right = runs({ ...node, children: items.slice(-1) }, style, ancestors)
+      .map((run) => ({ ...run, text: run.text.trim() }))
+      .filter((run) => run.text);
+    if (!right.length) return null;
+    return {
+      left: runs({ ...node, children: items.slice(0, -1) }, style, ancestors),
+      right,
+      gap: points(style['column-gap'] || style.gap, sheet.variables, baseSize) * MM_PER_PT,
+    };
+  };
+
+  /**
+   * Draw runs as wrapped lines. Returns the height used. `trailing` runs, if
+   * any, are drawn hard right on the first line, and every line stops short
+   * of them by `gap`.
+   */
+  const inline = (list, x, width, style, trailing = null, gap = 0) => {
     const lineHeight = Number(style['line-height'] || bodyStyle['line-height'] || 1.2);
     const size = points(style['font-size'] || `${baseSize}pt`, sheet.variables, baseSize) || baseSize;
     const step = size * lineHeight * MM_PER_PT;
+
+    const trailingWidth = trailing ? runsWidth(trailing) : 0;
+    const fullWidth = width;
+    if (trailing) width = Math.max(fullWidth - trailingWidth - gap, fullWidth / 3);
+    let first = true;
 
     // Split every run into words, keeping each word's style with it.
     const words = [];
@@ -391,8 +433,19 @@ export function renderHtmlToPdf(html, { url } = {}) {
     let used = 0;
 
     const flush = () => {
-      if (!line.length) return;
+      if (!line.length && !(first && trailing)) return;
       room(step);
+      if (first && trailing) {
+        let at = x + fullWidth - trailingWidth;
+        for (const run of trailing) {
+          at += (run.spaceBefore || 0) * MM_PER_PT;
+          setFont(run.style);
+          const value = text((run.style['text-transform'] === 'uppercase' ? run.text.toUpperCase() : run.text).replace(/\s+/g, ' '));
+          if (state.draw) doc.text(value, at, state.y + step * 0.76);
+          at += advanceOf(value) + (run.spaceAfter || 0) * MM_PER_PT;
+        }
+      }
+      first = false;
       let cursor = x;
       for (const word of line) {
         if (word.pad) {
@@ -431,6 +484,14 @@ export function renderHtmlToPdf(html, { url } = {}) {
     }
     flush();
     return used;
+  };
+
+  /** A block's inline content: a `1fr auto` row when it is one, wrapped text otherwise. */
+  const inlineOrRow = (node, style, ancestors, x, width) => {
+    const row = splitRow(node, style, ancestors);
+    return row
+      ? inline(row.left, x, width, style, row.right, row.gap)
+      : inline(runs(node, style, ancestors), x, width, style);
   };
 
   /** A block's margin and padding in points, the longhands the sheets use included. */
@@ -514,7 +575,7 @@ export function renderHtmlToPdf(html, { url } = {}) {
       }
       inline(runs(node, style, ancestors), inner.x, inner.width, style);
     } else {
-      inline(runs(node, style, ancestors), inner.x, inner.width, style);
+      inlineOrRow(node, style, ancestors, inner.x, inner.width);
     }
 
     state.y += padding.bottom * MM_PER_PT;
@@ -543,7 +604,7 @@ export function renderHtmlToPdf(html, { url } = {}) {
     if (children.some(isBlock)) {
       for (const child of children) if (isBlock(child)) block(child, [...ancestors, node], x, width, style);
     } else {
-      inline(runs(node, style, ancestors), x, width, style);
+      inlineOrRow(node, style, ancestors, x, width);
     }
     const height = state.y - startY;
     state.y = startY;
