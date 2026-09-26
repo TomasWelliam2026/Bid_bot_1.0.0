@@ -1,0 +1,41 @@
+{
+  "manifest_version": 3,
+  "name": "Jobright Live Feed",
+  "version": "2.0.0",
+  "description": "Opens jobright.ai/jobs/recommend and streams every recommendation card — title, company, link — into a live right-hand side panel.",
+
+  "minimum_chrome_version": "116",
+
+  "permissions": ["storage", "tabs", "scripting", "sidePanel"],
+  "host_permissions": [
+    "https://jobright.ai/*",
+    "https://*.jobright.ai/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*",
+    "https://api.openai.com/*"
+  ],
+
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+
+  "content_scripts": [
+    {
+      "matches": [
+        "https://jobright.ai/*",
+        "https://*.jobright.ai/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+
+  "action": {
+    "default_title": "Jobright live feed — open the side panel"
+  },
+
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  }
+}

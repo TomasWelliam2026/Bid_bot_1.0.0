@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Jiangyun Zhu - Senior Data Engineer</title>
+  <script src="./data.js"></script>
+  <style>
+    /* ------------------------------------------------------------------
+     SF-1 - a navy-on-off-white sheet, sans-serif throughout. Every section
+     is a two-column row: a bold caps label on the left in a fixed-width
+     column, the section's content on the right, with a hairline rule under
+     each row.
+
+     The holes the builder fills are the same as DE-1's: the name and contact
+     lines, #summary, #skills, the first job block, which is copied once per
+     role, the first education item, copied once per school, and the first
+     certification item, copied once per certification. Only the
+     presentation differs, so the two styles are interchangeable.
+
+     Keep tag names out of the comments below - the builder scans this file
+     with a regex, and a tag written in a comment is a tag as far as it can
+     tell.
+     ------------------------------------------------------------------ */
+    :root {
+      --navy:  #1b3a5c;
+      --ink:   #202225;
+      --body:  #3c3c3c;
+      --muted: #6b6b6b;
+      --rule:  #d7d7d7;
+      --sheet: #f7f7f5;
+
+      /* Width of every section's left-hand label column. */
+      --label-col: 128px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0 auto;
+      padding: 48px 56px 56px;
+      max-width: 8.5in;
+      font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      font-size: 12.5px;
+      line-height: 1.55;
+      color: var(--body);
+      background: var(--sheet);
+    }
+
+    a {
+      color: inherit;
+      text-decoration: underline;
+    }
+
+    /* ---------- Header ---------- */
+    h1.name {
+      margin: 0;
+      font-size: 30px;
+      font-weight: 800;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      color: var(--navy);
+    }
+
+    .contact {
+      margin: 9px 0 0;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .contact.links {
+      margin-top: 2px;
+    }
+
+    .contact .sep {
+      margin: 0 8px;
+      color: #b7b7b7;
+    }
+
+    .header-rule {
+      border: 0;
+      border-top: 1px solid var(--rule);
+      margin: 16px 0 0;
+    }
+
+    /* ---------- Section rows ----------
+     Every section is one row: a bold caps label on the left, its content on
+     the right, a hairline under the whole row. The label sits in the markup
+     right where a heading normally would; the grid is what moves it to the
+     side. */
+    .row {
+      display: grid;
+      grid-template-columns: var(--label-col) 1fr;
+      column-gap: 20px;
+      padding: 16px 0;
+      border-bottom: 1px solid var(--rule);
+    }
+
+    .row:last-of-type {
+      border-bottom: none;
+    }
+
+    h2.section {
+      margin: 0;
+      font-size: 12.5px;
+      font-weight: 700;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      color: var(--navy);
+    }
+
+    .section-body {
+      min-width: 0;
+    }
+
+    .summary {
+      margin: 0;
+      text-align: justify;
+    }
+
+    /* ---------- Two-column entry head ----------
+     Employer or school on the left, dates hard right against the row's own
+     right edge. In the markup the dates come after the employer, because
+     that is the order the builder reads them in; the grid puts them back
+     alongside without moving them. */
+    .job-head,
+    .edu-head,
+    .cert-item {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      column-gap: 16px;
+      align-items: baseline;
+    }
+
+    .job-line {
+      grid-column: 1;
+      margin: 0;
+    }
+
+    .meta {
+      grid-column: 2;
+      grid-row: 1;
+      margin: 0;
+      font-size: 12px;
+      font-weight: 600;
+      text-align: right;
+      white-space: nowrap;
+      color: var(--muted);
+    }
+
+    /* ---------- Experience ---------- */
+    .job {
+      margin-top: 14px;
+    }
+
+    .job:first-of-type {
+      margin-top: 0;
+    }
+
+    /* Company / role / dates stay together on one page, and never sit alone
+     at the bottom of a page. jobsaver's PDF renderer (htmlPdf.js) reads the
+     page-break-* forms, browsers the break-* forms -- keep both. */
+    .job-head {
+      break-inside: avoid;
+      page-break-inside: avoid;
+      break-after: avoid;
+      page-break-after: avoid;
+    }
+
+    /* Company and role are separate block elements rather than spans split by
+     a line break: some HTML-to-PDF converters drop the break tag, which ran
+     the two together as "MetaTech Lead Manager...". A block always starts a
+     new line. */
+    .company {
+      display: block;
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--ink);
+    }
+
+    .role {
+      display: block;
+      font-weight: 600;
+      color: var(--muted);
+    }
+
+    /* Bullet dots sit directly under the company name, text a little right. */
+    ul {
+      margin: 6px 0 0;
+      padding-left: 14px;
+      list-style: none;
+    }
+
+    ul li {
+      position: relative;
+      margin-bottom: 3px;
+      text-align: justify;
+    }
+
+    ul li::before {
+      content: "\2022";
+      position: absolute;
+      left: -14px;
+      color: var(--navy);
+    }
+
+    /* ---------- Education ---------- */
+    .edu-item {
+      margin-top: 10px;
+    }
+
+    .edu-item:first-of-type {
+      margin-top: 0;
+    }
+
+    /* School bold on the left with its years hard right; under it, one line
+     per degree earned there. */
+    .edu .school {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--ink);
+    }
+
+    .edu .degree {
+      color: var(--body);
+    }
+
+    /* ---------- Skills ----------
+     The builder writes one paragraph per line: the text before the first ":"
+     in a span of class "label", the colon in a span of its own, then the
+     value. However many lines come back, they flow into two columns and
+     bullet themselves the same way any other list here does. */
+    .skills {
+      columns: 2;
+      column-gap: 28px;
+    }
+
+    .skills p {
+      position: relative;
+      margin: 0 0 7px;
+      padding-left: 14px;
+      break-inside: avoid;
+    }
+
+    .skills p::before {
+      content: "\2022";
+      position: absolute;
+      left: 0;
+      color: var(--navy);
+    }
+
+    .skills p:last-child {
+      margin-bottom: 0;
+    }
+
+    .skills .label {
+      font-weight: 700;
+      color: var(--ink);
+    }
+
+    /* ---------- Certification ---------- */
+    .cert-item {
+      margin-top: 4px;
+    }
+
+    .cert-item:first-of-type {
+      margin-top: 0;
+    }
+
+    .cert-item .cert-name {
+      font-weight: 700;
+      color: var(--ink);
+    }
+
+    .cert-item .cert-note {
+      color: var(--muted);
+    }
+
+    @media print {
+      body {
+        padding: 0;
+        font-size: 10pt;
+        background: #fff;
+      }
+
+      .row {
+        break-inside: avoid;
+      }
+
+      .edu-item,
+      .cert-item {
+        page-break-inside: avoid;
+        break-inside: avoid;
+      }
+
+      .job-head {
+        page-break-inside: avoid;
+        break-inside: avoid;
+        page-break-after: avoid;
+        break-after: avoid;
+      }
+
+      ul li {
+        page-break-inside: avoid;
+        break-inside: avoid;
+      }
+    }
+  </style>
+</head>
+
+<body>
+
+  <h1 class="name">Jiangyun Zhu</h1>
+  <p class="contact">
+    jiang.y.z.1015@gmail.com<span class="sep">|</span>(310) 896-5119<span
+      class="sep">|</span>San Carlos, CA 94070
+  </p>
+  <p class="contact links"><a href="https://linkedin.com/in/jiangyun-zhu-650b8b167">LinkedIn</a></p>
+  <hr class="header-rule">
+
+  <div class="row">
+    <h2 class="section">Summary</h2>
+    <div class="section-body">
+      <p class="summary" id="summary"></p>
+    </div>
+  </div>
+
+  <div class="row">
+    <h2 class="section">Work Experience</h2>
+    <div class="section-body">
+
+      <div class="job">
+        <div class="job-head">
+          <div class="job-line">
+            <div class="company">Meta</div>
+            <div class="role">Tech Lead Manager, AI/ML Infra Capacity Data</div>
+          </div>
+          <p class="meta"><span class="location">San Francisco Bay Area</span><span class="sep"> / </span><span class="dates">Sep 2024 - Present</span></p>
+        </div>
+        <ul data-exp="0"></ul>
+      </div>
+
+      <div class="job">
+        <div class="job-head">
+          <div class="job-line">
+            <div class="company">Meta</div>
+            <div class="role">Data Engineering Manager</div>
+          </div>
+          <p class="meta"><span class="location">Menlo Park, CA</span><span class="sep"> / </span><span class="dates">Dec 2021 - Sep 2024</span></p>
+        </div>
+        <ul data-exp="1"></ul>
+      </div>
+
+      <div class="job">
+        <div class="job-head">
+          <div class="job-line">
+            <div class="company">Facebook / Meta</div>
+            <div class="role">Senior Data Engineer, Business Messaging (Messenger &amp; Instagram)</div>
+          </div>
+          <p class="meta"><span class="location">Menlo Park, CA</span><span class="sep"> / </span><span class="dates">Sep 2019 - Dec 2021</span></p>
+        </div>
+        <ul data-exp="2"></ul>
+      </div>
+
+      <div class="job">
+        <div class="job-head">
+          <div class="job-line">
+            <div class="company">Assurant</div>
+            <div class="role">Data Engineer, Insurance &amp; E-Commerce Data Systems</div>
+          </div>
+          <p class="meta"><span class="location">Atlanta, GA</span><span class="sep"> / </span><span class="dates">Aug 2016 - Sep 2019</span></p>
+        </div>
+        <ul data-exp="3"></ul>
+      </div>
+
+      <div class="job">
+        <div class="job-head">
+          <div class="job-line">
+            <div class="company">Kearney</div>
+            <div class="role">Summer Intern</div>
+          </div>
+          <p class="meta"><span class="location">Shanghai, China</span><span class="sep"> / </span><span class="dates">Apr 2013 - Oct 2013</span></p>
+        </div>
+        <ul data-exp="4"></ul>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="row">
+    <h2 class="section">Education</h2>
+    <div class="section-body">
+      <div class="edu">
+        <div class="edu-item">
+          <div class="edu-head">
+            <span class="school">Georgia Institute of Technology</span>
+            <span class="meta year">2016</span>
+          </div>
+          <div class="degree">Master of Science, Artificial Intelligence</div>
+        </div>
+        <div class="edu-item">
+          <div class="edu-head">
+            <span class="school">University of Missouri Columbia</span>
+            <span class="meta year">2015</span>
+          </div>
+          <div class="degree">Master of Science, Data Engineering</div>
+        </div>
+        <div class="edu-item">
+          <div class="edu-head">
+            <span class="school">East China University of Science and Technology</span>
+            <span class="meta year">2013</span>
+          </div>
+          <div class="degree">Bachelor of Engineering, Computer Science and Engineering</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="row">
+    <h2 class="section">Key Skills</h2>
+    <div class="section-body">
+      <div class="skills" id="skills"></div>
+    </div>
+  </div>
+
+  <!-- The first cert-item is the pattern, copied once per CERTIFICATIONS
+     entry. The whole cert-section row is removed when there are none. -->
+  <div class="row cert-section">
+    <h2 class="section">Certification</h2>
+    <div class="section-body">
+      <div class="certs">
+        <div class="cert-item">
+          <span class="cert-name">Salesforce Certified Platform Developer II</span>
+        </div>
+        <div class="cert-item">
+          <span class="cert-name">Salesforce Certified Application Architect</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    console.log("data.js loaded:", resume);
+    // Summary
+    document.getElementById("summary").textContent = resume.SUMMARY;
+
+    // Skills: text before the first ":" becomes the label, and the colon is a
+    // span of its own so the style can put it in a column.
+    const skills = document.getElementById("skills");
+    for (const line of resume.SKILLS) {
+      const i = line.indexOf(":");
+      const p = document.createElement("p");
+      if (i === -1) {
+        p.textContent = line;
+      } else {
+        const label = document.createElement("span");
+        label.className = "label";
+        label.textContent = line.slice(0, i);
+        const colon = document.createElement("span");
+        colon.className = "colon";
+        colon.textContent = ":";
+        p.append(label, colon, " " + line.slice(i + 1).trim());
+      }
+      skills.appendChild(p);
+    }
+
+    // Header: CONTACT is [name, title, location, phone, email, link, ...].
+    // This style shows no title; links go on the second contact line.
+    const [name, , ...contact] = resume.CONTACT || [];
+    if (name) document.querySelector("h1.name").textContent = name;
+    if (contact.length) {
+      const isLink = (s) => /^https?:\/\//i.test(s);
+      const fill = (line, items) => {
+        line.replaceChildren();
+        items.forEach((item, i) => {
+          if (i) {
+            const sep = document.createElement("span");
+            sep.className = "sep";
+            sep.textContent = "|";
+            line.append(sep);
+          }
+          if (isLink(item)) {
+            const a = document.createElement("a");
+            a.href = item;
+            a.textContent = /linkedin\.com/i.test(item) ? "LinkedIn" : item;
+            line.append(a);
+          } else {
+            line.append(item);
+          }
+        });
+      };
+      fill(document.querySelector(".contact:not(.links)"), contact.filter((s) => !isLink(s)));
+      fill(document.querySelector(".contact.links"), contact.filter(isLink));
+    }
+
+    // Experience: the first .job is the pattern, copied once per EXPERIENCE
+    // entry — [company, title, location, dates, ...bullets].
+    renderJobs(resume.EXPERIENCE);
+
+    // Education: the first .edu-item is the pattern, copied once per
+    // EDUCATION entry — [school, [[degree, field], ...], year]. Its first
+    // .degree line is copied once per degree, as "Degree, Field".
+    if (resume.EDUCATION?.length) {
+      const items = [...document.querySelectorAll(".edu-item")];
+      for (const [school, degrees, year] of resume.EDUCATION) {
+        const item = items[0].cloneNode(true);
+        item.querySelector(".school").textContent = school;
+        item.querySelector(".year").textContent = year;
+        const lines = [...item.querySelectorAll(".degree")];
+        for (const d of degrees || []) {
+          const line = lines[0].cloneNode(true);
+          line.textContent = Array.isArray(d) ? d.filter(Boolean).join(", ") : d;
+          lines[0].before(line);
+        }
+        lines.forEach((l) => l.remove());
+        items[0].before(item);
+      }
+      items.forEach((i) => i.remove());
+    }
+
+    // Certifications: the first .cert-item is the pattern, copied once per
+    // name; with none, the whole section goes.
+    const certs = [...document.querySelectorAll(".cert-item")];
+    if (resume.CERTIFICATIONS?.length) {
+      for (const name of resume.CERTIFICATIONS) {
+        const item = certs[0].cloneNode(true);
+        (item.querySelector(".cert-name") || item).textContent = name;
+        certs[0].before(item);
+      }
+      certs.forEach((c) => c.remove());
+    } else {
+      document.querySelector(".cert-section")?.remove();
+    }
+
+    function renderJobs(entries) {
+      const jobs = [...document.querySelectorAll(".job")];
+      const pattern = jobs[0];
+      entries.forEach(([company, role, location, dates, ...bullets], i) => {
+        const job = pattern.cloneNode(true);
+        job.querySelector(".company").textContent = company;
+        job.querySelector(".role").textContent = role;
+        job.querySelector(".location").textContent = location;
+        job.querySelector(".dates").textContent = dates;
+        const ul = job.querySelector("ul[data-exp]");
+        ul.dataset.exp = i;
+        ul.replaceChildren();
+        for (const text of bullets) {
+          const li = document.createElement("li");
+          li.textContent = text;
+          ul.appendChild(li);
+        }
+        pattern.before(job);
+      });
+      jobs.forEach((j) => j.remove());
+    }
+  </script>
+
+</body>
+
+</html>

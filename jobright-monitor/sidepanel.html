@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Jobright live feed</title>
+  <link rel="stylesheet" href="sidepanel.css">
+</head>
+<body>
+  <nav class="tabs" id="mainTabs" role="tablist" aria-label="Sections">
+    <button id="tab-generate" class="tab" role="tab"
+            aria-selected="true" aria-controls="pane-generate" tabindex="0">
+      Generate JD &amp; Resume
+    </button>
+    <button id="tab-bid" class="tab" role="tab"
+            aria-selected="false" aria-controls="pane-bid" tabindex="-1">
+      Job bid
+    </button>
+  </nav>
+
+  <!-- Everything the extension does today lives in this pane. -->
+  <section id="pane-generate" class="pane" role="tabpanel" aria-labelledby="tab-generate">
+    <header>
+      <div class="titlebar">
+        <h1>Jobright feed</h1>
+        <span id="count" class="count">0</span>
+        <button id="themeToggle" class="icon-btn" type="button"
+                aria-pressed="false" aria-label="Switch to dark mode" title="Switch to dark mode">
+          <svg id="iconMoon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false"
+               fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+          </svg>
+          <svg id="iconSun" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false"
+               fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" hidden>
+            <circle cx="12" cy="12" r="4"/>
+            <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>
+          </svg>
+        </button>
+        <button id="openSettings" class="icon-btn" type="button"
+                aria-controls="pane-profile" aria-expanded="false"
+                aria-label="Settings" title="Settings">
+          <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false"
+               fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+        </button>
+      </div>
+
+      <!-- Where the job comes from: the jobright feed, or typed in by hand.
+           Everything after the switch is the same pipeline either way. -->
+      <div id="modeSwitch" class="mode-switch" role="radiogroup" aria-label="Where jobs come from">
+        <button id="mode-auto" class="mode" type="button" role="radio"
+                aria-checked="true" aria-controls="auto-body" tabindex="0">Auto</button>
+        <button id="mode-manual" class="mode" type="button" role="radio"
+                aria-checked="false" aria-controls="manual-body" tabindex="-1">Manual</button>
+      </div>
+
+      <div id="auto-controls">
+        <div class="controls">
+          <button id="start" class="primary">Start</button>
+          <button id="stop" class="danger" disabled>Stop</button>
+          <button id="clear">Clear</button>
+        </div>
+
+        <label class="opt">
+          <input id="autoScroll" type="checkbox" checked>
+          Scroll the list to load every card
+        </label>
+
+        <label class="opt">
+          <input id="visitJobs" type="checkbox" checked>
+          Open each job · drop LinkedIn · read details
+        </label>
+
+        <label class="opt">
+          <input id="saveJobs" type="checkbox" checked>
+          POST to <code>localhost:4500/save-data</code>
+        </label>
+      </div>
+
+      <p id="manual-lead" class="hint" hidden>
+        One posting, typed in — no tab is opened and the feed is left alone.
+      </p>
+    </header>
+
+    <div id="auto-body" class="mode-body">
+      <p id="status">Idle.</p>
+      <p id="queue" hidden></p>
+
+      <ul id="list" aria-live="polite"></ul>
+
+      <p id="empty" class="empty">
+        Press <strong>Start</strong>. The recommendations page opens and every card
+        appears here as it is found.
+      </p>
+    </div>
+
+    <!-- The same generate-and-save pass the queue runs, with the two things it
+         would have read off the page typed in instead. -->
+    <div id="manual-body" class="form" hidden>
+      <label class="field-label" for="manualCompany">Company name</label>
+      <input id="manualCompany" type="text" autocomplete="off" placeholder="e.g. Acme Robotics">
+
+      <label class="field-label" for="manualTitle">Job title</label>
+      <input id="manualTitle" type="text" autocomplete="off" placeholder="e.g. Senior Backend Engineer">
+
+      <label class="field-label" for="manualUrl">Job URL</label>
+      <input id="manualUrl" type="url" autocomplete="off" placeholder="e.g. https://acme.com/careers/1234">
+
+      <label class="field-label" for="manualDescription">Job description</label>
+      <textarea id="manualDescription" rows="14"
+                placeholder="Paste the posting — responsibilities, requirements, the lot."></textarea>
+
+      <p class="hint">Sent to OpenAI with your prompt and master resume, exactly as a job read
+        from the feed is. The resume that comes back is POSTed to
+        <code>localhost:4500/save-data</code>, which writes the PDFs.</p>
+
+      <div class="controls form-actions">
+        <button id="manualGenerate" class="primary" type="button">Generate</button>
+      </div>
+
+      <p id="manualStatus" class="hint" hidden></p>
+      <div id="manualResult"></div>
+    </div>
+  </section>
+
+  <section id="pane-bid" class="pane" role="tabpanel" aria-labelledby="tab-bid" hidden>
+    <p class="empty">
+      <strong>Job bid</strong> has no behaviour yet — this pane is the shell for it.
+    </p>
+    <p class="empty">
+      <span id="bidCount">0</span> job(s) collected so far are available to it,
+      with their description, company, title and URL already read.
+    </p>
+  </section>
+
+  <!-- Opened by the "Settings" button on the Generate pane, not a top-level tab. -->
+  <section id="pane-profile" class="pane" role="region" aria-labelledby="settings-title" hidden>
+    <div class="settings-bar">
+      <button id="closeSettings" class="back" type="button">&larr; Back</button>
+      <h2 id="settings-title">Settings</h2>
+    </div>
+
+    <nav class="tabs" id="settingsTabs" role="tablist" aria-label="Settings sections">
+      <button id="subtab-chatgpt" class="tab" role="tab"
+              aria-selected="true" aria-controls="subpane-chatgpt" tabindex="0">
+        ChatGPT setting
+      </button>
+      <button id="subtab-resumeStyle" class="tab" role="tab"
+              aria-selected="false" aria-controls="subpane-resumeStyle" tabindex="-1">
+        Resume style
+      </button>
+      <button id="subtab-profile" class="tab" role="tab"
+              aria-selected="false" aria-controls="subpane-profile" tabindex="-1">
+        Profile
+      </button>
+    </nav>
+
+    <div class="form">
+      <section id="subpane-chatgpt" class="subpane" role="tabpanel" aria-labelledby="subtab-chatgpt">
+        <label class="field-label" for="apiKey">OpenAI API key</label>
+        <input id="apiKey" type="password" autocomplete="off" spellcheck="false"
+               placeholder="sk-…">
+        <label class="field-label" for="model">Model</label>
+        <select id="model">
+          <option value="gpt-4o-mini">gpt-4o-mini — fast and cheap</option>
+          <option value="gpt-4o">gpt-4o — stronger writing</option>
+          <option value="gpt-4.1-mini">gpt-4.1-mini</option>
+          <option value="gpt-4.1">gpt-4.1</option>
+          <option value="gpt-4-turbo">gpt-4-turbo</option>
+          <option value="__custom__">Custom…</option>
+        </select>
+        <input id="modelCustom" type="text" autocomplete="off" spellcheck="false"
+               placeholder="model id, e.g. gpt-4o-2024-11-20" hidden>
+        <div class="controls test-actions">
+          <button id="testConnection" type="button">Test connection</button>
+          <p id="testStatus" class="hint" hidden></p>
+        </div>
+
+        <label class="field-label" for="prompt">Prompt</label>
+        <textarea id="prompt" rows="7"
+                  placeholder="Instructions sent with each job description…"></textarea>
+        <label class="field-label" for="masterResume">Master resume</label>
+        <textarea id="masterResume" rows="12"
+                  placeholder="Paste your full resume — every role, bullet and skill. Sent with each job description so the tailored resume is built from your real experience."></textarea>
+        <p class="hint">Sent to OpenAI with every job, together with the prompt and the job description.</p>
+      </section>
+
+      <section id="subpane-resumeStyle" class="subpane" role="tabpanel" aria-labelledby="subtab-resumeStyle" hidden>
+        <label class="field-label" for="resumeStyle">Resume style</label>
+        <select id="resumeStyle">
+          <option value="DE-1">DE-1 — teal headings, sans-serif</option>
+          <option value="SF-1">SF-1 — serif, dated entries, lavender rule</option>
+        </select>
+        <div class="controls style-actions">
+          <button id="addStyle" type="button">Style add</button>
+          <button id="removeStyle" type="button" disabled>Remove style</button>
+        </div>
+        <input id="styleFile" type="file" accept=".html,.htm,text/html" hidden>
+        <p class="hint">The layout the generated resume is built with. Applies to the next job written.
+          <strong>Style add</strong> loads your own HTML template. The file needs a
+          <code>&lt;p id="summary"&gt;</code>, a <code>&lt;div id="skills"&gt;</code> and one
+          <code>&lt;ul data-exp="n"&gt;</code> per role.</p>
+        <p id="styleStatus" class="hint" hidden></p>
+      </section>
+
+      <section id="subpane-profile" class="subpane" role="tabpanel" aria-labelledby="subtab-profile" hidden>
+        <label class="field-label" for="countryName">Country name</label>
+        <input id="countryName" type="text" autocomplete="off" spellcheck="false"
+               placeholder="e.g. United States">
+        <p class="hint">Tags every application this profile saves with a country, so the shared
+          dashboard files it under that tab. Leave it blank and it won't show up under any tab there.</p>
+      </section>
+
+      <div class="controls form-actions">
+        <button id="saveProfile" class="primary" disabled>Save</button>
+        <button id="revertProfile" disabled>Revert</button>
+      </div>
+
+      <p id="profileStatus" class="hint"></p>
+    </div>
+  </section>
+
+  <script src="sidepanel.js"></script>
+</body>
+</html>

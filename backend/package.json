@@ -1,0 +1,21 @@
+{
+  "name": "jobsaver-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Receives job application payloads, renders them to PDF with jsPDF and files them under D:/data/{date}/{company}.",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "reindex": "node src/reindex.js"
+  },
+  "engines": {
+    "node": ">=22.5"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "jspdf": "^4.2.1"
+  }
+}

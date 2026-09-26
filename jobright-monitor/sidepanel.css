@@ -1,0 +1,749 @@
+/* Jobright Live Feed — side panel.
+ *
+ * The panel is docked to the right edge at whatever width it is dragged to, so
+ * nothing here is fixed-width: the column is fluid from ~240px up, and only the
+ * job list scrolls.
+ *
+ * Two structural rules everything else is built around:
+ *   .pane            is a flex column, so #list can take the leftover height
+ *   .pane[hidden]    must say display:none explicitly, because display:flex
+ *                    otherwise beats the built-in [hidden] rule
+ */
+
+/* ==========================================================================
+   Tokens
+   ========================================================================== */
+
+:root {
+  /* Light by default. Dark is an explicit, saved choice — set with the
+     titlebar's sun/moon button, not a system-preference follow — so the
+     panel does not flip underneath you just because the OS theme changes.
+     sidepanel.js stamps data-theme on <html> from the stored choice; the
+     block below overrides every token here for that case. */
+  color-scheme: light;
+
+  --bg:        #f6f6fa;  /* the canvas */
+  --surface:   #ffffff;  /* raised: header, inputs, hovered rows */
+  --sunken:    #eef0f5;  /* inset: queue strip, code, quiet pills */
+  --line:      #dcdce6;
+  --line-soft: #e8e8f0;
+
+  --fg:      #1b1b23;
+  --fg-soft: #4b4b5a;
+  --muted:   #767685;
+
+  --accent:      #6a5fdb;
+  --accent-fg:   #ffffff;
+  --accent-soft: #ece9fb;
+  --accent-line: #c7bff3;
+
+  --ok:       #12915f;
+  --ok-soft:  #e2f7ee;
+  --err:      #d6395a;
+  --err-soft: #fbe7ec;
+
+  --radius:    8px;
+  --radius-sm: 6px;
+  --pill:      999px;
+
+  --ring: 0 0 0 3px color-mix(in srgb, var(--accent) 26%, transparent);
+  --lift: 0 1px 2px rgba(20, 20, 30, 0.14);
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg:        #0f0f13;
+  --surface:   #191920;
+  --sunken:    #0a0a0e;
+  --line:      #2c2c37;
+  --line-soft: #202028;
+
+  --fg:      #eeeef4;
+  --fg-soft: #b8b8c6;
+  --muted:   #8e8e9e;
+
+  --accent:      #8b85f5;
+  --accent-fg:   #16132a;
+  --accent-soft: #242040;
+  --accent-line: #3b3572;
+
+  --ok:       #34d399;
+  --ok-soft:  #0e2a20;
+  --err:      #fb7185;
+  --err-soft: #2e1119;
+
+  --lift: 0 1px 2px rgba(0, 0, 0, 0.5);
+}
+
+/* ==========================================================================
+   Base
+   ========================================================================== */
+
+* { box-sizing: border-box; }
+
+html, body { height: 100%; }
+
+body {
+  margin: 0;
+  min-width: 240px;
+  font: 13px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: var(--fg);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+
+  /* Tab strip is fixed; the active pane takes the rest. */
+  display: flex;
+  flex-direction: column;
+}
+
+h1, h2 { margin: 0; font-size: inherit; font-weight: 600; }
+p { margin: 0; }
+
+a { color: var(--accent); }
+
+code {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 0.92em;
+}
+
+:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+  border-radius: var(--radius-sm);
+}
+
+/* Thin scrollbars: the panel is narrow enough that the default chunky ones
+   eat real estate. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border: 2px solid transparent;
+  background-clip: content-box;
+  border-radius: var(--pill);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--muted);
+  background-clip: content-box;
+}
+
+/* ==========================================================================
+   Tabs
+   ========================================================================== */
+
+.tabs {
+  flex: none;
+  display: flex;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+
+/* The generic button rules below give buttons a box and a min-width; a tab
+   wants neither, so every border is cleared and only the underline reads as
+   selection. */
+.tab {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 11px 8px 9px;
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--muted);
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: color 0.12s ease, background 0.12s ease;
+}
+.tab:hover:not(:disabled) {
+  color: var(--fg-soft);
+  background: var(--sunken);
+  border-color: transparent;
+}
+.tab[aria-selected="true"] {
+  color: var(--accent);
+  font-weight: 600;
+  background: transparent;
+  border-bottom-color: var(--accent);
+}
+.tab[aria-selected="true"]:hover { border-bottom-color: var(--accent); }
+.tab:focus-visible { box-shadow: inset var(--ring); border-radius: 0; }
+
+/* Each pane is its own column so the list inside can take the leftover
+   height. Because that sets display:flex, the hidden pane needs saying
+   explicitly — display:flex would otherwise beat [hidden]. */
+.pane {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.pane[hidden] { display: none; }
+
+/* ==========================================================================
+   Header
+   ========================================================================== */
+
+header {
+  flex: none;
+  padding: 12px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+
+.titlebar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 11px;
+}
+
+.titlebar h1 {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  font-size: 13px;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.titlebar h1::before {
+  content: "";
+  flex: none;
+  width: 5px;
+  height: 14px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+
+.count {
+  flex: none;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-radius: var(--pill);
+}
+
+/* ==========================================================================
+   Buttons
+   ========================================================================== */
+
+/* Icon-only button — the ChatGPT setting gear at the right end of the title
+   bar. Square, no min-width, and it never grows like the text buttons do. */
+.icon-btn {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  min-width: 0;
+  padding: 0;
+  color: var(--muted);
+}
+.icon-btn svg { display: block; }
+/* .icon-btn svg above beats the browser's built-in [hidden] rule on
+   specificity alone (same trap .pane[hidden] exists for) — the theme
+   toggle holds two icons and shows only one, so this has to be explicit. */
+.icon-btn svg[hidden] { display: none; }
+.icon-btn[aria-expanded="true"],
+.icon-btn[aria-pressed="true"] {
+  color: var(--accent);
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+
+.controls {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+/* ==========================================================================
+   Auto / Manual switch
+
+   A segmented control, not a third tab: Auto and Manual are two ways into the
+   same pipeline, so they sit inside the Generate pane rather than beside it.
+   The sunken track is what makes the selected half read as pressed in.
+   ========================================================================== */
+
+.mode-switch {
+  display: flex;
+  gap: 3px;
+  margin-bottom: 10px;
+  padding: 3px;
+  background: var(--sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+.mode {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 5px 8px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  box-shadow: none;
+}
+.mode:hover:not([aria-checked="true"]) {
+  color: var(--fg-soft);
+  background: var(--surface);
+  border-color: transparent;
+}
+.mode[aria-checked="true"] {
+  color: var(--accent-fg);
+  background: var(--accent);
+  border-color: var(--accent);
+  box-shadow: var(--lift);
+}
+.mode[aria-checked="true"]:hover {
+  color: var(--accent-fg);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+/* Both mode bodies are columns so the feed list inside one of them can still
+   take the leftover height; like .pane, the hidden one needs saying. */
+.mode-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.mode-body[hidden] { display: none; }
+
+#auto-controls[hidden],
+#manual-lead[hidden] { display: none; }
+
+/* The notes and the answer box under the manual form, which are the same
+   elements the feed puts on a row. */
+#manualResult { margin-top: 10px; }
+#manualResult:empty { margin-top: 0; }
+
+button {
+  flex: 1 1 auto;
+  min-width: 68px;
+  padding: 7px 11px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--fg-soft);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+button:hover:not(:disabled) {
+  color: var(--fg);
+  background: var(--sunken);
+  border-color: var(--muted);
+}
+
+button.primary {
+  color: var(--accent-fg);
+  background: var(--accent);
+  border-color: var(--accent);
+  box-shadow: var(--lift);
+}
+button.primary:hover:not(:disabled) {
+  color: var(--accent-fg);
+  background: var(--accent);
+  border-color: var(--accent);
+  filter: brightness(1.09);
+}
+
+button.danger { color: var(--err); }
+button.danger:hover:not(:disabled) {
+  color: var(--err);
+  background: var(--err-soft);
+  border-color: var(--err);
+}
+
+button:disabled {
+  opacity: 0.42;
+  cursor: default;
+  box-shadow: none;
+}
+button:disabled:hover { border-color: var(--line); }
+
+/* ==========================================================================
+   Option rows
+   ========================================================================== */
+
+.opt {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 4px -6px 0;
+  padding: 5px 6px;
+  font-size: 12px;
+  color: var(--muted);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.opt:hover { color: var(--fg-soft); background: var(--sunken); }
+.opt input[type="checkbox"] {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.opt code {
+  padding: 1px 5px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-radius: 4px;
+}
+
+/* ==========================================================================
+   Status and queue strips
+   ========================================================================== */
+
+#status {
+  flex: none;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--muted);
+  background: var(--bg);
+  border-bottom: 1px solid var(--line-soft);
+}
+#status.err { color: var(--err); }
+#status.live { color: var(--fg-soft); }
+#status.live::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 7px;
+  vertical-align: 1px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.3; transform: scale(0.8); }
+}
+
+#queue {
+  flex: none;
+  padding: 6px 12px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  background: var(--sunken);
+  border-bottom: 1px solid var(--line-soft);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#queue[hidden] { display: none; }
+
+/* ==========================================================================
+   The job list
+   ========================================================================== */
+
+#list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+li {
+  padding: 11px 12px;
+  border-bottom: 1px solid var(--line-soft);
+  transition: background 0.12s ease;
+}
+li:hover { background: var(--surface); }
+li:last-child { border-bottom: none; }
+
+/* Each arrival gets one wash of colour so the feed is visibly moving, without
+   becoming a light show. */
+li.fresh { animation: land 1.1s ease-out; }
+@keyframes land {
+  from { background: var(--accent-soft); opacity: 0.55; }
+  to   { background: transparent; opacity: 1; }
+}
+
+/* A LinkedIn posting stays visible but reads as discarded, so the filter is
+   something you can watch working rather than jobs silently vanishing. */
+li.dropped { opacity: 0.5; }
+li.dropped .job-title { text-decoration: line-through; }
+
+/* A read that failed — dimmed, but less than a deliberate drop. */
+li.failed { opacity: 0.78; }
+
+.job-title {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: inherit;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+a.job-title:hover { color: var(--accent); text-decoration: underline; }
+
+.job-company {
+  display: block;
+  margin-top: 1px;
+  font-size: 12px;
+  color: var(--fg-soft);
+  overflow-wrap: anywhere;
+}
+
+.job-meta {
+  margin-top: 3px;
+  font-size: 10.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Outcomes are pills rather than sentences of coloured text: several can sit
+   on one row, and the colour carries the meaning at a glance. */
+.job-note {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  max-width: 100%;
+  margin: 6px 4px 0 0;
+  padding: 2px 8px;
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--muted);
+  background: var(--sunken);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--pill);
+  overflow-wrap: anywhere;
+}
+.job-note.saved {
+  color: var(--ok);
+  background: var(--ok-soft);
+  border-color: transparent;
+}
+.job-note.saved::before { content: "✓"; font-weight: 700; }
+.job-note.warn {
+  color: var(--err);
+  background: var(--err-soft);
+  border-color: transparent;
+}
+
+.warn { color: var(--err); }
+
+/* ==========================================================================
+   The expandable reading
+   ========================================================================== */
+
+.detail { margin-top: 8px; }
+
+.detail > summary {
+  display: inline-block;
+  padding: 2px 0;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--accent);
+  list-style: none;
+  cursor: pointer;
+}
+.detail > summary::marker,
+.detail > summary::-webkit-details-marker { display: none; }
+.detail > summary::before {
+  content: "▸";
+  display: inline-block;
+  margin-right: 5px;
+  font-size: 9px;
+  transition: transform 0.15s ease;
+}
+.detail[open] > summary::before { transform: rotate(90deg); }
+.detail > summary:hover { text-decoration: underline; }
+
+.field { margin-top: 9px; }
+
+.field-label {
+  margin-bottom: 3px;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* Answers run long: cap them and let the block scroll rather than pushing the
+   next job off the panel. */
+.field-text {
+  max-height: 170px;
+  padding: 7px 9px;
+  overflow-y: auto;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--fg-soft);
+  background: var(--sunken);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ==========================================================================
+   The ChatGPT setting screen
+   ========================================================================== */
+
+/* Back button and title above the form; the form below scrolls on its own. */
+.settings-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+.settings-bar h2 {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.settings-bar .back { flex: none; min-width: 0; }
+
+.form {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px 12px 20px;
+}
+
+.form .field-label { margin: 13px 0 4px; }
+.form .field-label:first-child { margin-top: 0; }
+
+.form input[type="text"],
+.form input[type="password"],
+.form input[type="tel"],
+.form input[type="url"],
+.form select,
+.form textarea {
+  width: 100%;
+  padding: 7px 9px;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--fg);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+.form textarea {
+  min-height: 76px;
+  line-height: 1.5;
+  resize: vertical;
+}
+.form input::placeholder,
+.form textarea::placeholder { color: var(--muted); opacity: 0.75; }
+
+.form input:focus,
+.form select:focus,
+.form textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--ring);
+}
+
+.form select { cursor: pointer; }
+.form #modelCustom { margin-top: 6px; }
+.form #modelCustom[hidden] { display: none; }
+
+/* Short paired fields — first/last, city/state, zip/country — sit side by side
+   until the panel is dragged narrow, then stack. */
+.field-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+  gap: 9px;
+}
+.field-row .field-label { margin-top: 13px; }
+
+.form-section {
+  margin: 22px 0 4px;
+  padding-top: 15px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  border-top: 1px solid var(--line);
+}
+
+.form-actions { margin-top: 18px; }
+
+/* ==========================================================================
+   Hints and empty states
+   ========================================================================== */
+
+.hint {
+  margin-top: 9px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.hint.saved { color: var(--ok); }
+.hint.saved::before { content: "✓ "; font-weight: 700; }
+.hint.warn { color: var(--err); }
+.hint.dirty { color: var(--accent); }
+.hint.dirty::before { content: "● "; }
+
+.empty {
+  flex: none;
+  padding: 16px 14px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--muted);
+  background: var(--bg);
+  border-top: 1px solid var(--line-soft);
+}
+.empty strong { color: var(--fg-soft); font-weight: 600; }
+.empty[hidden] { display: none; }
+
+/* ==========================================================================
+   Motion preferences
+   ========================================================================== */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+.style-actions { margin-top: 6px; }
+
+/* Unlike the other .controls rows, this button sits beside its own result
+   rather than a second button — sized to its label instead of stretching,
+   so the reply has room to sit at its right on the same line. */
+.test-actions { margin-top: 6px; align-items: center; }
+.test-actions button { flex: none; }
+.test-actions .hint { margin: 0; }
