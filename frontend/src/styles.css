@@ -206,8 +206,11 @@ code, .mono { font-family: var(--mono); font-size: 0.95em; }
 .tiles { display: grid; grid-template-columns: repeat(2, 1fr); grid-template-rows: 1fr 1fr; gap: 12px; }
 
 /* A counter, not a card: the number sits beside its name rather than under it,
-   which halves the height without losing the line that says what it counts. */
+   which halves the height without losing the line that says what it counts.
+   No bottom margin: the grid's gap spaces the tiles, and a panel's own margin
+   here would push the last row past the bottom of the chart beside it. */
 .tile {
+  margin-bottom: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -567,7 +570,10 @@ tr.row-picked td { background: color-mix(in srgb, var(--accent) 10%, transparent
    overflows .tab-trend-scroll instead of compressing, and that overflow is
    the scrollbar. The legend lives outside this wrapper, in the panel proper,
    so it stays on screen at any scroll position. */
-.tab-trend-scroll { overflow-x: auto; }
+/* The y-axis is its own SVG beside the scroller, so it never scrolls away. */
+.tab-trend-body { display: flex; align-items: flex-start; margin-top: 8px; }
+.tab-trend-yaxis { flex: none; display: block; }
+.tab-trend-scroll { flex: 1; min-width: 0; overflow-x: auto; }
 .tab-trend-plot { position: relative; }
 .tab-trend-chart {
   display: block;
@@ -577,6 +583,9 @@ tr.row-picked td { background: color-mix(in srgb, var(--accent) 10%, transparent
 
 .tab-trend-grid { stroke: var(--grid); stroke-width: 1; }
 .tab-trend-axis { fill: var(--muted); font-size: 10.5px; }
+/* That day's change, on top of its vertical line. */
+.tab-trend-change { fill: var(--good); font-size: 10.5px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.tab-trend-change.zero { fill: var(--muted); font-weight: 400; }
 .tab-trend-crosshair { stroke: var(--line); stroke-width: 1; }
 
 .tab-trend-line { stroke-width: 2; fill: none; stroke-linecap: round; stroke-linejoin: round; opacity: 0.85; }
@@ -607,13 +616,14 @@ tr.row-picked td { background: color-mix(in srgb, var(--accent) 10%, transparent
 .tab-trend-tooltip-row { display: flex; align-items: center; gap: 6px; padding: 1.5px 0; font-size: 12.5px; }
 .tab-trend-tooltip-name { color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tab-trend-tooltip-value { margin-left: auto; padding-left: 10px; color: var(--text); font-weight: 650; font-variant-numeric: tabular-nums; }
+.tab-trend-tooltip-delta { min-width: 26px; text-align: right; color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
 
 .tab-trend-key { flex: 0 0 auto; width: 10px; height: 2px; border-radius: 1px; }
 
-.tab-trend-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 10px; }
+/* In the panel head, where the Table button used to be. */
+.tab-trend-legend { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px 14px; }
 .tab-trend-legend-item { display: flex; align-items: center; gap: 6px; color: var(--text-2); font-size: 12.5px; }
 
-.tab-trend-table-wrap { margin-top: 10px; max-height: 320px; overflow: auto; }
 
 /* --- Sheet sync -------------------------------------------------------- */
 .field-grid {

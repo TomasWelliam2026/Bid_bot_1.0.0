@@ -522,8 +522,8 @@ to `0` — it is the only place the threshold appears.
 | `sidepanel.html` | The panel shell — tab bar and the three panes |
 | `sidepanel.css`  | Panel styling, light and dark |
 | `sidepanel.js`   | Live rendering |
-| `resume-template.html` | Your resume, style `DE-1`: fixed half, plus the holes the model fills |
-| `resume-template-sf1.html` | The same resume, style `SF-1` |
+| `resume_temples/resume-template-DE-1.html` | Your resume, style `DE-1`: fixed half, plus the holes the model fills |
+| `resume_temples/resume-template-sf1.html` | The same resume, style `SF-1` |
 
 ## Load it
 
