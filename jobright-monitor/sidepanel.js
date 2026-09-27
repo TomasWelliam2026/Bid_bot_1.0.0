@@ -30,8 +30,35 @@ let queueRunning = false;
 
 function syncButtons() {
   const active = feedRunning || queueRunning;
-  startEl.disabled = active;
+  // Start also waits on a job board that can actually be fetched from.
+  startEl.disabled = active || !SUPPORTED_SOURCES.has(jobSource);
   stopEl.disabled = !active;
+  // The board is fixed while a run is on: switching clears the list, and a
+  // stream still running would fill it straight back up from the old board.
+  $("jobSource").disabled = active;
+}
+
+// ---------------------------------------------------------------------------
+// Job board
+//
+// The picker under Auto/Manual says where Auto fetches jobs from. Jobright,
+// Dice and Glassdoor each have a content script; Monster can be picked but
+// has no fetcher yet, so Start stays off and the panel says why. The
+// choice is remembered in this panel's own storage.
+// ---------------------------------------------------------------------------
+
+const SOURCE_NAMES = { jobright: "Jobright", dice: "Dice", glassdoor: "Glassdoor", monster: "Monster" };
+const SUPPORTED_SOURCES = new Set(["jobright", "dice", "glassdoor"]);
+// What the status line says while a run opens that board's page.
+const SOURCE_OPENING = { jobright: "Opening jobright.ai/jobs/recommend…", dice: "Opening the Dice job search…", glassdoor: "Opening the Glassdoor job search…" };
+const SOURCE_KEY = "jobSource";
+
+let jobSource = "jobright";
+try {
+  const saved = localStorage.getItem(SOURCE_KEY);
+  if (Object.hasOwn(SOURCE_NAMES, saved)) jobSource = saved;
+} catch {
+  // storage unavailable: Jobright, as before
 }
 
 // ---------------------------------------------------------------------------
@@ -293,7 +320,7 @@ chrome.runtime.onMessage.addListener((msg) => {
     if (s.signedOut) {
       setStatus("No cards — you are probably signed out of jobright.ai.", "err");
     } else if (s.streaming && !s.onRecommendPage) {
-      setStatus("That tab left the recommendations page.", "err");
+      setStatus("That tab left the job list.", "err");
     } else if (s.atLimit) {
       setStatus(`${s.accepted} new · limit reached, no more scrolling`);
     } else if (s.harvesting) {
@@ -317,12 +344,13 @@ chrome.runtime.onMessage.addListener((msg) => {
 startEl.addEventListener("click", async () => {
   if (feedRunning || queueRunning) return;
 
-  setStatus("Opening jobright.ai/jobs/recommend…", "live");
+  setStatus(SOURCE_OPENING[jobSource] || "Opening the job board…", "live");
   setRunning(true);
 
   const reply = await send({
     type: "START",
     options: {
+      source: jobSource,
       autoScroll: $("autoScroll").checked,
       visitJobs: $("visitJobs").checked,
       saveJobs: $("saveJobs").checked
@@ -364,14 +392,18 @@ $("saveJobs").addEventListener("change", (e) =>
   send({ type: "SET_SAVE", enabled: e.target.checked })
 );
 
-$("clear").addEventListener("click", async () => {
+// Empties the list here and in the worker. Clear does it on demand; changing
+// the job board does it too, so one board's jobs never sit under another's.
+async function clearList() {
   listEl.replaceChildren();
   rendered.clear();
   sawStaleClass = false;
   queueEl.hidden = true;
   updateCount();
   await send({ type: "CLEAR" });
-});
+}
+
+$("clear").addEventListener("click", clearList);
 
 // ---------------------------------------------------------------------------
 // Auto / Manual
@@ -419,6 +451,34 @@ for (const button of modeButtons) {
     next.focus();
   });
 }
+
+const jobSourceEl = $("jobSource");
+const sourceNoteEl = $("sourceNote");
+
+function selectSource(source) {
+  jobSource = source;
+  jobSourceEl.value = source;
+  const supported = SUPPORTED_SOURCES.has(source);
+  sourceNoteEl.hidden = supported;
+  sourceNoteEl.textContent = supported
+    ? ""
+    : `${SOURCE_NAMES[source]} is not connected yet — only Jobright, Dice and Glassdoor fetch jobs for now.`;
+  try {
+    localStorage.setItem(SOURCE_KEY, source);
+  } catch {
+    // not remembered; the choice still applies until the panel closes
+  }
+  syncButtons();
+}
+
+// A different board starts from an empty list.
+jobSourceEl.addEventListener("change", () => {
+  if (jobSourceEl.value === jobSource) return;
+  selectSource(jobSourceEl.value);
+  clearList();
+});
+
+selectSource(jobSource);
 
 const manualGenerateEl = $("manualGenerate");
 const manualStatusEl = $("manualStatus");

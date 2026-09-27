@@ -56,6 +56,16 @@
       </div>
 
       <div id="auto-controls">
+        <!-- Which job board Auto fetches from. Only Jobright is wired up; the
+             others can be picked, and say so, but Start stays off for them. -->
+        <select id="jobSource" class="source-select" aria-label="Job board">
+          <option value="jobright">Jobright</option>
+          <option value="dice">Dice</option>
+          <option value="glassdoor">Glassdoor</option>
+          <option value="monster">Monster</option>
+        </select>
+        <p id="sourceNote" class="hint warn source-note" hidden></p>
+
         <div class="controls">
           <button id="start" class="primary">Start</button>
           <button id="stop" class="danger" disabled>Stop</button>

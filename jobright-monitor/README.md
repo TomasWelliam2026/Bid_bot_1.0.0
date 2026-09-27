@@ -82,6 +82,66 @@ a dropped `index_top__` block that happens to be a `<section>` would shift what
 "first two" means and eat a section of real content. There is a regression test
 for exactly this case.
 
+## Dice
+
+The **job board** select under Auto/Manual picks where Auto fetches from:
+Jobright (everything above) or Dice. Glassdoor and Monster are listed but have
+no fetcher yet, so Start stays off for them.
+
+With Dice, Start opens a fixed search (`DICE_SEARCH_URL` in `background.js`:
+full-time, remote, United States, "data engineer") and `content-dice.js` reads
+it. Everything after the list (the duplicate filter, the visit queue, the
+resume, the save) is the same as for Jobright.
+
+```
+[role="listitem"]                                   <- the card
+  ├─ a[data-testid="job-search-job-detail-link"]    <- title = its aria-label,
+  │                                                    link = its href (/job-detail/<uuid>)
+  └─ [data-testid="job-card-company-name"]          <- company
+     a[href*="companyname="]                        <- fallback: ?companyname=
+```
+
+The card's *first* `aria-label` is not the title: it is a hidden overlay
+link labelled "View Details for <title> (<hash>)".
+
+- **Pages.** Dice shows about 34 jobs per page and renders each page on the
+  server, so pages 2, 3, … are fetched (`?page=N`) and read without leaving
+  the one on screen. This stops at 50 accepted jobs, the last page, or a page
+  with nothing new.
+- **Job page.** The description is `[class*="__jobDescription"]`; if Dice
+  renames that class, the `JobPosting` structured data
+  (`script#jobDetailStructuredData`) stands in, and the panel flags it as a
+  drift.
+- **No LinkedIn rule.** Every Dice page links to Dice's own LinkedIn in its
+  footer, so Jobright's "drop LinkedIn postings" check would drop them all.
+  Dice jobs are never dropped for it.
+
+## Glassdoor
+
+With Glassdoor, Start opens a fixed search (`GLASSDOOR_SEARCH_URL` in
+`background.js`: remote "data engineer" jobs) and `content-glassdoor.js`
+reads it. The rest of the pipeline is shared, and there is no LinkedIn rule,
+as on Dice.
+
+```
+li[data-test="jobListing"]                             <- the card
+  ├─ a[data-test="job-title"]                          <- title = its text,
+  │  (class JobCard_jobTitle__…)                          link = its href (/job-listing/…)
+  └─ [class*="EmployerProfile_compactEmployerName__"]  <- company
+```
+
+- **More jobs.** The list starts at about 30 cards. "Show more jobs"
+  (`button[data-test="load-more"]`) is pressed until 50 jobs are accepted,
+  the button is gone, or a press brings nothing new. A sign-up prompt over
+  the list is closed first if one appears.
+- **Job page.** The description is `[class*="JobDetails_jobDescription__"]`,
+  with the page's `JobPosting` structured data standing in if that class is
+  renamed.
+- **Bot check.** Glassdoor sometimes answers with a "Humans only" page
+  instead of results. In a normal signed-in browser this is rare. When it
+  happens the page has no cards, so nothing is found. Pass the check in the
+  tab and press Start again.
+
 ## What a caught item shows
 
 Every row is a job the collector did **not** already have — duplicates are
@@ -518,6 +578,8 @@ to `0` — it is the only place the threshold appears.
 |------------------|------|
 | `manifest.json`  | MV3 manifest, scoped to `jobright.ai` and `*.jobright.ai` |
 | `content.js`     | Selectors, extraction, MutationObserver, virtual-list scrolling |
+| `content-dice.js` | The same for dice.com: cards, later pages by fetch, the job page |
+| `content-glassdoor.js` | The same for glassdoor.com: cards, "Show more jobs", the job page |
 | `background.js`  | Opens the tab, guarantees an injected content script, persists jobs |
 | `sidepanel.html` | The panel shell — tab bar and the three panes |
 | `sidepanel.css`  | Panel styling, light and dark |

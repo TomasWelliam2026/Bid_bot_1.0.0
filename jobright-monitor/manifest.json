@@ -10,6 +10,8 @@
   "host_permissions": [
     "https://jobright.ai/*",
     "https://*.jobright.ai/*",
+    "https://www.dice.com/*",
+    "https://www.glassdoor.com/*",
     "http://localhost/*",
     "http://127.0.0.1/*",
     "https://api.openai.com/*"
@@ -27,6 +29,16 @@
         "https://*.jobright.ai/*"
       ],
       "js": ["content.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://www.dice.com/*"],
+      "js": ["content-dice.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://www.glassdoor.com/*"],
+      "js": ["content-glassdoor.js"],
       "run_at": "document_idle"
     }
   ],

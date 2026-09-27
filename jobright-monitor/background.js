@@ -5,6 +5,39 @@
 const ORIGINS = ["https://jobright.ai", "https://www.jobright.ai"];
 const TARGET = `${ORIGINS[0]}/jobs/recommend`;
 const RECOMMEND_PATTERNS = ORIGINS.map((o) => `${o}/jobs/recommend*`);
+
+// The job boards Auto can fetch from, picked in the panel. Each has the page
+// a run opens, the tabs that count as that page, and the content script that
+// reads it — both scripts answer the same messages, so everything after the
+// feed tab is shared.
+const DICE_SEARCH_URL =
+  "https://www.dice.com/jobs?countryCode=US&filters.employmentType=FULLTIME" +
+  "&filters.workplaceTypes=Remote&latitude=38.7945952&location=United+States" +
+  "&locationPrecision=Country&longitude=-106.5348379&q=data+engineer";
+
+const GLASSDOOR_SEARCH_URL =
+  "https://www.glassdoor.com/Job/remote-data-engineer-jobs-SRCH_IL.0,6_IS11047_KO7,20.htm" +
+  "?locId=11047&locT=S&remoteWorkType=1";
+
+const SOURCES = {
+  jobright: { name: "Jobright", url: TARGET, patterns: RECOMMEND_PATTERNS, script: "content.js" },
+  dice: { name: "Dice", url: DICE_SEARCH_URL, patterns: ["https://www.dice.com/jobs*"], script: "content-dice.js" },
+  glassdoor: {
+    name: "Glassdoor",
+    url: GLASSDOOR_SEARCH_URL,
+    patterns: ["https://www.glassdoor.com/Job/*"],
+    script: "content-glassdoor.js"
+  }
+};
+
+// Every board's list page — Stop and Clear reach whichever one is open.
+const FEED_PATTERNS = Object.values(SOURCES).flatMap((s) => s.patterns);
+
+// A job carries the board it came from; Jobright's cards predate the field.
+const sourceOf = (job) => SOURCES[job?.source] || SOURCES.jobright;
+
+const feedTabIds = async () =>
+  (await chrome.tabs.query({ url: FEED_PATTERNS })).map((t) => t.id).filter((id) => typeof id === "number");
 // A run collects at most this many, so the store holds the most recent run.
 // Keep in step with MAX_ITEMS in content.js and sidepanel.js.
 const MAX_STORED = 50;
@@ -293,19 +326,21 @@ function waitForComplete(tabId, timeoutMs = 30000, signal) {
 // The tab is focused rather than opened in the background on purpose: the list
 // is virtualized, and a backgrounded tab throttles timers and may not mount
 // offscreen rows at all, which would stall the harvest.
-async function openFeedTab() {
-  const tabs = await chrome.tabs.query({ url: RECOMMEND_PATTERNS });
+async function openFeedTab(source = SOURCES.jobright) {
+  const tabs = await chrome.tabs.query({ url: source.patterns });
   const existing = tabs.find((t) => typeof t.id === "number");
 
   if (existing) {
-    await chrome.tabs.update(existing.id, { active: true });
+    // A Dice or Glassdoor tab on some other search is sent to the configured one.
+    const onTarget = source === SOURCES.jobright || existing.url === source.url;
+    await chrome.tabs.update(existing.id, onTarget ? { active: true } : { active: true, url: source.url });
     await chrome.windows.update(existing.windowId, { focused: true }).catch(() => {});
-    if (existing.status !== "complete") await waitForComplete(existing.id);
+    if (!onTarget || existing.status !== "complete") await waitForComplete(existing.id);
     feedTabId = existing.id;
     return existing.id;
   }
 
-  const tab = await chrome.tabs.create({ url: TARGET, active: true });
+  const tab = await chrome.tabs.create({ url: source.url, active: true });
   await waitForComplete(tab.id);
   feedTabId = tab.id;
   return tab.id;
@@ -341,18 +376,18 @@ async function ping(tabId) {
   }
 }
 
-async function ensureContentScript(tabId, { attempts = 5, gapMs = 300, signal } = {}) {
+async function ensureContentScript(tabId, { attempts = 5, gapMs = 300, signal, script = "content.js" } = {}) {
   if (await ping(tabId)) return;
 
   let lastError = null;
   for (let i = 0; i < attempts; i++) {
     if (signal?.aborted) throw new Error(STOPPED);
     try {
-      // content.js no-ops on re-injection, so injecting a tab that already has
-      // it costs nothing and cannot double up the stream.
+      // Both content scripts no-op on re-injection, so injecting a tab that
+      // already has one costs nothing and cannot double up the stream.
       await chrome.scripting.executeScript({
         target: { tabId, allFrames: false },
-        files: ["content.js"]
+        files: [script]
       });
     } catch (err) {
       lastError = err; // navigated mid-inject, or not an injectable page
@@ -363,14 +398,14 @@ async function ensureContentScript(tabId, { attempts = 5, gapMs = 300, signal } 
   }
 
   throw new Error(
-    "the jobright tab is not responding" +
+    "the job board tab is not responding" +
       (lastError ? ` (injection failed: ${lastError.message})` : "") +
       " — try reloading it"
   );
 }
 
-async function tell(tabId, message) {
-  await ensureContentScript(tabId);
+async function tell(tabId, message, script) {
+  await ensureContentScript(tabId, { script });
   return chrome.tabs.sendMessage(tabId, message);
 }
 
@@ -1742,7 +1777,7 @@ async function visitJob(job, signal) {
 
   try {
     await waitForComplete(tab.id, DETAIL_LOAD_TIMEOUT, signal);
-    await ensureContentScript(tab.id, { signal });
+    await ensureContentScript(tab.id, { signal, script: sourceOf(job).script });
     const detail = await chrome.tabs.sendMessage(tab.id, { type: "SCRAPE_DETAIL" });
     if (signal?.aborted) throw new Error(STOPPED);
     if (!detail || typeof detail !== "object") {
@@ -1771,12 +1806,19 @@ async function handle(msg) {
     // Opening the URL and starting the stream are one action, so the panel
     // only has to say "start".
     case "START": {
+      // Only boards with a content script can be fetched from. The panel
+      // keeps Start off for the others; this is the same rule where the work
+      // happens.
+      const sourceKey = msg.options?.source || "jobright";
+      const source = SOURCES[sourceKey];
+      if (!source) return { ok: false, error: `${sourceKey} is not supported yet — only Jobright, Dice and Glassdoor` };
+
       visitEnabled = msg.options?.visitJobs !== false;
       saveEnabled = msg.options?.saveJobs !== false;
       beginRun();
 
-      const tabId = await openFeedTab();
-      const reply = await tell(tabId, { type: "START_STREAM", options: msg.options });
+      const tabId = await openFeedTab(source);
+      const reply = await tell(tabId, { type: "START_STREAM", options: msg.options }, source.script);
 
       // Anything left over from a previous Stop resumes now.
       tellFeed({ type: "ACCEPTED", count: acceptedCount });
@@ -1794,14 +1836,13 @@ async function handle(msg) {
       visitEnabled = false;
       abortRun();
 
-      const tabs = await chrome.tabs.query({ url: RECOMMEND_PATTERNS });
-      const tab = tabs.find((t) => typeof t.id === "number");
-      const stoppedFeed = tab
-        ? await chrome.tabs
-            .sendMessage(tab.id, { type: "STOP_STREAM" })
-            .then(() => true)
-            .catch(() => false)
-        : false;
+      // Every board's list tab, in case more than one is open.
+      const stopped = await Promise.all(
+        (await feedTabIds()).map((id) =>
+          chrome.tabs.sendMessage(id, { type: "STOP_STREAM" }).then(() => true, () => false)
+        )
+      );
+      const stoppedFeed = stopped.some(Boolean);
 
       queueStatus({ stopped: true });
       return { ok: true, stoppedFeed, pending: queue.length };
@@ -1860,13 +1901,12 @@ async function handle(msg) {
       generatedCount = 0;
       await clearJobs();
 
-      const tabs = await chrome.tabs.query({ url: RECOMMEND_PATTERNS });
-      const tab = tabs.find((t) => typeof t.id === "number");
-
       // Forget, do not re-scan. Clear empties the list and leaves it empty;
-      // dropping the tab's dedupe only makes sure the next Start can find
+      // dropping each tab's dedupe only makes sure the next Start can find
       // those cards again rather than treating them as already seen.
-      if (tab) await chrome.tabs.sendMessage(tab.id, { type: "FORGET" }).catch(() => {});
+      for (const id of await feedTabIds()) {
+        await chrome.tabs.sendMessage(id, { type: "FORGET" }).catch(() => {});
+      }
       return { ok: true };
     }
 

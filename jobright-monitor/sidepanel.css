@@ -319,6 +319,32 @@ header {
   border-color: var(--accent);
 }
 
+/* The job-board picker under Auto/Manual, styled like the settings selects. */
+.source-select {
+  width: 100%;
+  margin-bottom: 10px;
+  padding: 6px 9px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--fg);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+.source-select:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.source-select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--ring);
+}
+.source-note { margin: -4px 0 8px; }
+.source-note[hidden] { display: none; }
+
 /* Both mode bodies are columns so the feed list inside one of them can still
    take the leftover height; like .pane, the hidden one needs saying. */
 .mode-body {
