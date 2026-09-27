@@ -719,8 +719,17 @@ async function loadTemplate(style) {
   if (templateCache.has(key)) return templateCache.get(key);
 
   const file = RESUME_STYLES[key];
-  const res = await fetch(chrome.runtime.getURL(file));
-  if (!res.ok) throw new Error(`could not read ${file}`);
+  // A file missing from the extension folder rejects with "Failed to fetch"
+  // rather than answering 404 — typically the templates were moved and the
+  // extension is still running the code from before.
+  const unreadable = `could not read ${file} — check it exists, then reload the extension in chrome://extensions`;
+  let res;
+  try {
+    res = await fetch(chrome.runtime.getURL(file));
+  } catch {
+    throw new Error(unreadable);
+  }
+  if (!res.ok) throw new Error(unreadable);
 
   const text = await res.text();
   templateCache.set(key, text);
@@ -1511,10 +1520,17 @@ async function generateResume(profile, detail, signal) {
       error:
         err?.name === "TimeoutError" || err?.name === "AbortError"
           ? `no answer in ${GENERATE_TIMEOUT_MS / 1000}s`
-          : `${err?.message || err}`
+          : isNetworkError(err)
+            ? `could not reach OpenAI (${err.message}) — check the internet connection, VPN, proxy or firewall`
+            : `${err?.message || err}`
     };
   }
 }
+
+// fetch() rejects with a bare TypeError when no response arrives at all —
+// "Failed to fetch" in Chrome — which on its own does not say which request.
+const isNetworkError = (err) =>
+  err?.name === "TypeError" && /failed to fetch|networkerror|load failed/i.test(err.message);
 
 // ---------------------------------------------------------------------------
 // Test connection
