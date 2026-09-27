@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Triet Le - Senior Salesforce Developer | Salesforce Platform Engineer</title>
+  <script src="./data.js"></script>
+  <style>
+    /* SF-2: black name, blue headline, blue section headings over a thin rule,
+       "Company | Role" job lines with the role in blue italics, and a grey
+       italic "dates | location" line under each.
+
+       Written for the backend's PDF renderer as well as the browser: class and
+       tag selectors only (no #ids, no ::before/::marker, no > + ~), unitless
+       line-heights, and hex colours. Layout it cannot draw (flex, text-align)
+       only degrades there, never misapplies. */
+    :root {
+      --ink: #1a1a1a;
+      --body: #262626;
+      --muted: #555555;
+      --blue: #1f5fa8;
+      --rule: #4a6a91;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0 auto;
+      padding: 36px 44px 44px;
+      max-width: 8.5in;
+      font-family: Calibri, Carlito, "Segoe UI", Arial, sans-serif;
+      font-size: 13px;
+      line-height: 1.55;
+      color: var(--body);
+      background: #ffffff;
+    }
+
+    a {
+      color: var(--blue);
+    }
+
+    /* ---------- Header ---------- */
+    h1.name {
+      margin: 0 0 6px;
+      font-size: 34px;
+      font-weight: 700;
+      line-height: 1.1;
+      color: var(--ink);
+    }
+
+    .title {
+      margin: 0 0 6px;
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--blue);
+    }
+
+    .contact {
+      margin: 0;
+      font-size: 11.5px;
+      color: var(--muted);
+    }
+
+    .contact .sep {
+      margin: 0 9px;
+    }
+
+    /* ---------- Sections ---------- */
+    h2.section {
+      margin: 20px 0 9px;
+      padding-bottom: 5px;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.2px;
+      text-transform: uppercase;
+      color: var(--blue);
+      border-bottom: 1px solid var(--rule);
+    }
+
+    .summary {
+      margin: 0;
+      text-align: justify;
+    }
+
+    /* ---------- Skills ---------- */
+    .skills p {
+      margin: 0 0 4px;
+      text-align: justify;
+    }
+
+    .skills .label,
+    .skills .colon {
+      font-weight: 700;
+      color: var(--ink);
+    }
+
+    /* ---------- Experience ---------- */
+    .job {
+      margin-top: 12px;
+    }
+
+    .job-head {
+      break-inside: avoid;
+      page-break-inside: avoid;
+      break-after: avoid;
+      page-break-after: avoid;
+    }
+
+    .job-line {
+      margin: 0;
+      font-size: 14px;
+    }
+
+    .company {
+      font-weight: 700;
+      color: var(--ink);
+    }
+
+    .role-sep {
+      margin: 0 7px 0 6px;
+      color: var(--blue);
+    }
+
+    .role {
+      font-style: italic;
+      color: var(--blue);
+    }
+
+    .meta {
+      margin: 1px 0 5px;
+      font-size: 11px;
+      font-style: italic;
+      color: var(--muted);
+    }
+
+    .meta .sep {
+      margin: 0 6px;
+    }
+
+    /* Blue round bullets. A list-style-image rather than ::marker: the PDF
+       renderer strips pseudo-elements and would turn every bullet's text blue,
+       while it simply ignores this and draws its own bullet. */
+    ul {
+      margin: 0;
+      padding-left: 20px;
+      list-style: disc;
+      list-style-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='6' height='6'%3E%3Ccircle cx='3' cy='3' r='2.6' fill='%231f5fa8'/%3E%3C/svg%3E");
+    }
+
+    ul li {
+      margin-bottom: 5px;
+      padding-left: 4px;
+      text-align: justify;
+      break-inside: avoid;
+      page-break-inside: avoid;
+    }
+
+    /* ---------- Certifications ---------- */
+    .certs li {
+      margin-bottom: 3px;
+    }
+
+    /* ---------- Education ---------- */
+    .edu-item {
+      margin-bottom: 8px;
+      break-inside: avoid;
+      page-break-inside: avoid;
+    }
+
+    /* School left, years hard right. A `1fr auto` grid rather than flex: it is
+       the one row layout the backend's PDF renderer draws, putting the last
+       item at the right edge; a long school name wraps beside the years. */
+    .edu-head {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      column-gap: 16px;
+      align-items: baseline;
+      margin: 0;
+    }
+
+    .school {
+      font-weight: 700;
+      color: var(--ink);
+    }
+
+    .year {
+      white-space: nowrap;
+      color: var(--body);
+    }
+
+    .degree {
+      color: var(--muted);
+    }
+
+    @media print {
+      body {
+        padding: 0;
+      }
+
+      h2.section {
+        break-after: avoid;
+        page-break-after: avoid;
+      }
+    }
+  </style>
+</head>
+
+<body>
+
+  <h1 class="name">Triet Le</h1>
+  <p class="title">Senior Salesforce Developer | Salesforce Platform Engineer</p>
+  <p class="contact">
+    (480) 666-1845<span class="sep">|</span>trietle1997@outlook.com<span class="sep">|</span>Chandler, AZ<span
+      class="sep">|</span><a href="https://www.linkedin.com/in/trietle97/">LinkedIn</a>
+  </p>
+
+  <h2 class="section">Summary</h2>
+  <p class="summary" id="summary">Senior Salesforce Developer with 7+ years of Salesforce and enterprise technology
+    experience designing, developing, integrating, and supporting scalable CRM solutions across healthcare, financial
+    services, cloud technology, SaaS, consulting, and regulated enterprise environments. Strong hands-on experience with
+    Apex, Lightning Web Components, Visualforce, Salesforce Flow, SOQL, REST APIs, asynchronous Apex, Sales Cloud,
+    Service Cloud, Experience Cloud, OmniStudio, data migration, and Salesforce integration architecture.</p>
+
+  <h2 class="section">Skills</h2>
+  <div class="skills" id="skills">
+    <p><span class="label">Salesforce Platform</span><span class="colon">:</span> Sales Cloud, Service Cloud, Experience
+      Cloud, Lightning Experience, Salesforce Platform, Salesforce CPQ, Revenue Cloud, Salesforce Data Cloud, Education
+      Cloud, Nonprofit Cloud, Manufacturing Cloud</p>
+    <p><span class="label">Healthcare &amp; Life Sciences Salesforce</span><span class="colon">:</span> Health Cloud,
+      Patient 360, Provider 360, Patient/Member Profiles, Provider Relationships, Care Coordination, Referral Management,
+      Patient Services, Healthcare Case Management, Consent-Aware Communication, Healthcare Service Operations,
+      Healthcare CRM Workflows, Regulated Case Management</p>
+  </div>
+
+  <h2 class="section">Professional Experience</h2>
+
+  <div class="job">
+    <div class="job-head">
+      <p class="job-line"><span class="company">Docker, Inc.</span><span class="role-sep">|</span><span
+          class="role">Senior Salesforce Developer</span></p>
+      <p class="meta"><span class="dates">Dec 2024 – Present</span><span class="sep">|</span><span
+          class="location">Seattle, Washington, United States</span></p>
+    </div>
+    <ul data-exp="0">
+      <li>Designed and developed Salesforce solutions across Sales Cloud, Service Cloud, Experience Cloud, Salesforce CPQ,
+        Revenue Cloud-style workflows, Apex, Lightning Web Components, OmniStudio-aware guided interactions, and MuleSoft
+        integration patterns, supporting consulting delivery, productized Salesforce applications, and client-specific
+        CRM modernization initiatives.</li>
+      <li>Supported Salesforce solutions and CRM modernization initiatives for enterprise customers across regulated
+        industries, including healthcare and financial services, with emphasis on secure customer engagement, service
+        operations, account management, data governance, and integration-heavy business processes.</li>
+    </ul>
+  </div>
+
+  <div class="job">
+    <div class="job-head">
+      <p class="job-line"><span class="company">Amazon Web Services (AWS)</span><span class="role-sep">|</span><span
+          class="role">Senior Salesforce Developer</span></p>
+      <p class="meta"><span class="dates">Jul 2023 – Dec 2024</span><span class="sep">|</span><span
+          class="location">Seattle, Washington, United States</span></p>
+    </div>
+    <ul data-exp="1">
+      <li>Delivered Salesforce solutions for healthcare and financial-services business workflows, supporting
+        patient/member service operations, provider interactions, customer account servicing, financial case management,
+        secure document processing, and compliance-sensitive CRM processes.</li>
+      <li>Developed healthcare-focused Salesforce workflows for patient/member profiles, provider relationships, service
+        requests, referral and case-management processes, using Apex, Lightning Web Components, Salesforce Flow, Service
+        Cloud, and secure data-access patterns.</li>
+    </ul>
+  </div>
+
+  <div class="job">
+    <div class="job-head">
+      <p class="job-line"><span class="company">Amazon Web Services (AWS)</span><span class="role-sep">|</span><span
+          class="role">Salesforce Developer</span></p>
+      <p class="meta"><span class="dates">Oct 2021 – Jul 2023</span><span class="sep">|</span><span
+          class="location">Seattle, Washington, United States</span></p>
+    </div>
+    <ul data-exp="2">
+      <li>Developed Java Spring Boot services for subscription billing and transaction workflows, integrating customer
+        account data with downstream financial and licensing platforms.</li>
+      <li>Built RESTful APIs supporting payment records, billing status, account adjustments, and exception handling,
+        reducing manual reconciliation effort by 15.8%.</li>
+    </ul>
+  </div>
+
+  <div class="job">
+    <div class="job-head">
+      <p class="job-line"><span class="company">Deloitte Consulting</span><span class="role-sep">|</span><span
+          class="role">Salesforce Developer</span></p>
+      <p class="meta"><span class="dates">Feb 2019 – Sep 2021</span><span class="sep">|</span><span
+          class="location">Gilbert, Arizona, United States</span></p>
+    </div>
+    <ul data-exp="3">
+      <li>Supported Salesforce healthcare CRM solutions involving patient/member profiles, provider relationships, care
+        coordination, referral workflows, service requests, consent-aware communications, case management,
+        document-driven processes, and healthcare operational reporting.</li>
+      <li>Configured healthcare-focused Salesforce data models across Accounts, Contacts, Cases, custom objects,
+        patient/member records, provider relationships, referral records, service requests, record types, validation
+        rules, and reporting structures to support reliable healthcare operations.</li>
+    </ul>
+  </div>
+
+  <div class="job">
+    <div class="job-head">
+      <p class="job-line"><span class="company">Arizona State University – W. P. Carey School of Business</span><span
+          class="role-sep">|</span><span class="role">IT Support Specialist</span></p>
+      <p class="meta"><span class="dates">Jun 2016 – Dec 2018</span><span class="sep">|</span><span
+          class="location">Tempe, Arizona, United States</span></p>
+    </div>
+    <ul data-exp="4">
+      <li>Provided enterprise technical support to more than 200 faculty and staff, troubleshooting workstation,
+        application, network, account-access, classroom technology, and peripheral issues.</li>
+      <li>Diagnosed hardware, software, connectivity, authentication, and security-related incidents while documenting
+        resolutions and escalating complex problems to senior technical teams.</li>
+    </ul>
+  </div>
+
+  <div class="job">
+    <div class="job-head">
+      <p class="job-line"><span class="company">EY</span><span class="role-sep">|</span><span class="role">Risk Advisory
+          Intern</span></p>
+      <p class="meta"><span class="dates">Jun 2018 – Aug 2018</span><span class="sep">|</span><span
+          class="location">Greater Phoenix Area</span></p>
+    </div>
+    <ul data-exp="5">
+      <li>Reviewed internal controls, technical documentation, system configurations, and technology processes while
+        supporting risk assessments for three Fortune 500 organizations.</li>
+      <li>Performed walkthroughs and control testing to identify deficiencies related to access management, operational
+        controls, system processes, and technology governance.</li>
+    </ul>
+  </div>
+
+  <!-- The first cert item is the pattern, copied once per CERTIFICATIONS
+       entry. The whole section is removed when there are none. -->
+  <div class="cert-section">
+    <h2 class="section">Certifications</h2>
+    <ul class="certs">
+      <li class="cert-item">Salesforce Certified Platform Developer II</li>
+      <li class="cert-item">Salesforce Certified Application Architect</li>
+    </ul>
+  </div>
+
+  <h2 class="section">Education</h2>
+  <!-- The first edu item is the pattern: copied once per EDUCATION entry, with
+       its first degree line copied once per degree, as "Degree, Field". -->
+  <div class="edu">
+    <div class="edu-item">
+      <p class="edu-head"><span class="school">W. P. Carey School of Business – Arizona State University</span><span
+          class="year">2015 – 2018</span></p>
+      <div class="degree">Bachelor of Science (B.S.), Business Data Analytics</div>
+      <div class="degree">Bachelor's degree, Computer and Information Systems Security/Information Assurance</div>
+    </div>
+  </div>
+
+  <script type="module">
+    // Renders the page from the `resume` global that data.js declares, the
+    // same way the extension fills this template when it builds a resume. The
+    // extension strips both scripts before building.
+    if (typeof resume !== "undefined") render(resume);
+
+    function render(resume) {
+      const $ = (sel, root = document) => root.querySelector(sel);
+      const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
+      const isLink = (s) => /^https?:\/\//i.test(s);
+
+      // Header: CONTACT is [name, title, location, phone, email, link, ...].
+      const [name, title, ...contact] = resume.CONTACT || [];
+      if (name) {
+        $("h1.name").textContent = name;
+        document.title = title ? `${name} - ${title}` : name;
+      }
+      if (title) $(".title").textContent = title;
+      if (contact.length) {
+        const line = $("p.contact");
+        line.replaceChildren();
+        contact.forEach((item, i) => {
+          if (i) {
+            const sep = document.createElement("span");
+            sep.className = "sep";
+            sep.textContent = "|";
+            line.append(sep);
+          }
+          if (isLink(item)) {
+            const a = document.createElement("a");
+            a.href = item;
+            a.textContent = /linkedin\.com/i.test(item) ? "LinkedIn" : item;
+            line.append(a);
+          } else {
+            line.append(item);
+          }
+        });
+      }
+
+      $("#summary").textContent = resume.SUMMARY || "";
+
+      // Skills: text before the first ":" is the label, the colon its own span.
+      const skills = $("#skills");
+      skills.replaceChildren();
+      for (const text of resume.SKILLS || []) {
+        const p = document.createElement("p");
+        const i = text.indexOf(":");
+        if (i === -1) {
+          p.textContent = text;
+        } else {
+          const label = document.createElement("span");
+          label.className = "label";
+          label.textContent = text.slice(0, i);
+          const colon = document.createElement("span");
+          colon.className = "colon";
+          colon.textContent = ":";
+          p.append(label, colon, " " + text.slice(i + 1).trim());
+        }
+        skills.appendChild(p);
+      }
+
+      // Experience: the first job is the pattern — [company, title, location, dates, ...bullets].
+      const jobs = $$(".job");
+      (resume.EXPERIENCE || []).forEach(([company, role, location, dates, ...bullets], i) => {
+        const job = jobs[0].cloneNode(true);
+        $(".company", job).textContent = company || "";
+        $(".role", job).textContent = role || "";
+        $(".location", job).textContent = location || "";
+        $(".dates", job).textContent = dates || "";
+        if (!location || !dates) $(".meta .sep", job)?.remove();
+        const ul = $("ul[data-exp]", job);
+        ul.dataset.exp = i;
+        ul.replaceChildren();
+        for (const text of bullets) {
+          const li = document.createElement("li");
+          li.textContent = text;
+          ul.appendChild(li);
+        }
+        jobs[0].before(job);
+      });
+      jobs.forEach((j) => j.remove());
+
+      // Education: [school, [[degree, field], ...], year].
+      const schools = $$(".edu-item");
+      if (resume.EDUCATION?.length) {
+        for (const [school, degrees, year] of resume.EDUCATION) {
+          const item = schools[0].cloneNode(true);
+          $(".school", item).textContent = school || "";
+          $(".year", item).textContent = year || "";
+          const lines = $$(".degree", item);
+          for (const d of degrees || []) {
+            const line = lines[0].cloneNode(true);
+            line.textContent = Array.isArray(d) ? d.filter(Boolean).join(", ") : d;
+            lines[0].before(line);
+          }
+          lines.forEach((l) => l.remove());
+          schools[0].before(item);
+        }
+        schools.forEach((s) => s.remove());
+      }
+
+      // Certifications: one per name; with none, the whole section goes.
+      const certs = $$(".cert-item");
+      if (resume.CERTIFICATIONS?.length) {
+        for (const cert of resume.CERTIFICATIONS) {
+          const item = certs[0].cloneNode(true);
+          item.textContent = cert;
+          certs[0].before(item);
+        }
+        certs.forEach((c) => c.remove());
+      } else {
+        $(".cert-section")?.remove();
+      }
+    }
+  </script>
+
+</body>
+
+</html>

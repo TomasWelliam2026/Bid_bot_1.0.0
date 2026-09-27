@@ -111,7 +111,8 @@ async function updateJob(key, patch) {
 
 const RESUME_STYLES = {
   "DE-1": "resume_temples/resume-template-DE-1.html",
-  "SF-1": "resume_temples/resume-template-sf1.html"
+  "SF-1": "resume_temples/resume-template-sf1.html",
+  "SF-2": "resume_temples/resume-template-sf2.html"
 };
 
 const DEFAULT_RESUME_STYLE = "DE-1";

@@ -586,6 +586,7 @@ to `0` — it is the only place the threshold appears.
 | `sidepanel.js`   | Live rendering |
 | `resume_temples/resume-template-DE-1.html` | Your resume, style `DE-1`: fixed half, plus the holes the model fills |
 | `resume_temples/resume-template-sf1.html` | The same resume, style `SF-1` |
+| `resume_temples/resume-template-sf2.html` | Style `SF-2`: blue headline and headings, "Company \| Role" in blue italics, dates before location |
 
 ## Load it
 
