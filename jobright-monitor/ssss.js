@@ -13,8 +13,8 @@ const resume = {
         "Data Platforms & Architecture: Apache Iceberg, Delta Lake, Parquet, Trino, Presto, Databricks, Snowflake, BigQuery, ETL/ELT, data modeling, distributed systems, data warehouses, data lakes, lakehouse architecture, metrics platforms, decision-support systems",
         "Cloud & Infrastructure: AWS, GCP, Azure, Linux, Docker, Kubernetes, object storage, cloud analytics platforms, GPU scheduling, Slurm, Ray",
         "Data Reliability & Observability: data quality, data lineage, data contracts, SLAs/SLOs, anomaly detection, Prometheus, Grafana, OpenTelemetry, infrastructure telemetry, time-series analytics",
-        "AI/ML Infrastructure: GPU/CPU telemetry pipelines, capacity planning analytics, resource utilization metrics, infrastructure observability, workload performance reporting, ML platform operational analytics, AI-assisted investigation workflows"
-    ],
+        "AI/ML Infrastructure: GPU/CPU telemetry pipelines, capacity planning analytics, resource utilization metrics, infrastructure observability, workload performance reporting, ML platform operational analytics, AI-assisted investigation workflows"],
+
     EXPERIENCE: [
         [
             "Meta",
@@ -104,26 +104,40 @@ const resume = {
             "Conducted quantitative and qualitative analysis across structured and semi-structured datasets, translating raw information into clear findings for client-facing workstreams.",
             "Prepared executive-ready presentations, charts, and analytical summaries to communicate insights, assumptions, methodology, and recommendations to consulting teams and stakeholders.",
             "Collaborated with consultants to structure ambiguous business problems, define analysis plans, validate assumptions, and synthesize data-backed recommendations.",
-            "Developed early foundation in business analytics, data storytelling, consulting problem-solving, client communication, and analytical modeling, later applied to enterprise-scale Data Engineering roles."
-        ]
+            "Developed early foundation in business analytics, data storytelling, consulting problem-solving, client communication, and analytical modeling, later applied to enterprise-scale Data Engineering roles."]
     ],
     EDUCATION: [
         [
             "Georgia Institute of Technology",
-            "Master of Science",
+            [
+                [
+                    "Master of Science",
+                    "Computer Science"
+                ],
+            ],
             "2016"
         ],
         [
             "University of Missouri Columbia",
-            "Master of Science",
+            [
+                [
+                    "Master of Science",
+                    "Artificial Intelligence"
+                ],
+            ],
             "2015"
         ],
         [
             "East China University of Science and Technology",
-            "Bachelor of Engineering",
+            [
+                [
+                    "Bachelor of Engineering",
+                    "Data Engineering"
+                ],
+            ],
             "2013"
-        ]
-    ]
+        ],
+    ],
 };
 
 const resume1 = {
