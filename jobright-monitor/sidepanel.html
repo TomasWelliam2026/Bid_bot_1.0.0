@@ -178,10 +178,15 @@
         <label class="field-label" for="prompt">Prompt</label>
         <textarea id="prompt" rows="7"
                   placeholder="Instructions sent with each job description…"></textarea>
-        <label class="field-label" for="masterResume">Master resume</label>
-        <textarea id="masterResume" rows="12"
+        <p class="field-label">Master resume</p>
+        <label class="switch-row" for="masterResumeUse">
+          <input id="masterResumeUse" class="switch-input" type="checkbox" role="switch" checked>
+          <span class="switch" aria-hidden="true"><span class="switch-knob"></span></span>
+          <span id="masterResumeState">Use master resume</span>
+        </label>
+        <textarea id="masterResume" rows="12" aria-label="Master resume"
                   placeholder="Paste your full resume — every role, bullet and skill. Sent with each job description so the tailored resume is built from your real experience."></textarea>
-        <p class="hint">Sent to OpenAI with every job, together with the prompt and the job description.</p>
+        <p id="masterResumeHint" class="hint">Sent to OpenAI with every job, together with the prompt and the job description.</p>
       </section>
 
       <section id="subpane-resumeStyle" class="subpane" role="tabpanel" aria-labelledby="subtab-resumeStyle" hidden>

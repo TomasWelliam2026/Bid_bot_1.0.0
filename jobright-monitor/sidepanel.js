@@ -651,7 +651,20 @@ manualGenerateEl.addEventListener("click", async () => {
 // hatch, resumeStyle with the built-in list plus any added with Style add; the
 // rest are plain inputs and textareas, read and written the same way.
 const PROFILE_TEXT_FIELDS = ["apiKey", "prompt", "masterResume", "countryName"];
-const PROFILE_FIELDS = [...PROFILE_TEXT_FIELDS, "model", "resumeStyle"];
+const PROFILE_FIELDS = [...PROFILE_TEXT_FIELDS, "model", "resumeStyle", "masterResumeMode"];
+
+// Whether the master resume goes to OpenAI with each job — a switch, saved as
+// masterResumeMode "use" or "none". Off hides the box; its text is kept, so
+// switching back on shows it again.
+const masterResumeUseEl = $("masterResumeUse");
+const masterResumeStateEl = $("masterResumeState");
+
+function syncMasterResume() {
+  const use = masterResumeUseEl.checked;
+  $("masterResume").hidden = !use;
+  $("masterResumeHint").hidden = !use;
+  masterResumeStateEl.textContent = use ? "Use master resume" : "Don't use master resume — only the job description is sent";
+}
 
 const CUSTOM_MODEL = "__custom__";
 const DEFAULT_RESUME_STYLE = "DE-1";
@@ -681,7 +694,8 @@ function setModelControls(model) {
 function readForm() {
   const out = {
     model: modelEl.value === CUSTOM_MODEL ? modelCustomEl.value.trim() : modelEl.value,
-    resumeStyle: resumeStyleEl.value
+    resumeStyle: resumeStyleEl.value,
+    masterResumeMode: masterResumeUseEl.checked ? "use" : "none"
   };
   for (const f of PROFILE_TEXT_FIELDS) out[f] = $(f).value;
   out.apiKey = out.apiKey.trim();
@@ -691,6 +705,8 @@ function readForm() {
 function fillForm(profile) {
   for (const f of PROFILE_TEXT_FIELDS) $(f).value = profile[f] ?? "";
   setModelControls(profile.model ?? "");
+  masterResumeUseEl.checked = profile.masterResumeMode !== "none";
+  syncMasterResume();
   // A style this build does not carry — one stored by a later build, or one
   // since removed — would otherwise leave the select blank. Showing the
   // default instead matches what the worker will actually fall back to, and
@@ -890,6 +906,10 @@ modelEl.addEventListener("change", () => {
 });
 resumeStyleEl.addEventListener("change", () => {
   syncRemoveStyle();
+  syncProfileButtons();
+});
+masterResumeUseEl.addEventListener("change", () => {
+  syncMasterResume();
   syncProfileButtons();
 });
 

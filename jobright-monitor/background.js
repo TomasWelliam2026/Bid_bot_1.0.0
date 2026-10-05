@@ -216,6 +216,10 @@ const PROFILE_DEFAULTS = {
   // built from real experience rather than from the job description alone.
   masterResume: "",
 
+  // Whether that resume goes out with each job: "use", or "none" to send the
+  // job description alone. "none" keeps the text, so switching back restores it.
+  masterResumeMode: "use",
+
   prompt: [
     "You are an expert resume writer. Given the job description and the master",
     "resume below, write a tailored resume and a cover letter for the job.",
@@ -1664,12 +1668,16 @@ async function generateResume(profile, detail, signal, onStage = () => {}) {
   // The prompt goes out exactly as it was typed — nothing is appended to it.
   // The user message carries the two inputs, each under its own heading so the
   // model cannot mistake the candidate's resume for part of the job posting.
-  // With no master resume set, the job description goes out on its own.
-  const masterResume = (profile.masterResume || "").trim();
+  // With the master resume switched off in ChatGPT setting, or none set, the
+  // job description goes out on its own.
+  const useMaster = profile.masterResumeMode !== "none";
+  const masterResume = useMaster ? (profile.masterResume || "").trim() : "";
   const userContent = masterResume
     ? `=== JOB DESCRIPTION ===\n${description}\n\n=== MASTER RESUME ===\n${masterResume}`
     : description;
-  if (!masterResume) {
+  if (!useMaster) {
+    console.log("[jobright] master resume switched off in ChatGPT setting — sending the job description only");
+  } else if (!masterResume) {
     console.warn("[jobright] no master resume set in ChatGPT setting — sending the job description only");
   }
 
