@@ -104,10 +104,11 @@ resume, the save) is the same as for Jobright.
 The card's *first* `aria-label` is not the title: it is a hidden overlay
 link labelled "View Details for <title> (<hash>)".
 
-- **Pages.** Dice shows about 34 jobs per page and renders each page on the
-  server, so pages 2, 3, … are fetched (`?page=N`) and read without leaving
-  the one on screen. This stops at 50 accepted jobs, the last page, or a page
-  with nothing new.
+- **Pages.** One search page at a time. Once every job on the page has been
+  checked and every one let through has had its resume built and sent, the
+  pager's `[aria-label="Next"]` is clicked and the next page is read the same
+  way. This stops at 50 accepted jobs, the last page (no Next, or a disabled
+  one), 30 pages, or Stop.
 - **Job page.** The description is `[class*="__jobDescription"]`; if Dice
   renames that class, the `JobPosting` structured data
   (`script#jobDetailStructuredData`) stands in, and the panel flags it as a
@@ -141,6 +142,35 @@ li[data-test="jobListing"]                             <- the card
   instead of results. In a normal signed-in browser this is rare. When it
   happens the page has no cards, so nothing is found. Pass the check in the
   tab and press Start again.
+
+## ZipRecruiter
+
+With ZipRecruiter, Start opens a fixed search (`ZIPRECRUITER_SEARCH_URL` in
+`background.js`: full-time remote "data engineer", ZipApply) and
+`content-ziprecruiter.js` reads it. The rest of the pipeline is shared, with no
+LinkedIn rule.
+
+```
+[class*="job_result_two_pane_v2"]         <- the card (innermost one holding a title)
+  ├─ [data-testid="serp-job-card-title"]  <- title = its text
+  ├─ [data-testid="job-card-company"]     <- company = its text
+  └─ the title's own link, else a job link (/c/…, /jobs/…, ?jid=…), else the first link
+```
+
+- **Pages.** `?page=2`, `3`, … are fetched and read without leaving the page on
+  screen, until 50 jobs are accepted or a page brings nothing new.
+- **Job page.** The description is the `flex flex-col gap-y-[16px]` element
+  that has a "Job description" heading as a child, taken without that
+  heading. Those Tailwind classes are on many elements, so the heading is what
+  picks the right one. If no such box shows up within 15 seconds, the largest
+  `job_description`-like block is used instead, then the page's `JobPosting`
+  structured data, and the job is flagged as a layout drift.
+- **Not checked against the live site.** ZipRecruiter's Cloudflare check
+  would not let an automated browser through, so these selectors come from the
+  page as described, not from a live test. If a run finds cards without links,
+  or jobs without a description, `content-ziprecruiter.js`'s selector block is
+  the place to adjust. As with Glassdoor, if the tab shows the security check
+  instead of results, pass it and press Start again.
 
 ## What a caught item shows
 
@@ -378,6 +408,20 @@ into your prompt. It is reference only — displayed, never sent. A test asserts
 the system message reaching the endpoint is character-for-character your prompt,
 with no contract and no role list added.
 
+### Two answer shapes
+
+The answer can be either shape below. Both build the same resume in every
+style:
+
+- **Arrays:** `const resume = { CONTACT: [...], SUMMARY, SKILLS, EXPERIENCE: [[company, title, location, dates, ...bullets]], CERTIFICATIONS, EDUCATION: [[school, [[degree, field]], year]] }`
+- **Profile object:** `{ name, title, contact: { email, phone, linkedin, location }, resume: { summary, skills, experience: [{ company, position, location, duration, content }], education: [{ degree, school, year }], certifications? }, coverletter? }`
+
+The profile object may stand alone, sit behind any name (`const data = {`), or
+end with `;`. The first complete `{ … }` in the answer is read.
+`fromProfileShape` in `background.js` turns it into the arrays, so the builder
+and the templates only ever see one shape. A degree in the profile object is
+one string, so it fills the degree line on its own.
+
 ### That code is parsed, never run
 
 MV3 forbids `eval` and `new Function` outright, and running text a model wrote
@@ -578,8 +622,9 @@ to `0` — it is the only place the threshold appears.
 |------------------|------|
 | `manifest.json`  | MV3 manifest, scoped to `jobright.ai` and `*.jobright.ai` |
 | `content.js`     | Selectors, extraction, MutationObserver, virtual-list scrolling |
-| `content-dice.js` | The same for dice.com: cards, later pages by fetch, the job page |
+| `content-dice.js` | The same for dice.com: cards, the pager's Next once a page is done, the job page |
 | `content-glassdoor.js` | The same for glassdoor.com: cards, "Show more jobs", the job page |
+| `content-ziprecruiter.js` | The same for ziprecruiter.com: cards, later pages by fetch, the job page |
 | `background.js`  | Opens the tab, guarantees an injected content script, persists jobs |
 | `sidepanel.html` | The panel shell — tab bar and the three panes |
 | `sidepanel.css`  | Panel styling, light and dark |
@@ -587,6 +632,7 @@ to `0` — it is the only place the threshold appears.
 | `resume_temples/resume-template-DE-1.html` | Your resume, style `DE-1`: fixed half, plus the holes the model fills |
 | `resume_temples/resume-template-sf1.html` | The same resume, style `SF-1` |
 | `resume_temples/resume-template-sf2.html` | Style `SF-2`: blue headline and headings, "Company \| Role" in blue italics, dates before location |
+| `resume_temples/resume-template-de2.html` | Style `DE-2` (Sisu_DE_2): teal headline over a teal rule, skills in a teal box, teal company over the role, location left and dates right |
 
 ## Load it
 

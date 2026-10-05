@@ -411,38 +411,6 @@ button:disabled {
 button:disabled:hover { border-color: var(--line); }
 
 /* ==========================================================================
-   Option rows
-   ========================================================================== */
-
-.opt {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  margin: 4px -6px 0;
-  padding: 5px 6px;
-  font-size: 12px;
-  color: var(--muted);
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  transition: background 0.12s ease, color 0.12s ease;
-}
-.opt:hover { color: var(--fg-soft); background: var(--sunken); }
-.opt input[type="checkbox"] {
-  flex: none;
-  width: 14px;
-  height: 14px;
-  margin: 0;
-  accent-color: var(--accent);
-  cursor: pointer;
-}
-.opt code {
-  padding: 1px 5px;
-  color: var(--accent);
-  background: var(--accent-soft);
-  border-radius: 4px;
-}
-
-/* ==========================================================================
    Status and queue strips
    ========================================================================== */
 
@@ -567,6 +535,23 @@ a.job-title:hover { color: var(--accent); text-decoration: underline; }
   border-radius: var(--pill);
   overflow-wrap: anywhere;
 }
+/* The step the worker is at on this job, live until its outcome replaces it. */
+.job-note.stage {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: var(--accent-line);
+}
+.job-note.stage::before {
+  content: "";
+  flex: none;
+  align-self: center;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: pulse 1.5s ease-in-out infinite;
+}
+.job-note.stage .elapsed { font-variant-numeric: tabular-nums; opacity: 0.75; }
 .job-note.saved {
   color: var(--ok);
   background: var(--ok-soft);

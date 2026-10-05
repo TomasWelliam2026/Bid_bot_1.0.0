@@ -12,6 +12,7 @@
     "https://*.jobright.ai/*",
     "https://www.dice.com/*",
     "https://www.glassdoor.com/*",
+    "https://www.ziprecruiter.com/*",
     "http://localhost/*",
     "http://127.0.0.1/*",
     "https://api.openai.com/*"
@@ -39,6 +40,11 @@
     {
       "matches": ["https://www.glassdoor.com/*"],
       "js": ["content-glassdoor.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://www.ziprecruiter.com/*"],
+      "js": ["content-ziprecruiter.js"],
       "run_at": "document_idle"
     }
   ],

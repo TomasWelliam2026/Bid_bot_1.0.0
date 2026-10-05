@@ -30,6 +30,9 @@ function main() {
   const COMPANY = '[data-testid="job-card-company-name"]';
   const COMPANY_LINK = 'a[href*="companyname="]';
   const PAGER = 'nav[aria-label="Pagination"]';
+  // The pager's forward control. Looked for inside the pager first, so an
+  // unrelated "Next" elsewhere on the page (a carousel) is never the one hit.
+  const NEXT = '[aria-label="Next"]';
 
   // --- the job page ----------------------------------------------------------
   // The description block carries a CSS-modules hash, so it is matched by the
@@ -42,12 +45,6 @@ function main() {
   // background.js — how many new jobs a run collects.
   const MAX_ITEMS = 50;
   const MAX_CANDIDATES = 400;
-  // Search pages after the first are fetched rather than navigated to, one at
-  // a time with a gap — this is someone's site.
-  const PAGE_GAP_MS = 800;
-  const MAX_PAGES = 20;
-
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const textOf = (el) => (el?.textContent || "").replace(/\s+/g, " ").trim();
 
   // ==========================================================================
@@ -102,7 +99,6 @@ function main() {
   const found = new Map(); // key -> job, this tab's dedupe
   let observer = null;
   let streaming = false;
-  let harvesting = false;
   let scanTimer = null;
   let contextLost = false;
   let accepted = 0; // survivors of the collector's filter, per ACCEPTED
@@ -123,7 +119,6 @@ function main() {
       type: "FEED_STATUS",
       status: {
         streaming,
-        harvesting,
         total: found.size,
         accepted,
         limit: MAX_ITEMS,
@@ -160,62 +155,46 @@ function main() {
   // ==========================================================================
   // Later pages
   //
-  // Dice pages its results (?page=2, 3, …) and renders each page on the
-  // server, so the next pages are fetched and read without leaving the one on
-  // screen. It stops once enough new jobs have been accepted, at the last
-  // page, or on a page with no new cards.
+  // One page at a time, on the page itself: the worker finishes every job
+  // found here — checked, opened, resume built, saved — and only then sends
+  // NEXT_PAGE, which clicks the pager's "Next" the way a person would. The
+  // next page's cards are then read by START_STREAM like the first page's.
   // ==========================================================================
 
-  function pageCount() {
-    const m = /(\d+)\s*of\s*(\d+)/.exec(textOf(document.querySelector(PAGER)));
-    return m ? { current: Number(m[1]), total: Number(m[2]) } : { current: 1, total: 1 };
+  function findNext() {
+    return document.querySelector(PAGER)?.querySelector(NEXT) || document.querySelector(NEXT);
   }
 
-  function pageUrl(n) {
-    const url = new URL(location.href);
-    url.searchParams.set("page", String(n));
-    return url.href;
-  }
+  const isDisabled = (el) =>
+    el.matches(":disabled") ||
+    el.getAttribute("aria-disabled") === "true" ||
+    /\bdisabled\b/i.test(el.getAttribute("class") || "");
 
-  async function harvest() {
-    if (harvesting) return;
-    harvesting = true;
-    status();
-
-    try {
-      const { current, total } = pageCount();
-      const last = Math.min(total, current + MAX_PAGES - 1);
-      for (
-        let n = current + 1;
-        n <= last && streaming && accepted < MAX_ITEMS && found.size < MAX_CANDIDATES;
-        n++
-      ) {
-        await sleep(PAGE_GAP_MS);
-        if (!streaming) break;
-        let doc;
-        try {
-          const res = await fetch(pageUrl(n), { credentials: "include" });
-          if (!res.ok) break;
-          doc = new DOMParser().parseFromString(await res.text(), "text/html");
-        } catch {
-          break; // offline or blocked — keep what was found
-        }
-        if (!scan(doc)) break;
-        status({ page: n, pages: total });
-      }
-    } finally {
-      harvesting = false;
-      status({ harvestComplete: true });
+  function clickNext() {
+    const next = findNext();
+    if (!next || isDisabled(next)) {
+      status({ lastPage: true });
+      return { ok: true, clicked: false, url: location.href };
     }
+
+    status({ paging: true });
+    const url = location.href;
+    // Answered first, clicked a beat later: if the click loads a new document
+    // this one is gone, and the worker must already have its reply.
+    setTimeout(() => {
+      next.scrollIntoView({ block: "center" });
+      next.click();
+    }, 50);
+    return { ok: true, clicked: true, url };
   }
 
   // ==========================================================================
   // Start / stop
   // ==========================================================================
 
-  function start(options = {}) {
-    const { autoScroll = true } = options;
-
+  // autoScroll is not read here: Dice's later pages are reached by NEXT_PAGE,
+  // once this page's jobs are done, not harvested up front.
+  function start() {
     if (!streaming) {
       streaming = true;
       // The list is React-rendered; cards can arrive after load.
@@ -223,11 +202,10 @@ function main() {
       observer.observe(document.body, { childList: true, subtree: true });
     }
 
-    scan();
+    const fresh = scan();
     status({ started: true });
-    if (autoScroll) harvest();
 
-    return { ok: true, total: found.size, url: location.href };
+    return { ok: true, total: found.size, fresh, url: location.href };
   }
 
   function teardown() {
@@ -320,6 +298,10 @@ function main() {
 
       case "START_STREAM":
         sendResponse(start(msg.options));
+        return false;
+
+      case "NEXT_PAGE":
+        sendResponse(clickNext());
         return false;
 
       case "STOP_STREAM":

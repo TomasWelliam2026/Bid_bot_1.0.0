@@ -360,13 +360,14 @@
   </div>
 
   <script type="module">
-    console.log("data.js loaded:", resume);
+    const data = toArrays(resume);
+    console.log("data.js loaded:", data);
     // Summary
-    document.getElementById("summary").textContent = resume.SUMMARY;
+    document.getElementById("summary").textContent = data.SUMMARY;
 
     // Skills: text before the first ":" becomes the bold label
     const skills = document.getElementById("skills");
-    for (const line of resume.SKILLS) {
+    for (const line of data.SKILLS) {
       const i = line.indexOf(":");
       const p = document.createElement("p");
       if (i === -1) {
@@ -384,7 +385,7 @@
     }
 
     // Header: CONTACT is [name, title, location, phone, email, link, ...]
-    const [name, title, ...contact] = resume.CONTACT || [];
+    const [name, title, ...contact] = data.CONTACT || [];
     if (name) document.querySelector("h1.name").textContent = name;
     if (title) document.querySelector(".title").textContent = title;
     if (contact.length) {
@@ -410,14 +411,14 @@
 
     // Experience: the first .job is the pattern, copied once per EXPERIENCE
     // entry — [company, title, location, dates, ...bullets].
-    renderJobs(resume.EXPERIENCE);
+    renderJobs(data.EXPERIENCE);
 
     // Education: the first .edu-item is the pattern, copied once per
     // EDUCATION entry — [school, [[degree, field], ...], year]. Its first
     // .degree line is copied once per degree, as "Degree, Field".
-    if (resume.EDUCATION?.length) {
+    if (data.EDUCATION?.length) {
       const items = [...document.querySelectorAll(".edu-item")];
-      for (const [school, degrees, year] of resume.EDUCATION) {
+      for (const [school, degrees, year] of data.EDUCATION) {
         const item = items[0].cloneNode(true);
         item.querySelector(".school").textContent = school;
         item.querySelector(".year").textContent = year;
@@ -436,8 +437,8 @@
     // Certifications: the first .cert-item is the pattern, copied once per
     // name; with none, the whole section goes.
     const certs = [...document.querySelectorAll(".cert-item")];
-    if (resume.CERTIFICATIONS?.length) {
-      for (const name of resume.CERTIFICATIONS) {
+    if (data.CERTIFICATIONS?.length) {
+      for (const name of data.CERTIFICATIONS) {
         const item = certs[0].cloneNode(true);
         (item.querySelector(".cert-name") || item).textContent = name;
         certs[0].before(item);
@@ -467,6 +468,22 @@
         pattern.before(job);
       });
       jobs.forEach((j) => j.remove());
+    }
+    // data.js may hold either shape the extension reads: the CONTACT/SUMMARY
+    // arrays, or the profile object ({ name, title, contact, resume: { summary,
+    // skills, experience, education } }). The page is filled from the arrays.
+    function toArrays(d) {
+      if (!d || typeof d.SUMMARY === "string") return d;
+      const r = d.resume || d;
+      const c = d.contact || {};
+      return {
+        CONTACT: [d.name || "", d.title || "", ...[c.location, c.phone, c.email, c.linkedin].filter(Boolean)],
+        SUMMARY: r.summary || "",
+        SKILLS: r.skills || [],
+        EXPERIENCE: (r.experience || []).map((e) => [e.company, e.position, e.location, e.duration, ...(e.content || [])]),
+        CERTIFICATIONS: r.certifications || [],
+        EDUCATION: (r.education || []).map((e) => [e.school, [[e.degree, e.field]], e.year])
+      };
     }
   </script>
 

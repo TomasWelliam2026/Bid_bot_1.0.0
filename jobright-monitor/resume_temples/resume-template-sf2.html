@@ -360,7 +360,25 @@
     // Renders the page from the `resume` global that data.js declares, the
     // same way the extension fills this template when it builds a resume. The
     // extension strips both scripts before building.
-    if (typeof resume !== "undefined") render(resume);
+    if (typeof resume !== "undefined") render(toArrays(resume));
+
+    // data.js may hold either shape the extension reads: the CONTACT/SUMMARY
+    // arrays, or the profile object ({ name, title, contact, resume: { summary,
+    // skills, experience, education } }). The page is filled from the arrays.
+    function toArrays(d) {
+      if (!d || typeof d.SUMMARY === "string") return d;
+      const r = d.resume || d;
+      const c = d.contact || {};
+      return {
+        CONTACT: [d.name || "", d.title || "", ...[c.location, c.phone, c.email, c.linkedin].filter(Boolean)],
+        SUMMARY: r.summary || "",
+        SKILLS: r.skills || [],
+        EXPERIENCE: (r.experience || []).map((e) => [e.company, e.position, e.location, e.duration, ...(e.content || [])]),
+        CERTIFICATIONS: r.certifications || [],
+        EDUCATION: (r.education || []).map((e) => [e.school, [[e.degree, e.field]], e.year])
+      };
+    }
+
 
     function render(resume) {
       const $ = (sel, root = document) => root.querySelector(sel);

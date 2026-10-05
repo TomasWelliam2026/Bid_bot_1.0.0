@@ -42,15 +42,21 @@ function syncButtons() {
 // Job board
 //
 // The picker under Auto/Manual says where Auto fetches jobs from. Jobright,
-// Dice and Glassdoor each have a content script; Monster can be picked but
-// has no fetcher yet, so Start stays off and the panel says why. The
+// Dice, Glassdoor and ZipRecruiter each have a content script; Monster can be
+// picked but has no fetcher yet, so Start stays off and the panel says why. The
 // choice is remembered in this panel's own storage.
 // ---------------------------------------------------------------------------
 
-const SOURCE_NAMES = { jobright: "Jobright", dice: "Dice", glassdoor: "Glassdoor", monster: "Monster" };
-const SUPPORTED_SOURCES = new Set(["jobright", "dice", "glassdoor"]);
+const SOURCE_NAMES = {
+  jobright: "Jobright",
+  dice: "Dice",
+  glassdoor: "Glassdoor",
+  monster: "Monster",
+  ziprecruiter: "ZipRecruiter"
+};
+const SUPPORTED_SOURCES = new Set(["jobright", "dice", "glassdoor", "ziprecruiter"]);
 // What the status line says while a run opens that board's page.
-const SOURCE_OPENING = { jobright: "Opening jobright.ai/jobs/recommend…", dice: "Opening the Dice job search…", glassdoor: "Opening the Glassdoor job search…" };
+const SOURCE_OPENING = { jobright: "Opening jobright.ai/jobs/recommend…", dice: "Opening the Dice job search…", glassdoor: "Opening the Glassdoor job search…", ziprecruiter: "Opening the ZipRecruiter job search…" };
 const SOURCE_KEY = "jobSource";
 
 let jobSource = "jobright";
@@ -117,12 +123,14 @@ function addJob(job, { animate = true } = {}) {
     li.appendChild(company);
   }
 
-  const meta = document.createElement("div");
-  meta.className = "job-meta";
-  meta.textContent = `#${job.index}`;
-  if (!job.company) meta.textContent += " · no company found";
-  if (!job.href) meta.textContent += " · no link";
-  li.appendChild(meta);
+  // Only what went wrong reading the card; a clean card gets no meta line.
+  const missing = [!job.company && "no company found", !job.href && "no link"].filter(Boolean);
+  if (missing.length) {
+    const meta = document.createElement("div");
+    meta.className = "job-meta";
+    meta.textContent = missing.join(" · ");
+    li.appendChild(meta);
+  }
 
   listEl.appendChild(li);
 
@@ -138,10 +146,62 @@ function addJob(job, { animate = true } = {}) {
 // own page.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// The step the worker is at on the job it is working on, shown on that job's
+// own row until its outcome arrives. The worker sends it with every queue
+// status, so a panel opened mid-run picks it up too. The seconds count shows
+// the slow wait — ChatGPT — is still moving rather than stuck.
+// ---------------------------------------------------------------------------
+
+const STAGE_TEXT = {
+  opening: "Opening the job page…",
+  reading: "Reading the job description…",
+  waiting: "Waiting for data from ChatGPT…",
+  building: "Building resume…",
+  saving: "Sending to localhost:4500…"
+};
+
+let stageEl = null;
+let stageTimer = null;
+
+function showStage(active) {
+  const li = active && rendered.get(active.key);
+  if (!li || li.dataset.detailed) {
+    clearStage();
+    return;
+  }
+
+  if (stageEl?.parentNode !== li) {
+    clearStage();
+    stageEl = tag("job-note stage", "");
+    stageEl.setAttribute("role", "status");
+    stageEl.append(document.createElement("span"), document.createElement("span"));
+    stageEl.lastChild.className = "elapsed";
+    li.appendChild(stageEl);
+  }
+
+  stageEl.firstChild.textContent = STAGE_TEXT[active.stage] || active.stage;
+  const tick = () => {
+    const secs = Math.max(0, Math.round((Date.now() - active.at) / 1000));
+    stageEl.lastChild.textContent = secs >= 3 ? `${secs}s` : "";
+  };
+  tick();
+  clearInterval(stageTimer);
+  stageTimer = setInterval(tick, 1000);
+}
+
+function clearStage() {
+  clearInterval(stageTimer);
+  stageTimer = null;
+  stageEl?.remove();
+  stageEl = null;
+}
+
 function addDetail(key, detail) {
   const li = rendered.get(key);
   if (!li || li.dataset.detailed) return;
   li.dataset.detailed = "1";
+  if (stageEl?.parentNode === li) clearStage();
 
   if (!detail?.ok) {
     li.classList.add("failed");
@@ -296,10 +356,12 @@ chrome.runtime.onMessage.addListener((msg) => {
     const s = msg.status;
     queueRunning = s.draining;
     syncButtons();
+    showStage(s.active);
     queueEl.hidden = !s.draining && !s.pending;
     const tally = `${s.visited} read · ${s.generated} written · ${s.saved} saved · ${s.skipped} filtered out`;
+    const doing = s.active ? ` · ${s.active.title} — ${STAGE_TEXT[s.active.stage] || s.active.stage}` : "";
     queueEl.textContent = s.draining
-      ? `Reading · ${s.pending} queued · ${tally}${s.current ? ` · ${s.current}` : ""}`
+      ? `Reading · ${s.pending} queued · ${tally}${doing}`
       : tally;
     return false;
   }
@@ -309,6 +371,8 @@ chrome.runtime.onMessage.addListener((msg) => {
   // listening.
   if (msg?.type === "MANUAL_STATUS") {
     if (msg.stage === "generating") showManualStatus("Writing the resume — this takes as long as the model does…");
+    if (msg.stage === "waiting") showManualStatus("Waiting for data from ChatGPT — this takes as long as the model does…");
+    if (msg.stage === "building") showManualStatus("Answer received — building the resume…");
     if (msg.stage === "saving") showManualStatus("Resume built — sending it to localhost:4500…");
     return false;
   }
@@ -323,6 +387,10 @@ chrome.runtime.onMessage.addListener((msg) => {
       setStatus("That tab left the job list.", "err");
     } else if (s.atLimit) {
       setStatus(`${s.accepted} new · limit reached, no more scrolling`);
+    } else if (s.paging) {
+      setStatus(`This page is done · clicking Next for more jobs… ${s.accepted} new so far`, "live");
+    } else if (s.lastPage) {
+      setStatus(`Last page reached · ${s.accepted} new of ${s.total} seen`);
     } else if (s.harvesting) {
       setStatus(`Scrolling the list… ${s.accepted} new of ${s.limit}`, "live");
     } else if (s.streaming) {
@@ -347,14 +415,11 @@ startEl.addEventListener("click", async () => {
   setStatus(SOURCE_OPENING[jobSource] || "Opening the job board…", "live");
   setRunning(true);
 
+  // A run always does the whole job: scroll for every card, open each one,
+  // and send what it builds to the collector.
   const reply = await send({
     type: "START",
-    options: {
-      source: jobSource,
-      autoScroll: $("autoScroll").checked,
-      visitJobs: $("visitJobs").checked,
-      saveJobs: $("saveJobs").checked
-    }
+    options: { source: jobSource, autoScroll: true, visitJobs: true, saveJobs: true }
   });
 
   if (!reply.ok) {
@@ -382,15 +447,6 @@ stopEl.addEventListener("click", async () => {
     reply.ok ? "" : "err"
   );
 });
-
-// Toggling mid-run takes effect immediately rather than waiting for a restart.
-$("visitJobs").addEventListener("change", (e) =>
-  send({ type: "SET_VISIT", enabled: e.target.checked })
-);
-
-$("saveJobs").addEventListener("change", (e) =>
-  send({ type: "SET_SAVE", enabled: e.target.checked })
-);
 
 // Empties the list here and in the worker. Clear does it on demand; changing
 // the job board does it too, so one board's jobs never sit under another's.
@@ -432,8 +488,8 @@ function selectMode(button) {
     b.tabIndex = on ? 0 : -1; // one stop in the tab order, arrows move within
     $(b.getAttribute("aria-controls")).hidden = !on;
   }
-  // The feed's own controls belong to Auto: Start/Stop and the three options
-  // have nothing to act on when the job is being typed in.
+  // The feed's own controls belong to Auto: Start/Stop/Clear and the board
+  // picker have nothing to act on when the job is being typed in.
   const manual = button.id === "mode-manual";
   autoControlsEl.hidden = manual;
   manualLeadEl.hidden = !manual;
@@ -462,7 +518,7 @@ function selectSource(source) {
   sourceNoteEl.hidden = supported;
   sourceNoteEl.textContent = supported
     ? ""
-    : `${SOURCE_NAMES[source]} is not connected yet — only Jobright, Dice and Glassdoor fetch jobs for now.`;
+    : `${SOURCE_NAMES[source]} is not connected yet — only Jobright, Dice, Glassdoor and ZipRecruiter fetch jobs for now.`;
   try {
     localStorage.setItem(SOURCE_KEY, source);
   } catch {

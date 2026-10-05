@@ -63,6 +63,7 @@
           <option value="dice">Dice</option>
           <option value="glassdoor">Glassdoor</option>
           <option value="monster">Monster</option>
+          <option value="ziprecruiter">ZipRecruiter</option>
         </select>
         <p id="sourceNote" class="hint warn source-note" hidden></p>
 
@@ -71,21 +72,6 @@
           <button id="stop" class="danger" disabled>Stop</button>
           <button id="clear">Clear</button>
         </div>
-
-        <label class="opt">
-          <input id="autoScroll" type="checkbox" checked>
-          Scroll the list to load every card
-        </label>
-
-        <label class="opt">
-          <input id="visitJobs" type="checkbox" checked>
-          Open each job · drop LinkedIn · read details
-        </label>
-
-        <label class="opt">
-          <input id="saveJobs" type="checkbox" checked>
-          POST to <code>localhost:4500/save-data</code>
-        </label>
       </div>
 
       <p id="manual-lead" class="hint" hidden>
@@ -178,6 +164,8 @@
           <option value="gpt-4.1-mini">gpt-4.1-mini</option>
           <option value="gpt-4.1">gpt-4.1</option>
           <option value="gpt-4-turbo">gpt-4-turbo</option>
+          <option value="gpt-5.6-sol">gpt-5.6-sol</option>
+          <option value="gpt-5.6-terra">gpt-5.6-terra</option>
           <option value="__custom__">Custom…</option>
         </select>
         <input id="modelCustom" type="text" autocomplete="off" spellcheck="false"
@@ -200,6 +188,7 @@
         <label class="field-label" for="resumeStyle">Resume style</label>
         <select id="resumeStyle">
           <option value="DE-1">Sisu_DE_1</option>
+          <option value="DE-2">Sisu_DE_2</option>
           <option value="SF-1">SF Resume style 1</option>
           <option value="SF-2">CreditStar_SF_1</option>
         </select>

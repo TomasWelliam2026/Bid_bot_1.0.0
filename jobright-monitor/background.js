@@ -15,6 +15,13 @@ const DICE_SEARCH_URL =
   "&filters.workplaceTypes=Remote&latitude=38.7945952&location=United+States" +
   "&locationPrecision=Country&longitude=-106.5348379&q=data+engineer";
 
+const ZIPRECRUITER_SEARCH_URL =
+  "https://www.ziprecruiter.com/jobs-search?search=Full-time+Data+Engineer&location=United+States" +
+  "&location_explicitly_set=true&radius=25&days=&refine_by_employment=employment_type%3Afull_time" +
+  "&refine_by_location_type=only_remote&refine_by_salary=&refine_by_salary_ceil=" +
+  "&refine_by_apply_type=has_zipapply&refine_by_experience_level=&apply_types_explicitly_set=true" +
+  "&employment_types_explicitly_set=true&location_types_explicitly_set=true&lk=pM--mREKRcWpgbzqqaJUgQ";
+
 const GLASSDOOR_SEARCH_URL =
   "https://www.glassdoor.com/Job/remote-data-engineer-jobs-SRCH_IL.0,6_IS11047_KO7,20.htm" +
   "?locId=11047&locT=S&remoteWorkType=1";
@@ -27,6 +34,12 @@ const SOURCES = {
     url: GLASSDOOR_SEARCH_URL,
     patterns: ["https://www.glassdoor.com/Job/*"],
     script: "content-glassdoor.js"
+  },
+  ziprecruiter: {
+    name: "ZipRecruiter",
+    url: ZIPRECRUITER_SEARCH_URL,
+    patterns: ["https://www.ziprecruiter.com/jobs-search*"],
+    script: "content-ziprecruiter.js"
   }
 };
 
@@ -112,7 +125,8 @@ async function updateJob(key, patch) {
 const RESUME_STYLES = {
   "DE-1": "resume_temples/resume-template-DE-1.html",
   "SF-1": "resume_temples/resume-template-sf1.html",
-  "SF-2": "resume_temples/resume-template-sf2.html"
+  "SF-2": "resume_temples/resume-template-sf2.html",
+  "DE-2": "resume_temples/resume-template-de2.html"
 };
 
 const DEFAULT_RESUME_STYLE = "DE-1";
@@ -332,7 +346,7 @@ async function openFeedTab(source = SOURCES.jobright) {
   const existing = tabs.find((t) => typeof t.id === "number");
 
   if (existing) {
-    // A Dice or Glassdoor tab on some other search is sent to the configured one.
+    // A Dice, Glassdoor or ZipRecruiter tab on some other search is sent to the configured one.
     const onTarget = source === SOURCES.jobright || existing.url === source.url;
     await chrome.tabs.update(existing.id, onTarget ? { active: true } : { active: true, url: source.url });
     await chrome.windows.update(existing.windowId, { focused: true }).catch(() => {});
@@ -478,6 +492,37 @@ function abortRun() {
   runAbort = null;
 }
 
+// Keeping the worker alive
+//
+// Chrome stops an idle extension service worker after 30s, and a pending
+// fetch() does not count as activity. Generation routinely takes longer than
+// that, so without this the worker was killed mid-answer: the job stayed in
+// the list, the resume never arrived, no error was ever reported, and the
+// in-memory queue went with it. Any extension API call resets the idle timer,
+// so a cheap one is made on an interval for as long as something long-running
+// holds the worker. Counted, so the queue and a manual Generate can overlap.
+const KEEPALIVE_MS = 20000;
+let keepAliveHolds = 0;
+let keepAliveTimer = null;
+
+function holdAwake() {
+  if (keepAliveHolds++ > 0) return;
+  keepAliveTimer = setInterval(() => {
+    try {
+      chrome.runtime.getPlatformInfo().catch(() => {});
+    } catch {
+      // Not available (e.g. a test harness) — nothing to keep alive there.
+    }
+  }, KEEPALIVE_MS);
+}
+
+function releaseAwake() {
+  if (--keepAliveHolds > 0) return;
+  keepAliveHolds = 0;
+  clearInterval(keepAliveTimer);
+  keepAliveTimer = null;
+}
+
 // ---------------------------------------------------------------------------
 // Stage one: the duplicate filter
 //
@@ -553,7 +598,92 @@ async function drainChecks() {
   } finally {
     checking = false;
     queueStatus();
+    // A page whose cards were all already in the collector queues nothing,
+    // so drain() never runs for it — this is where that page is finished.
+    nextPageWhenDone();
   }
+}
+
+// ---------------------------------------------------------------------------
+// Dice: the next page, once this one is done
+//
+// On Dice a run works one search page at a time. When every card found on the
+// page has been through the filter and every job it let through has had its
+// resume built and sent, the page's "Next" is clicked and the new page is
+// read like the first. It ends at the last page (no Next, or a disabled one),
+// at MAX_STORED new jobs, at MAX_DICE_PAGES, or on Stop.
+//
+// Called whenever either queue empties; it does nothing unless both are empty
+// at once, so a lull between two checks does not turn the page early.
+// ---------------------------------------------------------------------------
+
+const MAX_DICE_PAGES = 30;
+// Cards can still be arriving from the page when the queues first empty; this
+// gives them a moment to land before the page is called finished.
+const PAGE_SETTLE_MS = 1500;
+const PAGE_CHANGE_TIMEOUT = 20000;
+
+let runSource = null; // the board the current run was started on
+let pagesTurned = 0;
+let paging = false;
+
+const pipelineIdle = () => !checking && !checkQueue.length && !draining && !queue.length;
+
+async function nextPageWhenDone() {
+  if (runSource !== "dice" || paging || !pipelineIdle()) return;
+  paging = true;
+
+  let turned = false;
+  try {
+    await sleep(PAGE_SETTLE_MS);
+    const signal = runSignal();
+    // Stopped, still busy after all, full, or out of pages: not this time.
+    // A job still in flight calls back here when it finishes.
+    if (!signal || signal.aborted || !visitEnabled || !pipelineIdle()) return;
+    if (acceptedCount >= MAX_STORED || pagesTurned >= MAX_DICE_PAGES) return;
+    if (feedTabId === null) return;
+
+    const reply = await chrome.tabs
+      .sendMessage(feedTabId, { type: "NEXT_PAGE" })
+      .catch(() => null);
+    if (!reply?.clicked) return; // the last page, or the tab is gone
+
+    pagesTurned++;
+    await waitForPageChange(feedTabId, reply.url, signal);
+    if (signal.aborted) return;
+
+    // Either a new document (the script is re-injected and starts fresh) or
+    // the same one re-rendered (its dedupe keeps what was already seen).
+    await tell(feedTabId, { type: "START_STREAM", options: {} }, SOURCES.dice.script);
+    tellFeed({ type: "ACCEPTED", count: acceptedCount });
+    turned = true;
+  } catch (err) {
+    console.warn("[jobright] could not open the next Dice page:", err?.message || err);
+  } finally {
+    paging = false;
+  }
+
+  // Looked at again once the new page has had time to queue its cards: a page
+  // whose cards were all seen before sends no JOB_FOUND, so nothing else would
+  // move the run on from it. A page with work in it is simply still busy then,
+  // and its own queues call back here when they empty.
+  if (turned) nextPageWhenDone();
+}
+
+// Resolves once the click has taken the tab somewhere and the page is loaded:
+// the URL has moved on (Dice puts ?page= in it) and the tab reports complete.
+// A Next that re-renders in place without touching the URL simply runs out
+// the clock, and the page is read as it is by then.
+async function waitForPageChange(tabId, fromUrl, signal) {
+  const deadline = Date.now() + PAGE_CHANGE_TIMEOUT;
+  while (Date.now() < deadline && !signal?.aborted) {
+    await sleep(300);
+    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    if (!tab) throw new Error("the Dice tab was closed");
+    if (tab.url !== fromUrl && tab.status === "complete") break;
+  }
+  // The job list is rendered after the document loads.
+  await sleep(PAGE_SETTLE_MS);
 }
 
 // Tells the feed tab how many candidates have survived the filter, so it knows
@@ -576,6 +706,19 @@ function broadcast(message) {
   chrome.runtime.sendMessage(message).catch(() => {});
 }
 
+// The job the queue is working on and which step it is at, so the panel can
+// say "waiting for ChatGPT" on that job's own row. Kept here rather than only
+// sent once, because every status carries it: a panel opened mid-generation
+// still learns what the current job is doing. `at` is when the step began, so
+// the panel can count the seconds a slow answer has been taking.
+//   opening → reading → waiting (for ChatGPT) → building → saving
+let active = null;
+
+function setStage(job, stage) {
+  active = job && stage ? { key: job.key, title: job.title, stage, at: Date.now() } : null;
+  queueStatus();
+}
+
 function queueStatus(extra = {}) {
   broadcast({
     type: "DETAIL_STATUS",
@@ -588,6 +731,7 @@ function queueStatus(extra = {}) {
       accepted: acceptedCount,
       checking: checkQueue.length,
       generated: generatedCount,
+      active,
       ...extra
     }
   });
@@ -596,6 +740,7 @@ function queueStatus(extra = {}) {
 async function drain() {
   if (draining) return;
   draining = true;
+  holdAwake();
   queueStatus();
 
   try {
@@ -604,13 +749,13 @@ async function drain() {
       if (signal?.aborted) break;
 
       const job = queue.shift();
-      queueStatus({ current: job.title });
+      setStage(job, "opening");
 
       // Everything here has already cleared the duplicate filter, so this
       // stage is only the slow work: open, read, generate, save.
       let detail;
       try {
-        detail = await visitJob(job, signal);
+        detail = await visitJob(job, signal, (stage) => setStage(job, stage));
       } catch (err) {
         detail = wasStopped(err)
           ? { ok: false, stopped: true }
@@ -620,9 +765,8 @@ async function drain() {
       // Only non-LinkedIn jobs are saved — a LinkedIn origin ends the pass at
       // the closed tab, with nothing read and nothing sent.
       if (saveEnabled && detail.ok && !detail.isLinkedIn) {
-        queueStatus({ current: `${job.title} — writing resume` });
         const profile = await getProfile();
-        detail.resume = await generateResume(profile, detail, signal);
+        detail.resume = await generateResume(profile, detail, signal, (stage) => setStage(job, stage));
         if (detail.resume.ok) generatedCount++;
 
         // Nothing is sent unless the resume actually built. A job that fails
@@ -630,6 +774,7 @@ async function drain() {
         // which also means /get-item still reports it missing, so the next
         // run picks it up and tries again.
         if (detail.resume.ok) {
+          setStage(job, "saving");
           detail.save = await saveJob(job, detail, signal, profile);
           if (detail.save.ok) savedCount++;
           // The duplicate check that let this job through did not answer
@@ -650,6 +795,7 @@ async function drain() {
       }
 
       visitedCount++;
+      active = null; // its row now shows the outcome instead
       await updateJob(job.key, { detail });
       broadcast({ type: "JOB_DETAIL", key: job.key, detail });
 
@@ -659,7 +805,10 @@ async function drain() {
     }
   } finally {
     draining = false;
+    active = null;
+    releaseAwake();
     queueStatus({ drained: true });
+    nextPageWhenDone();
   }
 }
 
@@ -1302,6 +1451,53 @@ function declarationValueAt(src, name) {
   return i;
 }
 
+// The second shape ChatGPT may answer in — a profile object rather than the
+// CONTACT/SUMMARY arrays:
+//
+//   { name, title,
+//     contact: { email, phone, linkedin, location },
+//     resume: { summary, skills: [...],
+//               experience: [{ company, position, location, duration, content: [...] }],
+//               education: [{ degree, school, year }],
+//               certifications?: [...] },
+//     coverletter? }
+//
+// Turned into the array shape here, so the rest of the parser, the builder
+// and every template work from one shape. An object that is already in the
+// array shape (it has SUMMARY) is returned as it is.
+function fromProfileShape(d) {
+  if (!d || typeof d !== "object" || typeof d.SUMMARY === "string") return d;
+  const r = d.resume && typeof d.resume === "object" && !Array.isArray(d.resume) ? d.resume : d;
+  if (typeof r.summary !== "string") return d;
+
+  const str = (v) => (typeof v === "string" ? v : v == null ? "" : String(v));
+  const list = (v) => (Array.isArray(v) ? v : []);
+  const contact = d.contact || r.contact || {};
+
+  return {
+    // [name, headline, ...the contact line], the order every template uses.
+    CONTACT: [
+      str(d.name ?? r.name),
+      str(d.title ?? r.title),
+      ...[contact.location, contact.phone, contact.email, contact.linkedin ?? contact.website].map(str)
+    ],
+    SUMMARY: r.summary,
+    SKILLS: list(r.skills),
+    EXPERIENCE: list(r.experience).map((e) => [
+      str(e.company),
+      str(e.position ?? e.title ?? e.role),
+      str(e.location),
+      str(e.duration ?? e.dates),
+      ...list(e.content ?? e.bullets).map(str)
+    ]),
+    CERTIFICATIONS: list(r.certifications ?? d.certifications).map((c) => (typeof c === "string" ? c : str(c?.name))),
+    // A degree comes as one string ("Bachelor of Science in X"), so it fills
+    // the degree slot and leaves the field empty.
+    EDUCATION: list(r.education).map((e) => [str(e.school), [[str(e.degree), str(e.field)]], str(e.year ?? e.duration)]),
+    coverletter: d.coverletter ?? r.coverletter ?? d.coverLetter ?? r.coverLetter
+  };
+}
+
 function parseModelAnswer(raw) {
   const src = stripFence(String(raw));
 
@@ -1321,10 +1517,14 @@ function parseModelAnswer(raw) {
     if (end !== -1) data = parseObjectLiteral(src.slice(ri, end + 1));
   }
 
-  // Tolerated: the whole answer is a bare object rather than a declaration.
+  // Tolerated: the answer is a bare object rather than a `const resume`, as
+  // the profile shape below usually is — maybe behind another name
+  // (`const data = {`) or with a trailing semicolon. The first complete
+  // object in the answer is read.
   if (!data && !declared) {
-    const trimmed = src.trim();
-    if (trimmed.startsWith("{")) data = parseObjectLiteral(trimmed);
+    const open = src.indexOf("{");
+    const end = open === -1 ? -1 : findMatchingBracket(src, open);
+    if (end !== -1) data = parseObjectLiteral(src.slice(open, end + 1));
   }
 
   if (!data) {
@@ -1333,9 +1533,11 @@ function parseModelAnswer(raw) {
     throw new Error(
       declared
         ? "found `const resume` but could not read its object"
-        : "the answer has no `const resume = { … }` — the prompt has to ask for it"
+        : "the answer has no resume object — the prompt has to ask for one"
     );
   }
+
+  data = fromProfileShape(data);
 
   if (typeof data.SUMMARY !== "string" || !data.SUMMARY.trim()) {
     throw new Error("the answer has no SUMMARY string");
@@ -1435,7 +1637,10 @@ const OPENAI_ENDPOINT = "https://api.openai.com/v1/chat/completions";
 // budget rather than the 10s the collector calls use.
 const GENERATE_TIMEOUT_MS = 120000;
 
-async function generateResume(profile, detail, signal) {
+// `onStage` hears "waiting" as the request goes out and "building" once the
+// answer is back and being laid into the template — the two halves of the
+// wait the panel shows against the job.
+async function generateResume(profile, detail, signal, onStage = () => {}) {
   if (!profile.apiKey) {
     return { ok: false, skipped: true, error: "no API key set — open ChatGPT setting on the Generate tab" };
   }
@@ -1489,6 +1694,7 @@ async function generateResume(profile, detail, signal) {
   console.log("[jobright]   system message:\n" + messages[0].content);
   console.log("[jobright]   user message:\n" + messages[1].content);
 
+  onStage("waiting");
   try {
     const res = await fetch(OPENAI_ENDPOINT, {
       method: "POST",
@@ -1528,6 +1734,7 @@ async function generateResume(profile, detail, signal) {
 
     if (!text) return { ok: false, error: "the model returned an empty answer" };
 
+    onStage("building");
     let parsed;
     try {
       parsed = parseModelAnswer(text);
@@ -1709,6 +1916,7 @@ async function generateManual(input) {
   if (manualBusy) return { ok: false, error: "the last one is still being written" };
 
   manualBusy = true;
+  holdAwake();
   try {
     // Asked before the model is, so a posting the collector already holds
     // costs no API call. A check that fails fails open, as on the feed: the
@@ -1726,7 +1934,9 @@ async function generateManual(input) {
       descriptionHtml: manualDescriptionHtml(description)
     };
 
-    const resume = await generateResume(profile, detail, undefined);
+    const resume = await generateResume(profile, detail, undefined, (stage) =>
+      broadcast({ type: "MANUAL_STATUS", stage })
+    );
     // Same rule as the queue: nothing is sent unless the resume built, so a
     // failed generation leaves the collector untouched rather than storing a
     // job with no documents against it.
@@ -1741,6 +1951,7 @@ async function generateManual(input) {
     return { ok: true, resume, save, duplicate: false, checkError: check.error };
   } finally {
     manualBusy = false;
+    releaseAwake();
   }
 }
 
@@ -1765,7 +1976,7 @@ async function createDetailTab(url) {
   return chrome.tabs.create(base);
 }
 
-async function visitJob(job, signal) {
+async function visitJob(job, signal, onStage = () => {}) {
   if (signal?.aborted) throw new Error(STOPPED);
 
   const tab = await createDetailTab(job.href);
@@ -1778,6 +1989,7 @@ async function visitJob(job, signal) {
 
   try {
     await waitForComplete(tab.id, DETAIL_LOAD_TIMEOUT, signal);
+    onStage("reading");
     await ensureContentScript(tab.id, { signal, script: sourceOf(job).script });
     const detail = await chrome.tabs.sendMessage(tab.id, { type: "SCRAPE_DETAIL" });
     if (signal?.aborted) throw new Error(STOPPED);
@@ -1812,10 +2024,12 @@ async function handle(msg) {
       // happens.
       const sourceKey = msg.options?.source || "jobright";
       const source = SOURCES[sourceKey];
-      if (!source) return { ok: false, error: `${sourceKey} is not supported yet — only Jobright, Dice and Glassdoor` };
+      if (!source) return { ok: false, error: `${sourceKey} is not supported yet — only Jobright, Dice, Glassdoor and ZipRecruiter` };
 
       visitEnabled = msg.options?.visitJobs !== false;
       saveEnabled = msg.options?.saveJobs !== false;
+      runSource = sourceKey;
+      pagesTurned = 0;
       beginRun();
 
       const tabId = await openFeedTab(source);
