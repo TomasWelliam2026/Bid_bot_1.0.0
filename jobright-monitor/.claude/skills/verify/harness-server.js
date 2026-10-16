@@ -75,6 +75,13 @@ const path = require("path");
 const ROOT = path.resolve(__dirname, "..", "..", "..");
 const PORT = 5759;
 
+// The extension talks to the collector at http://localhost:4500 — on this
+// machine, that is the real archive. Set HARNESS_COLLECTOR to a scratch
+// backend (e.g. http://localhost:4599, started with its own DB_FILE and
+// DATA_ROOT) and every collector call the extension makes goes there instead,
+// so a test run never files, edits or deletes anything real.
+const COLLECTOR = process.env.HARNESS_COLLECTOR || "";
+
 const TYPES = {
   ".html": "text/html",
   ".css": "text/css",
@@ -92,6 +99,10 @@ window.chrome = {
     onInstalled: { addListener() {} },
     onStartup: { addListener() {} },
     onMessage: { addListener(fn) { window.__bgListeners.push(fn); } },
+    // Extension files are served from this harness's root, as the real
+    // getURL resolves them against the extension's — so the built-in resume
+    // templates under resume_temples/ load for real.
+    getURL(p) { return "/" + String(p).replace(/^\\//, ""); },
     // See gotcha #3 above: only sendResponse(...) ever resolves this — a
     // listener's return value is never treated as the reply.
     sendMessage(msg) {
@@ -126,7 +137,11 @@ window.chrome = {
 // you're actually testing this session — this is a starting template, not a
 // fixed contract. Keep gotcha #4 in mind for any "never responds" case.
 const REAL_FETCH = window.fetch.bind(window);
+const COLLECTOR_REDIRECT = ${JSON.stringify(COLLECTOR)};
 window.fetch = async (url, opts) => {
+  if (COLLECTOR_REDIRECT && typeof url === "string" && url.startsWith("http://localhost:4500")) {
+    url = COLLECTOR_REDIRECT + url.slice("http://localhost:4500".length);
+  }
   if (typeof url === "string" && url.includes("api.openai.com")) {
     const auth = (opts && opts.headers && opts.headers.Authorization) || "";
     const body = JSON.parse((opts && opts.body) || "{}");

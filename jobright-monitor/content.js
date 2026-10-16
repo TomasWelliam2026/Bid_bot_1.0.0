@@ -142,6 +142,11 @@ function main() {
   let contextLost = false;
   let accepted = 0; // survivors of the collector's filter, per ACCEPTED
   let lastUrl = location.href;
+  // A run goes on in batches (see nextBatch): how many cards had been seen
+  // when this batch began, so the candidate bound is per batch, and where the
+  // last harvest had scrolled to, so the next one carries on from there.
+  let batchBase = 0;
+  let lastTop = null;
 
   // Fire-and-forget. chrome.runtime.sendMessage rejects when no extension page
   // is listening, which is the normal state whenever the panel is closed, so
@@ -190,7 +195,7 @@ function main() {
   function scan() {
     let fresh = 0;
     for (const el of document.querySelectorAll(CARD)) {
-      if (found.size >= MAX_CANDIDATES) break;
+      if (found.size - batchBase >= MAX_CANDIDATES) break;
 
       const index = cardIndex(el);
       if (index === null || index < MIN_DATA_INDEX) continue;
@@ -240,7 +245,10 @@ function main() {
     return el.scrollTop === before; // unchanged => bottom reached
   }
 
-  async function harvest({ maxScrolls = 60, pauseMs = 350 } = {}) {
+  // `resume` carries on from where the last harvest had scrolled to, rather
+  // than from wherever the list is showing — a new batch's cards are further
+  // down, past every card the last batch already saw.
+  async function harvest({ maxScrolls = 60, pauseMs = 350, resume = false } = {}) {
     if (harvesting) return;
     harvesting = true;
     status();
@@ -248,6 +256,11 @@ function main() {
     try {
       const scroller = findScroller();
       const startTop = scroller.scrollTop;
+      if (resume && lastTop !== null) {
+        scroller.scrollTop = lastTop;
+        await sleep(pauseMs);
+        scan();
+      }
       let idleRounds = 0;
 
       // Scrolls on while fewer than MAX_ITEMS have been accepted, and stops the
@@ -257,7 +270,7 @@ function main() {
       // candidate bound, and the scroll budget — so this always terminates.
       for (
         let i = 0;
-        i < maxScrolls && streaming && accepted < MAX_ITEMS && found.size < MAX_CANDIDATES;
+        i < maxScrolls && streaming && accepted < MAX_ITEMS && found.size - batchBase < MAX_CANDIDATES;
         i++
       ) {
         const before = found.size;
@@ -274,6 +287,7 @@ function main() {
         }
       }
 
+      lastTop = scroller.scrollTop; // where the next batch carries on from
       scroller.scrollTop = startTop; // leave the page as we found it
     } finally {
       harvesting = false;
@@ -323,6 +337,19 @@ function main() {
     teardown();
     status({ stopped: true });
     return { ok: true, total: found.size };
+  }
+
+  // The next batch: the worker has cleared its list once the last batch's
+  // jobs were all done. What was seen stays seen, so no card comes round
+  // twice; the count of new jobs starts again from nothing, and the list is
+  // scrolled on from where the last harvest stopped.
+  function nextBatch() {
+    if (!streaming) return { ok: true, harvesting: false, total: found.size };
+    accepted = 0;
+    batchBase = found.size;
+    status({ nextBatch: true });
+    harvest({ resume: true });
+    return { ok: true, harvesting: true, total: found.size };
   }
 
   // ==========================================================================
@@ -500,9 +527,15 @@ function main() {
         sendResponse({ ok: true });
         return false;
 
+      case "NEXT_BATCH":
+        sendResponse(nextBatch());
+        return false;
+
       case "FORGET":
         found.clear();
         accepted = 0;
+        batchBase = 0;
+        lastTop = null;
         sendResponse({ ok: true });
         return false;
 

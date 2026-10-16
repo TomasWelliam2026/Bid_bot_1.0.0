@@ -16,19 +16,23 @@ side panel docked to the right of the window — one card at a time, live.
    end.
 4. **Filters out what the collector already has.** Every card found is a
    candidate, not yet a caught item: `/get-item` is asked about it by company
-   and title, and one the collector already holds is dropped outright — never
-   listed, never stored, never opened. **The list holds only jobs that are new
-   to the collector.**
+   and title on each profile's tab, and one every profile already holds is
+   dropped outright — never listed, never stored, never opened. **The list
+   holds only jobs that are new to at least one profile.**
 5. **Visits each survivor.** Opened in its own tab, switched to, and read. If
    the posting's origin links to `https://www.linkedin.com` the tab is closed
    and the job is dropped; otherwise the description block is read out.
-6. **Builds a resume and a cover letter.** The description goes to OpenAI with
-   the prompt set under **ChatGPT setting**. The answer is JavaScript — a `resume`
-   object baked into the resume template as a static, script-free page, and
-   a `coverletter` string.
-7. **POSTs it** — but only if the resume built. Each job whose resume and
-   cover letter came back is sent to `http://localhost:4500/save-data`; one
-   whose generation failed is left unsaved, and retried on the next run.
+6. **Builds a resume and a cover letter for each profile.** Settings →
+   **Profile** picks a country and a role; every dashboard tab with both is a
+   profile, and each one that does not have the job yet gets its own. The
+   description goes to OpenAI with that profile's prompt and master resume, and
+   the answer — JavaScript: a `resume` object and a `coverletter` string — is
+   baked into that profile's resume style as a static, script-free page. The
+   page is read once; only the writing happens per profile.
+7. **POSTs each one** — but only if it built. Each profile's resume and cover
+   letter is sent to `http://localhost:4500/save-data`, filed under that
+   profile's tab; one whose generation failed is left unsaved for that profile,
+   and retried on the next run.
 
 ## What matches what
 
@@ -85,8 +89,8 @@ for exactly this case.
 ## Dice
 
 The **job board** select under Auto/Manual picks where Auto fetches from:
-Jobright (everything above) or Dice. Glassdoor and Monster are listed but have
-no fetcher yet, so Start stays off for them.
+Jobright (everything above), Dice, Glassdoor, Indeed or ZipRecruiter. Monster
+is listed but has no fetcher yet, so Start stays off for it.
 
 With Dice, Start opens a fixed search (`DICE_SEARCH_URL` in `background.js`:
 full-time, remote, United States, "data engineer") and `content-dice.js` reads
@@ -172,6 +176,137 @@ LinkedIn rule.
   the place to adjust. As with Glassdoor, if the tab shows the security check
   instead of results, pass it and press Start again.
 
+## Indeed
+
+Indeed is read the same way as Jobright and Dice: a search page in a tab, read
+by `content-indeed.js`. Indeed has no fixed search, though. Picking Indeed
+shows a search form under the board picker. Its first two fields are Indeed's
+own two search boxes: **Role** ("What": job title, keywords, or company) and
+**Where** (city, state, zip code, or "remote"). Below them are **Country**,
+**Job type**, **Posted** (last 24 hours / 3 / 7 / 14 days) and **Remote
+only**. Role is required. The form is remembered between panel opens and
+locked while a run is on. Start opens that search, newest first, on the chosen
+country's Indeed site. Indeed shows its results to visitors who aren't signed
+in, so no sign-in is needed.
+
+```
+https://www.indeed.com/jobs?q=data+engineer&l=Austin%2C+TX&fromage=7&sc=0kf%3Aattr%28DSQF7%29jt%28fulltime%29%3B&sort=date
+                            role           where          posted     remote             job type
+```
+
+`indeedSearchUrl` in `background.js` builds this. `q` and `l` are exactly what
+Indeed's own search form sends from its What and Where boxes, so this is the
+same search as typing into them and pressing Find jobs, and the tab shows your
+words in those boxes. **Country** picks the site (`uk.indeed.com` for the
+United Kingdom, and so on). That list lives in `INDEED_COUNTRIES` in
+`background.js` and in `#searchCountry` in `sidepanel.html`, and the two must
+stay in step.
+
+Jobs are found the way `content.js` finds Jobright's: by class name or
+attribute, the one Indeed uses now first and the one it used before as a
+fallback. A card read through a fallback is flagged as layout drift.
+
+```
+.job_seen_beacon                          <- the card (fallback: every title link below, in its li)
+  h2.jobTitle a.jcs-JobTitle[data-jk]     <- title link (fallback: a[data-jk], or an h2 link with jk=);
+                                             data-jk (else jk=) is the job's key
+    span[title]                           <- title (else the link's text)
+  [data-testid="company-name"]            <- company   (fallback: .companyName)
+  [data-testid="text-location"]           <- location  (fallback: .companyLocation)
+  [data-testid="attribute_snippet_testid"]  <- the one that reads like pay = salary
+                                             (fallback: .salary-snippet-container)
+  [data-testid="myJobsStateDate"]         <- "Posted 3 days ago" (fallback: .date)
+```
+
+- **Link.** Each job links to `/viewjob?jk=<data-jk>` on the same Indeed site.
+  The card's own href is a click-tracking redirect, so it isn't used. Rows show
+  the location, salary and posting age under the company.
+- **Pages.** One search page at a time, as on Dice. Once every job on the page
+  is done (caught, read in the pane, resume built and sent), Next is clicked
+  in the same tab, and the new page's jobs are caught the same way. This stops
+  at 50 accepted jobs, the last page, 30 pages, or Stop.
+
+  ```
+  .serp-page-z64vyd                       <- where the pager is (fallback: any serp-page-* class)
+    [data-testid="pagination-page-next"]  <- Next (fallback: labelled "Next Page"/"Next", rel=next,
+                                             then the page link after the current one)
+  ```
+
+  `z64vyd` is a build hash, so as on Jobright the exact class is tried first
+  and the `serp-page-` prefix keeps matching after a rebuild. With no such
+  element at all, the whole page is searched, but only for the Next test id
+  or the "Next Page" label. The last page is a missing or disabled Next. A
+  `target` on the link is set aside for the click, so the next page never
+  opens in a new tab.
+- **Description, read from its tag, with no new tab.** Unlike Jobright and
+  Dice, no tab is ever opened for a job. The card is clicked in the search tab,
+  the way a person would. Indeed then puts that job's description in its
+  description tag, and once the tag has changed and stopped changing, it is
+  read. The search page stays where it is, so its list and pager are
+  untouched.
+
+  ```
+  <parent>                                       <- the description: all of the heading's
+    [data-testid="vj-job-description-heading"]      first parent element, heading included
+    #jobDescriptionText
+  ```
+
+  The description is everything in the first parent of
+  `[data-testid="vj-job-description-heading"]`, sent whole as `job_des` and
+  as text to the model. If a layout drops that heading,
+  `#jobDescriptionText` alone stands in and the job is flagged as layout
+  drift. Both are looked for across the whole page, and inside
+  `iframe#vjs-container-iframe` on layouts that frame them.
+
+  - **Only the tag decides.** Nothing else on the page has to agree: not the
+    address and not a job title. When the address's `vjk=` is already the job's
+    key, or the shown title already starts with the card's title, the tag is
+    read without clicking. That's a shortcut, never a requirement.
+  - **Never the wrong job.** The extension remembers which job each
+    description on the page was read for. If neither click changes the tag
+    and it still holds a description already read for another job, the row
+    says "clicking the job's card did not change the description". That job's
+    description is never saved against this one. An unchanged tag that hasn't
+    been read for another job is accepted, which covers the first job Indeed
+    shows without a click.
+  - **The click can't leave the page.** The title link is clicked with its
+    `href` and `target` untouched, since Indeed's own handler may need them.
+    A listener at the very end of the click's path cancels the browser's own
+    action (loading the job's page, opening a tab) after Indeed's handler has
+    run. If the tag hasn't changed after 5 seconds, the card itself is
+    clicked, outside the link, and given 5 more.
+  - **Strays are closed.** If Indeed's own script opens a tab anyway while a
+    card is being read, it is closed at once and the search tab is put back
+    in front.
+  - A job left over from before a Stop and no longer on the page showing is
+    reported on its row. No LinkedIn rule, as on Dice.
+- **Not checked against the live site.** Indeed answered the automated
+  browser used to build this with Cloudflare's block page, so the selectors
+  above come from Indeed's known markup, not from a live test. If a run finds
+  no cards on a page that plainly has some, the selector block at the top of
+  `content-indeed.js` is the place to adjust.
+
+### The human check
+
+Indeed sits behind Cloudflare, which sometimes shows a check in place of the
+page that was asked for: "Just a moment…", "Additional Verification Required"
+or "Verify you are human". Only a person can pass it, so the run **pauses**:
+
+1. The Indeed search tab, where the check is, is brought to the front.
+2. The panel shows a notice saying Indeed wants a human check and where, with
+   a **Show the tab** button. Stop stays available.
+3. The worker looks at the tab every 2 seconds. Once the page behind the check
+   is showing, the notice goes away and the run carries on from where it
+   paused: the search page is read, or the job's card is read in the pane.
+   You don't need to press Start again.
+
+Stop ends the wait like anything else. If Indeed shows a block page with no
+check to complete, nothing will change, so press Stop. The check is spotted
+by its title and wording and by Cloudflare's challenge elements
+(`#challenge-form`, `#challenge-stage`, the `challenges.cloudflare.com`
+frame). The pausing itself lives in `background.js` (`waitForHumanCheck`) and
+works for any board whose content script reports `blocked`.
+
 ## What a caught item shows
 
 Every row is a job the collector did **not** already have — duplicates are
@@ -197,8 +332,8 @@ so the prompt can be fixed against what the model actually said.
 
 ### 50 items
 
-A run collects at most **50 items** — and that counts jobs that survived the
-duplicate filter, not cards seen on the page. The harvest keeps scrolling while
+The list holds at most **50 items** at a time — and that counts jobs that
+survived the duplicate filter, not cards seen on the page. The harvest keeps scrolling while
 fewer than 50 have been accepted, so **a feed the collector mostly already
 holds is scrolled further** rather than yielding a short list.
 
@@ -212,9 +347,33 @@ in case the collector holds so much that 50 new ones never appear), or the
 scroll budget.
 
 The status line reads `Scrolling the list… 12 new of 50` while short, then
-`50 new · limit reached, no more scrolling`, and `Watching for new cards ·
-12 new of 30 seen` once the harvest is done — seen and new are different
-numbers now, and both are shown.
+`50 new · list full — …`, and `Watching for new cards · 12 new of 30 seen`
+once the harvest is done. Seen and new are different numbers, and both are
+shown.
+
+### Jobright goes on in batches
+
+On Jobright, 50 is a batch, not the end of the run. Once the list is full
+**and** every job in it has had its resume built and sent, the run moves on by
+itself:
+
+1. **The list is cleared** in storage, on the badge and in the panel, which
+   says `Batch 1 done · 50 jobs written and sent · list cleared, scrolling
+   Jobright for the next 50…`. The jobs are already in the collector; only the
+   panel's list is emptied. The queue strip's tally is the whole run's, so it
+   keeps counting.
+2. **The feed scrolls on** from where the last harvest stopped (`NEXT_BATCH`
+   to `content.js`). It doesn't go back to the top, since everything above
+   was seen already. Nothing seen in an earlier batch comes round again.
+   Candidates that arrived after the list filled are held, not dropped, and
+   are checked first in the next batch.
+3. The new batch fills the cleared list the same way, and so on.
+
+The run ends when a batch never fills, meaning the feed has run out of new
+jobs, or on Stop. The candidate bound (400) and the scroll budget apply to
+each batch. Dice and Indeed don't batch: a run there stops at 50.
+`nextBatchWhenDone` in `background.js` does this; it's called whenever the
+check queue or the work queue empties, like the Dice/Indeed page turn.
 
 The cap lives in three places, because the three contexts have no shared
 module: `MAX_ITEMS` in `content.js` is the scroll target, `MAX_ITEMS` in
@@ -248,14 +407,15 @@ The panel has two top-level tabs:
 
 The **Settings** button on the Generate tab opens a third screen — not a
 top-level tab itself — in place of the feed; **← Back** (or picking Generate
-or Job bid) returns to it. Settings holds its own trio of tabs: **ChatGPT
-setting** (the OpenAI API key, model, prompt and master resume), **Resume
-style** (the layout picker and Style add/Remove), and **Profile** (just
-**Country name** — see below).
+or Job bid) returns to it. Settings holds two tabs of its own: **ChatGPT
+setting** (the OpenAI API key and model, used for every profile) and
+**Profile** (the country and role resumes are built for, and each matching
+profile's own prompt, master resume and resume styles — see
+[Profile](#profile) below).
 
 Switching only shows and hides, at both levels. The feed keeps streaming into
-the Generate pane while Job bid is in front, and an unsaved edit in the master
-resume survives a trip to the Resume style tab — nothing is torn down or
+the Generate pane while Job bid is in front, and an unsaved edit in a
+profile's master resume survives a trip to ChatGPT setting — nothing is torn down or
 re-fetched on the way back, because every pane stays in the document and is
 merely not displayed.
 
@@ -325,12 +485,19 @@ the collector is asked about it:
 
 ```
 POST http://localhost:4500/get-item
-{ "company": "Acme Corp", "job_title": "Senior Frontend Engineer" }
+{ "company": "Acme Corp", "job_title": "Senior Frontend Engineer", "user": "US (JYZ)" }
         │
    { code: 200, msg: "already exist" }  ─▶  dropped: not listed, not stored,
         │                                   not opened, not saved
    anything else  ─▶  listed, then opened, read, generated for, and saved
 ```
+
+**The check is per profile.** It is asked once for each profile picked in
+Settings → Profile, with `user` set to that profile's tab — the same tab its
+save would be filed under. A profile whose tab already holds the same company
+and job title is counted out, and the row says so; the job is dropped only
+when **every** profile has it. The same job on any other tab is someone else's
+application, so it still goes ahead for the rest.
 
 **Only the exact answer `{ "code": 200, "msg": "already exist" }` on an HTTP 200
 drops the job.** Everything else means "not a duplicate": a different `code`, a
@@ -356,8 +523,8 @@ and hands survivors to the slow queue behind it.
 
 A job the collector does not have is worth generating for. The description
 **text** (not the markup — that would be tokens spent on chrome) goes to OpenAI
-with the prompt from ChatGPT setting, and the answer is built into a full HTML
-resume.
+with the profile's own prompt and master resume — once per profile — and each
+answer is built into a full HTML resume in that profile's style.
 
 **The model returns JavaScript, not prose.** The resume template holds only
 the layout; every word comes from the answer — the header, the summary, the
@@ -413,14 +580,41 @@ with no contract and no role list added.
 The answer can be either shape below. Both build the same resume in every
 style:
 
-- **Arrays:** `const resume = { CONTACT: [...], SUMMARY, SKILLS, EXPERIENCE: [[company, title, location, dates, ...bullets]], CERTIFICATIONS, EDUCATION: [[school, [[degree, field]], year]] }`
-- **Profile object:** `{ name, title, contact: { email, phone, linkedin, location }, resume: { summary, skills, experience: [{ company, position, location, duration, content }], education: [{ degree, school, year }], certifications? }, coverletter? }`
+- **Profile object** (what the built-in default prompt asks for, and what
+  ChatGPT answers with):
+
+  ```
+  const resume = {
+    "name": "…", "title": "…",
+    "contact": { "email": "…", "phone": "…", "linkedin": "…", "location": "…" },
+    "resume": {
+      "summary": "…",
+      "skills": ["Label: a, b, c", …],
+      "experience": [{ "company", "position", "location", "duration", "content": ["bullet", …] }, …],
+      "education": [{ "degree", "school", "year" }, …],
+      "certifications": […]          (optional)
+    },
+    "cover_letter": "Dear Hiring Team,\n\n…"
+  };
+  ```
+
+- **Arrays** (the older shape): `const resume = { CONTACT: [...], SUMMARY, SKILLS, EXPERIENCE: [[company, title, location, dates, ...bullets]], CERTIFICATIONS, EDUCATION: [[school, [[degree, field]], year]] }`, with `const coverletter = "…"` after it.
 
 The profile object may stand alone, sit behind any name (`const data = {`), or
 end with `;`. The first complete `{ … }` in the answer is read.
 `fromProfileShape` in `background.js` turns it into the arrays, so the builder
 and the templates only ever see one shape. A degree in the profile object is
 one string, so it fills the degree line on its own.
+
+**The cover letter** is found wherever the answer puts it. It can be the
+`cover_letter` key beside `"resume"`, as above, or the same key inside
+`"resume"`. It can be spelt `cover_letter`, `coverletter`, `coverLetter` or
+any other case, with or without an underscore, space or hyphen. It can also be
+its own declaration after the object (`const cover_letter = "…"` or the older
+`const coverletter = "…"`). A letter written as a list of paragraphs is joined
+with blank lines. It's saved as the job's `coverletter` (in a `<textarea>`)
+and shown under the job in the panel. An answer with none builds the resume
+anyway, with the warning "no cover letter in the answer (cover_letter)".
 
 ### That code is parsed, never run
 
@@ -467,8 +661,11 @@ comment.
 
 ### Resume styles
 
-**Resume style**, its own tab in Settings next to **ChatGPT setting**, picks
-the layout. Two ship:
+A resume style belongs to a profile. Each profile's card in Settings →
+**Profile** has its own **Resume style** picker — the built-in styles, plus
+the ones added under that card, which no other profile is offered — with
+**Preview**, **Copy to editor**, **Remove style** and its own **Add a style**
+editor. Two built-in styles ship:
 
 | Style  | Looks like |
 |--------|------------|
@@ -480,33 +677,59 @@ from the same answer, so switching is purely cosmetic and takes
 effect on the next job generated. A style whose file has gone missing falls
 back to `DE-1` rather than failing the job.
 
-Adding a third is a file, a line in `RESUME_STYLES` in `background.js`, and an
-`<option>` in `sidepanel.html`. Nothing else.
+Adding a built-in one is a file, a line in `RESUME_STYLES` in `background.js`,
+and a line in `BUILTIN_STYLES` in `sidepanel.js`. Nothing else.
 
-#### Style add
+#### Adding a style
 
-**Style add**, under the Resume style list, adds your own template without
-touching the extension's files. Pick an `.html` file and it appears in the list
-as *name — added from file.html*, named after the file. Select it and press
-**Save**; every resume built after that uses it and is sent to the collector as
+A style is its template's HTML, typed or pasted into the panel — not a file
+picked from disk — and is added to one profile. Unfold **Add a style** on that
+profile's card, give it a **Style name**, put the markup in **Template HTML**,
+and press **Add new**. It appears in that profile's list as *name — added*
+and is picked for it straight away; **Save** puts it to use, and every resume
+built for that profile after that uses it and is sent to the collector as
 usual.
 
-- An extension cannot write into its own install folder, so the file's HTML is
-  kept in `chrome.storage.local` under `customStyles`, not copied beside the
+- **Copy to editor** puts the style picked on the card into that card's
+  editor to start from. A built-in style arrives as *DE-1 copy* (built-in
+  names cannot be overwritten); an added one keeps its name. If the editor
+  holds edits that were never added, the first click only warns, and a second
+  click replaces them. What is typed in an editor is kept while the panel is
+  open, even when the cards are redrawn.
+- The HTML is a template the builder fills from ChatGPT's answer, so it must
+  carry the holes the builder cannot do without — `<p id="summary">`,
+  `<div id="skills">`, and a `<div class="job">` holding a `<ul data-exp="0">`
+  (with `.company`, `.role`, `.location` and `.dates` inside it — or a single
+  `.meta`, which then gets "location | dates"). HTML missing any of them is
+  refused, with the missing ones named. The header (`h1.name`, `.title`,
+  `.contact`), education (`.edu-item`) and certifications (`.cert-item`) are
+  filled where the template has them and left alone where it does not.
+  `<script>`s are removed when a resume is built.
+- An extension cannot write into its own install folder, so the HTML is kept
+  in `chrome.storage.local` under `profileStyles`, by profile, not beside the
   built-in templates.
-- The file must carry the holes the builder cannot do without —
-  `<p id="summary">`, `<div id="skills">`, and a `<div class="job">` holding a
-  `<ul data-exp="0">` (with `.company`, `.role`, `.location` and `.dates`
-  inside it — or a single `.meta`, which then gets "location | dates"). A
-  file missing any of them is refused, with the missing ones named. The header
-  (`h1.name`, `.title`, `.contact`), education (`.edu-item`) and
-  certifications (`.cert-item`) are filled where the file has them and left
-  alone where it does not. A style added before job blocks existed still
-  builds, keeping its own employer lines, with a warning.
-- Adding a file with the same name again replaces that style, and the next job
-  uses the new file. A built-in name (`DE-1`, `SF-1`) is refused.
-- **Remove style** deletes the selected added style. A saved profile that
-  pointed at it goes back to `DE-1`.
+- A name that profile has already added turns **Add new** into **Update
+  style**, which replaces it; the next job uses the new HTML. A built-in name
+  (`DE-1`, `SF-1`, …) is refused.
+- **Remove style** deletes the picked added style from that profile, which
+  goes back to `DE-1` if it was using it.
+- Added styles used to be one list shared by every profile. The first time the
+  profiles are read after upgrading, every profile is given its own copy of
+  that list, so none loses a style it could pick before.
+
+#### Preview
+
+**Preview** on a card shows the style picked there; **Preview** in its editor
+shows the HTML being written, added or not. Either way the template is filled
+by the same builder a job uses, and the preview opens inside that card. The
+data is the newest resume ChatGPT actually wrote for that profile — never
+another profile's — or a built-in sample answer until there is one, and the
+status line says which. Template problems are listed there too: missing holes,
+which would stop **Add new**, and sections the builder had to leave as they
+were.
+
+The page is drawn at letter width and scaled down to the panel, in a frame that
+runs no scripts. **Open full size** opens the same document in a tab.
 
 ### The document that gets built
 
@@ -559,14 +782,15 @@ Then the job is POSTed as JSON to `http://localhost:4500/save-data`
   "coverletter": "<textarea>Dear hiring manager, …</textarea>",
   "company":     "Acme Corp",
   "job_title":   "Senior Frontend Engineer",
-  "user":        "United States"
+  "user":        "US (JYZ)"
 }
 ```
 
-**`user` is whatever Profile's Country name field holds** — plain text, sent
-as typed, so the collector knows which country tab this application belongs
-on. Left blank, the job still saves; the collector just has no tab to file it
-under.
+**`user` is the profile's tab.** A job is POSTed once for each profile it was
+written for, each with that profile's own resume, cover letter and `user`. The
+profiles are the dashboard's own tabs, loaded from
+`GET http://localhost:4500/api/users`, never typed, so a typo can't quietly
+create a new tab on the collector.
 
 **`coverletter` is wrapped in a `<textarea>`**, so it drops straight into a form
 on the other side:
@@ -625,6 +849,7 @@ to `0` — it is the only place the threshold appears.
 | `content-dice.js` | The same for dice.com: cards, the pager's Next once a page is done, the job page |
 | `content-glassdoor.js` | The same for glassdoor.com: cards, "Show more jobs", the job page |
 | `content-ziprecruiter.js` | The same for ziprecruiter.com: cards, later pages by fetch, the job page |
+| `content-indeed.js` | The same for indeed.com (every country's site): cards, each job's description from its tag once the card is clicked, the pager's Next once a page is done, the human check |
 | `background.js`  | Opens the tab, guarantees an injected content script, persists jobs |
 | `sidepanel.html` | The panel shell — tab bar and the three panes |
 | `sidepanel.css`  | Panel styling, light and dark |
@@ -729,9 +954,11 @@ mid-run takes effect immediately and empties the queue.
 ## ChatGPT setting
 
 Opened with the **Settings** button on the Generate tab, under the **ChatGPT
-setting** tab (next to **Resume style**); **← Back** returns to the feed.
+setting** tab (next to **Profile**); **← Back** returns to the feed.
 
-Three settings — **API key**, **Model**, **Prompt** — and an explicit **Save**.
+Two settings — **API key** and **Model**, used for every profile — and an
+explicit **Save**, which saves Profile's picks and every profile's edits along
+with them.
 
 Nothing is written until you press it. Because there is no save-on-blur, an
 edit sitting in a field would otherwise look exactly like a saved one, so the
@@ -750,9 +977,28 @@ actually stored, so what you see is what is held.
 
 ### The model list
 
-The **Model** dropdown carries a few general-purpose models rather than making
-you type an id. Every one of them supports JSON mode, which the resume builder
-requires.
+The **Model** dropdown lists the models **your API key can use**, as OpenAI
+reports them (`GET /v1/models`). The worker asks for the list:
+
+- when you press **Load models**, under the dropdown;
+- when a key is typed or pasted in, once you leave the field;
+- on opening the panel with a saved key whose list was never loaded.
+
+Only models that can write a resume here are offered: text models answering
+Chat Completions (`gpt-…`, `chatgpt-…`, the o-series). Models for speech,
+images, embeddings, moderation and search are left out, as are the older
+completions-only `…-instruct` ones, agent and code models, and the `…-pro`
+models, which only answer the Responses API. The names that always mean the
+latest version come first, newest first, with the dated snapshots
+(`gpt-4o-2024-08-06`) in a group of their own. The line under the button
+shows how many there are and when they were loaded, or why loading failed:
+`HTTP 401 — Incorrect API key provided`, say.
+
+The list is kept in the extension's storage with the key's last four
+characters, so reopening the panel shows it at once, and a different key gets
+its own list. Until a list is loaded, a short built-in one stands in. The
+request itself sends only the model and the messages (no `temperature`, no
+`max_tokens`), so the newer models that reject those take it as it is.
 
 The list is a convenience, not a limit: **Custom…** reveals a text box for any
 model id — a pinned snapshot like `gpt-4o-2024-11-20`, or anything released
@@ -768,11 +1014,52 @@ rather than storing a blank model.
 not reply NOT` — and shows exactly what came back beneath the button.
 
 It reads the **API key** and **Model** fields as they currently stand, not the
-saved profile, so a new key can be checked before **Save** — nothing here is
+saved settings, so a new key can be checked before **Save** — nothing here is
 written to storage. No prompt, no master resume, no job description: this is
 only a "does this key and model answer at all" check, not a rehearsal of a
 real generation. A bad key, a bad model id, or no response inside 20s comes
 back as `Failed: …` with OpenAI's own error message where there is one.
+
+## Profile
+
+A **profile** is one of the dashboard's tabs: a person applying in a country
+for a role. Its **Country (C)** and **Role** are set in that tab's Sheet sync
+on the dashboard, and its **Profile (D)** is the name written to the sheet.
+
+**Country** and **Role**, at the top of Settings → Profile, are picked from
+what the tabs carry — the roles offered are the ones found in the picked
+country. Every profile with both is listed below them, one card each, and
+**each of them gets its own resume for every job caught**:
+
+- **Prompt** — sent as the system message. A profile with no prompt of its own
+  uses the built-in one, shown in the box until it is changed.
+- **Master resume** — that person's full resume, sent with the job
+  description, with an on/off switch that keeps the text while off.
+- **Resume style** — the layout its resume is built in, picked from the
+  built-in styles and the ones added under this card, which are this
+  profile's alone — see [Resume styles](#resume-styles).
+
+They are kept on the tab itself, on the collector (`PATCH /api/users/:id` with
+`prompt`, `masterResume`, `masterResumeMode` and `resumeStyle`), not inside the
+extension. A job's page is read once; each profile's resume is then written
+and saved in turn, filed under its own tab. A profile whose tab already has the
+job is skipped for it, and a Stop part-way through keeps the profiles already
+done — the next Start writes only the rest.
+
+Edits are drafts until **Save**, kept per profile, so picking another country
+or role and coming back loses nothing; a card with unsaved edits shows
+`● unsaved`. **Reload profiles** (or opening Profile again) re-reads the tabs,
+so a country or role just changed on the dashboard shows up.
+
+Start, and Manual's **Generate**, refuse to run while no profile matches — no
+country and role picked, or no tab with both — rather than opening pages there
+is nothing to write for.
+
+**Upgrading from a single profile.** The prompt, master resume and resume style
+used to be one set for the whole extension, filed under the one tab
+**Country name** picked. The first time the profiles can be read, that set is
+copied onto that tab — unless it has its own already — and that tab's country
+and role become the ones picked.
 
 ## Your API key
 

@@ -22,8 +22,16 @@ the `jobright-monitor/` root, with a small stub spliced into the served HTML
 - bridges `chrome.runtime.onMessage`/`.sendMessage` in-page, so
   `sidepanel.js`'s real `send()` calls and `background.js`'s real `handle()`
   dispatch actually talk to each other;
-- stubs `chrome.storage.local` and `chrome.action` (enough for `background.js`
-  to load and run without throwing);
+- stubs `chrome.storage.local`, `chrome.action` and `chrome.runtime.getURL`
+  (enough for `background.js` to load and run without throwing, and for the
+  built-in resume templates to load from `resume_temples/`);
+- **redirects the collector** when `HARNESS_COLLECTOR` is set: every call the
+  extension makes to `http://localhost:4500` goes there instead. On this
+  machine 4500 is the **real archive** — profiles are read from and saved to
+  it, and jobs are filed there — so for anything beyond loading the panel,
+  start a scratch backend (`PORT=4599`, its own `DB_FILE` and `DATA_ROOT`)
+  and run the harness with `HARNESS_COLLECTOR=http://localhost:4599`
+  (e.g. through `node --env-file=…`);
 - stubs `window.fetch` **only** for `api.openai.com`, so the real
   request-building and response-parsing code runs, with a fake network at
   the very edge (no OpenAI key or spend needed). **Edit the canned responses
@@ -66,17 +74,41 @@ re-testing, or you'll be driving the old stub.
 ## What a fresh load looks like
 
 Status line reads `Idle.` (not `Error: …`) — that confirms `GET_STATE` and
-`GET_PROFILE` round-tripped through the real bridge into the real
-`background.js` and back. The **Model** dropdown defaults to `gpt-4o-mini`
-and **Prompt** is pre-filled with the real default prompt text from
-`background.js`'s `PROFILE_DEFAULTS` — if you see an empty prompt or a
-different default model, something in the bridge broke, not the feature
-you're testing.
+`GET_SETTINGS` round-tripped through the real bridge into the real
+`background.js` and back. The **Model** dropdown defaults to `gpt-4o-mini` —
+if it does not, something in the bridge broke, not the feature you're
+testing. Settings → **Profile** lists the collector's tabs in its Country
+picker; with no collector reachable it says it could not load them.
+
+The canned OpenAI reply is a plain `OK`, which is all Test connection needs.
+Generating a resume needs an answer in the prompt's `const resume = {…}`
+shape: wrap `window.fetch` in-page for that, before driving Manual's
+Generate. The feed run also needs `chrome.tabs`/`chrome.scripting` stubbed
+in-page (tabs that load at once, answer `PING` with `{ ok: true }` and
+`SCRAPE_DETAIL` with a reading), after which cards can be fed in by calling
+`window.__bgListeners` with `{ type: "JOB_FOUND", job }` and a `sender.tab`.
+
+An **Indeed** run is driven like Dice's, with the search URL built from the
+panel's form: a stubbed `chrome.tabs.create` receives it, so that is where to
+check what `indeedSearchUrl` built. Faking `/api/users` and `/get-item` on
+`localhost:4500` by wrapping `window.fetch` in-page keeps the real archive out
+of it with no scratch backend needed. Indeed itself answers automated browsers
+with Cloudflare's block page, so `content-indeed.js` cannot be checked against
+the live site from here. Load it into a sample page with stubbed
+`chrome.runtime` to check its reading. Serve the page at a `/jobs` path, which
+404s harmlessly, and replace its body. For `READ_PANE`, give the sample page a
+right-hand pane holding the description as Indeed lays it out: a parent
+element with `[data-testid="vj-job-description-heading"]` and
+`#jobDescriptionText` inside. Add a click handler on `a.jcs-JobTitle` that sets
+`vjk=` with `pushState` and swaps the pane a moment later, as Indeed does.
+Leave the click uncancelled and the link with `target="_blank"`. That proves
+the extension's own click can't open a tab. Stop needs `chrome.tabs.query` stubbed
+(to `[]`), or its reply reports an error even though the run did stop.
 
 ## Flows worth driving
 
 - **Generate/Job bid tabs** (`#mainTabs`) and **Settings → ChatGPT
-  setting/Resume style tabs** (`#settingsTabs`, inside the gear icon's
+  setting/Profile tabs** (`#settingsTabs`, inside the gear icon's
   panel) — two independent tab strips; arrow-key nav and selection should
   stay scoped to whichever one you're in, and picking a top-level tab while
   Settings is open should close Settings.

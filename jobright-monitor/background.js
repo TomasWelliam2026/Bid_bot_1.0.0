@@ -26,9 +26,19 @@ const GLASSDOOR_SEARCH_URL =
   "https://www.glassdoor.com/Job/remote-data-engineer-jobs-SRCH_IL.0,6_IS11047_KO7,20.htm" +
   "?locId=11047&locT=S&remoteWorkType=1";
 
+// `nextPage` boards are read one search page at a time, the pager's Next
+// clicked once a page is done (see "the next page" below). A `scrollBatches`
+// board is one long list: once a full list is done it is cleared and the
+// feed scrolled on for more (see "the next batch").
 const SOURCES = {
-  jobright: { name: "Jobright", url: TARGET, patterns: RECOMMEND_PATTERNS, script: "content.js" },
-  dice: { name: "Dice", url: DICE_SEARCH_URL, patterns: ["https://www.dice.com/jobs*"], script: "content-dice.js" },
+  jobright: { name: "Jobright", url: TARGET, patterns: RECOMMEND_PATTERNS, script: "content.js", scrollBatches: true },
+  dice: {
+    name: "Dice",
+    url: DICE_SEARCH_URL,
+    patterns: ["https://www.dice.com/jobs*"],
+    script: "content-dice.js",
+    nextPage: true
+  },
   glassdoor: {
     name: "Glassdoor",
     url: GLASSDOOR_SEARCH_URL,
@@ -40,6 +50,18 @@ const SOURCES = {
     url: ZIPRECRUITER_SEARCH_URL,
     patterns: ["https://www.ziprecruiter.com/jobs-search*"],
     script: "content-ziprecruiter.js"
+  },
+  // No fixed page: the search opened is the one the panel's search form asks
+  // for, on that country's Indeed site — see indeedSearchUrl.
+  indeed: {
+    name: "Indeed",
+    searched: true,
+    patterns: ["https://*.indeed.com/jobs*"],
+    script: "content-indeed.js",
+    nextPage: true,
+    // Each job is read on the search page, by clicking its card; no tab is
+    // ever opened for one — see readInPane.
+    readsInPane: true
   }
 };
 
@@ -116,10 +138,8 @@ async function updateJob(key, patch) {
 // carries the same holes the builder fills — the header (h1.name, .title,
 // .contact), #summary, #skills, and a <div class="job"> the builder copies once
 // per role — and differs only in how the page looks. Adding a style is a file plus a line here plus an <option> in
-// sidepanel.html; no other code changes.
-//
-// Declared above the profile because PROFILE_DEFAULTS reads the default from
-// it, and a const is not hoisted.
+// sidepanel.html; no other code changes. Which one a resume uses is each
+// profile's own choice — see writerFor.
 // ---------------------------------------------------------------------------
 
 const RESUME_STYLES = {
@@ -131,21 +151,41 @@ const RESUME_STYLES = {
 
 const DEFAULT_RESUME_STYLE = "DE-1";
 
-// Styles added from the panel with "Style add". An extension cannot write into
-// its own install directory at runtime, so the chosen file's HTML is kept in
-// chrome.storage.local instead, keyed by style name: { name: { file, html } }.
-// They sit alongside RESUME_STYLES and are used exactly like them.
-async function getCustomStyles() {
-  const { customStyles = {} } = await chrome.storage.local.get("customStyles");
-  return customStyles;
+// Styles added from the panel belong to the profile they were added under:
+// a name and the template's HTML, typed or pasted into that profile's editor
+// — not a file — and offered to that profile alone. The built-in
+// RESUME_STYLES are every profile's. An extension cannot write into its own
+// install directory at runtime, so the HTML is kept in chrome.storage.local
+// instead, by profile id and style name: { [profileId]: { [name]: { html } } }.
+async function getProfileStyles(profileId) {
+  const { profileStyles = {} } = await chrome.storage.local.get("profileStyles");
+  return profileStyles[profileId] || {};
 }
 
-const listCustomStyles = (styles) =>
-  Object.entries(styles).map(([name, s]) => ({ name, file: s.file }));
+async function setProfileStyles(profileId, styles) {
+  const { profileStyles = {} } = await chrome.storage.local.get("profileStyles");
+  profileStyles[profileId] = styles;
+  await chrome.storage.local.set({ profileStyles });
+}
 
-// The holes buildResumeHtml cannot do without, matched the same way — a file
-// missing one would build a resume with that part silently left out. The
-// header is not required: a style without it keeps its own.
+const listCustomStyles = (styles) => Object.keys(styles).map((name) => ({ name }));
+
+// Added styles used to be one list for the whole extension, under
+// "customStyles". Each profile there is now given its own copy of that list,
+// so every profile still has every style it could pick before; the shared
+// list is then emptied, so this happens once. Profiles added to the dashboard
+// later start with the built-in styles only.
+async function migrateLegacyStyles(profiles) {
+  const { customStyles } = await chrome.storage.local.get("customStyles");
+  if (!customStyles || !Object.keys(customStyles).length || !profiles.length) return;
+  const { profileStyles = {} } = await chrome.storage.local.get("profileStyles");
+  for (const p of profiles) profileStyles[p.id] = { ...customStyles, ...(profileStyles[p.id] || {}) };
+  await chrome.storage.local.set({ profileStyles, customStyles: {} });
+}
+
+// The holes buildResumeHtml cannot do without, matched the same way — a
+// template missing one would build a resume with that part silently left out.
+// The header is not required: a style without it keeps its own.
 function missingHoles(html) {
   const missing = [];
   if (!/<p[^>]*id="summary"[^>]*>[\s\S]*?<\/p>/.test(html)) missing.push('<p id="summary">');
@@ -158,36 +198,50 @@ function missingHoles(html) {
   return missing;
 }
 
-async function addCustomStyle(name, file, html) {
+// A name already added to this profile replaces that style — the editor's
+// Update.
+async function addCustomStyle(profileId, name, html) {
   name = String(name || "").trim().slice(0, 40);
   if (!name) throw new Error("the style needs a name");
   if (Object.hasOwn(RESUME_STYLES, name)) {
-    throw new Error(`"${name}" is a built-in style — rename the file`);
+    throw new Error(`"${name}" is a built-in style — pick another name`);
   }
   const missing = missingHoles(String(html || ""));
-  if (missing.length) throw new Error(`the file has no ${missing.join(", ")}`);
+  if (missing.length) throw new Error(`the HTML has no ${missing.join(", ")}`);
 
-  const styles = await getCustomStyles();
+  const styles = await getProfileStyles(profileId);
   const replaced = Object.hasOwn(styles, name);
-  styles[name] = { file: String(file || ""), html: String(html) };
-  await chrome.storage.local.set({ customStyles: styles });
+  styles[name] = { html: String(html) };
+  await setProfileStyles(profileId, styles);
   return { name, replaced, styles: listCustomStyles(styles) };
 }
 
-async function removeCustomStyle(name) {
-  const styles = await getCustomStyles();
-  delete styles[name];
-  await chrome.storage.local.set({ customStyles: styles });
+// A style's template as text, built-in or one of this profile's — what the
+// profile's editor starts from when a listed style is copied into it.
+async function getStyleHtml(profileId, name) {
+  return { name, builtin: Object.hasOwn(RESUME_STYLES, name), html: await loadTemplate(name, profileId) };
+}
 
-  // A profile left pointing at the removed style goes back to the default,
-  // rather than quietly falling back on every job.
-  const profile = await getProfile();
-  if (profile.resumeStyle === name) await setProfile({ resumeStyle: DEFAULT_RESUME_STYLE });
-  return { styles: listCustomStyles(styles), profile: await getProfile() };
+async function removeCustomStyle(profileId, name) {
+  const styles = await getProfileStyles(profileId);
+  delete styles[name];
+  await setProfileStyles(profileId, styles);
+
+  // The profile, if it was using it, goes back to the default rather than
+  // quietly falling back on every job. Best effort: with the collector
+  // unreachable, loadTemplate's own fallback still covers it.
+  const list = await listProfiles();
+  const profile = list.ok && list.profiles.find((p) => p.id === profileId);
+  if (profile?.resume?.style === name) await updateProfile(profileId, { resumeStyle: "" });
+  return { styles: listCustomStyles(styles) };
 }
 
 // ---------------------------------------------------------------------------
-// Profile — the OpenAI key, model and prompt set under ChatGPT setting.
+// Settings — the OpenAI key and model set under ChatGPT setting, and the
+// country and role picked under Profile.
+//
+// The prompt, master resume and resume style are not here: each profile has
+// its own, kept on its dashboard tab — see Profiles below.
 //
 // The key lives in chrome.storage.local, which is not encrypted: anyone with
 // access to this Chrome profile's directory can read it. That is the same
@@ -195,32 +249,20 @@ async function removeCustomStyle(name) {
 // why the key is never sent anywhere except api.openai.com.
 // ---------------------------------------------------------------------------
 
-// Nothing is appended to the prompt at send time, so the default has to carry
-// the output format itself — otherwise a fresh install produces answers the
-// builder cannot read.
-const PROFILE_DEFAULTS = {
+const SETTINGS_DEFAULTS = {
   apiKey: "",
   model: "gpt-4o-mini",
 
-  // Which country this profile's applications are filed under in the shared
-  // archive — sent with every save so the dashboard puts it on that tab.
-  // Blank leaves it off every tab there rather than guessing.
-  countryName: "",
+  // Which profiles a caught job gets resumes for: every dashboard tab with
+  // this Country (C) and this Role. Both are needed — blank picks none.
+  country: "",
+  role: ""
+};
 
-  // Which template the resume is laid out with — a key of RESUME_STYLES.
-  // Every style is filled from the same answer, so switching is purely
-  // cosmetic and takes effect on the next job generated.
-  resumeStyle: DEFAULT_RESUME_STYLE,
-
-  // The candidate's full resume, sent with every job so the tailored one is
-  // built from real experience rather than from the job description alone.
-  masterResume: "",
-
-  // Whether that resume goes out with each job: "use", or "none" to send the
-  // job description alone. "none" keeps the text, so switching back restores it.
-  masterResumeMode: "use",
-
-  prompt: [
+// The prompt a profile is written with until it is given its own. Nothing is
+// appended to the prompt at send time, so it has to carry the output format
+// itself — otherwise a fresh profile produces answers the builder cannot read.
+const DEFAULT_PROMPT = [
     "You are an expert resume writer. Given the job description and the master",
     "resume below, write a tailored resume and a cover letter for the job.",
     "Use only experience found in the master resume — never invent employers,",
@@ -229,36 +271,51 @@ const PROFILE_DEFAULTS = {
     "Return ONLY JavaScript source, no prose and no code fence, in exactly this form:",
     "",
     "const resume = {",
-    '  "CONTACT": ["Full name", "Headline title", "City, ST ZIP", "phone", "email", "https://linkedin.com/in/…"],',
-    '  "SUMMARY": "one paragraph",',
-    '  "SKILLS": ["Label: a, b, c"],',
-    '  "EXPERIENCE": [',
-    '    ["Company", "Job title", "Location", "Start – End", "bullet", "bullet"]',
-    "  ],",
-    '  "CERTIFICATIONS": ["Certification name"],',
-    '  "EDUCATION": [',
-    '    ["School", [["Degree", "Field of study"]], "Year"]',
-    "  ]",
+    '  "name": "Full name",',
+    '  "title": "Headline title",',
+    '  "contact": {',
+    '    "email": "email",',
+    '    "phone": "phone",',
+    '    "linkedin": "https://linkedin.com/in/…",',
+    '    "location": "City, ST ZIP"',
+    "  },",
+    '  "resume": {',
+    '    "summary": "one paragraph",',
+    '    "skills": ["Label: a, b, c"],',
+    '    "experience": [',
+    "      {",
+    '        "company": "Company",',
+    '        "position": "Job title",',
+    '        "location": "Location",',
+    '        "duration": "Start - End",',
+    '        "content": ["bullet", "bullet"]',
+    "      }",
+    "    ],",
+    '    "education": [',
+    '      { "degree": "Degree in field of study", "school": "School", "year": "Year" }',
+    "    ]",
+    "  },",
+    '  "cover_letter": "the cover letter for this job, plain text"',
     "};",
-    'const coverletter = "the cover letter for this job, plain text";',
     "",
-    "EXPERIENCE holds one array per role, most recent first, 3 to 7 roles. Each",
-    "starts with the company, the job title, the location and the dates, then the bullets.",
-    "EDUCATION holds one array per school; its middle item lists every degree earned",
-    "there. CERTIFICATIONS is [] when the master resume lists none.",
+    "experience holds one object per role, most recent first, 3 to 7 roles.",
+    "education holds one object per degree. Add \"certifications\": [\"Certification name\"]",
+    "inside \"resume\" only when the master resume lists any.",
     "Use double-quoted strings and keys. Plain text only — no HTML, no markdown."
-  ].join("\n")
-};
+  ].join("\n");
 
-async function getProfile() {
+// Stored under "profile", the name this object had when it held a single
+// profile's prompt and master resume. A store written then still carries
+// those, which migrateLegacySettings hands to the tab they belonged to.
+async function getSettings() {
   const { profile } = await chrome.storage.local.get("profile");
-  return { ...PROFILE_DEFAULTS, ...(profile || {}) };
+  return { ...SETTINGS_DEFAULTS, ...(profile || {}) };
 }
 
-async function setProfile(patch) {
-  const profile = { ...(await getProfile()), ...patch };
-  await chrome.storage.local.set({ profile });
-  return profile;
+async function setSettings(patch) {
+  const settings = { ...(await getSettings()), ...patch };
+  await chrome.storage.local.set({ profile: settings });
+  return settings;
 }
 
 // ---------------------------------------------------------------------------
@@ -345,21 +402,22 @@ function waitForComplete(tabId, timeoutMs = 30000, signal) {
 // The tab is focused rather than opened in the background on purpose: the list
 // is virtualized, and a backgrounded tab throttles timers and may not mount
 // offscreen rows at all, which would stall the harvest.
-async function openFeedTab(source = SOURCES.jobright) {
+// `url` is the search to open where it is not the board's fixed one (Indeed's).
+async function openFeedTab(source = SOURCES.jobright, url = source.url) {
   const tabs = await chrome.tabs.query({ url: source.patterns });
   const existing = tabs.find((t) => typeof t.id === "number");
 
   if (existing) {
-    // A Dice, Glassdoor or ZipRecruiter tab on some other search is sent to the configured one.
-    const onTarget = source === SOURCES.jobright || existing.url === source.url;
-    await chrome.tabs.update(existing.id, onTarget ? { active: true } : { active: true, url: source.url });
+    // A Dice, Glassdoor, Indeed or ZipRecruiter tab on some other search is sent to the one asked for.
+    const onTarget = source === SOURCES.jobright || existing.url === url;
+    await chrome.tabs.update(existing.id, onTarget ? { active: true } : { active: true, url });
     await chrome.windows.update(existing.windowId, { focused: true }).catch(() => {});
     if (!onTarget || existing.status !== "complete") await waitForComplete(existing.id);
     feedTabId = existing.id;
     return existing.id;
   }
 
-  const tab = await chrome.tabs.create({ url: source.url, active: true });
+  const tab = await chrome.tabs.create({ url, active: true });
   await waitForComplete(tab.id);
   feedTabId = tab.id;
   return tab.id;
@@ -429,6 +487,88 @@ async function tell(tabId, message, script) {
 }
 
 // ---------------------------------------------------------------------------
+// Waiting for a person: the human check
+//
+// Indeed sits behind Cloudflare, which sometimes shows a check — "Just a
+// moment...", "Additional Verification Required", "Verify you are human" — in
+// place of the page asked for. Only a person can pass it. A content script
+// that finds one says so (`blocked` on its replies), and the run pauses
+// there: the tab is brought to the front, the panel says what is needed, and
+// the tab is looked at every few seconds. Once the page behind the check is
+// showing, the run carries on from where it paused — the search page is
+// streamed, the job page is read. Stop ends the wait, as it ends everything.
+// ---------------------------------------------------------------------------
+
+const VERIFY_POLL_MS = 2000;
+
+// The check being waited on, for the panel: { tabId, page: "search" | "job",
+// title, since }, or null.
+let verifyPause = null;
+
+function setVerifyPause(pause) {
+  verifyPause = pause;
+  broadcast({ type: "VERIFY_STATUS", pause });
+}
+
+async function focusTab(tabId) {
+  const tab = await chrome.tabs.update(tabId, { active: true }).catch(() => null);
+  if (tab) await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+}
+
+// Whether the tab still shows the check. Passing it usually loads a new
+// document, so a tab mid-load, or one whose fresh script has not answered
+// yet, is neither — null — and is simply asked again next time.
+async function stillBlocked(tabId, script) {
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    if (tab.status !== "complete") return null;
+    await ensureContentScript(tabId, { script, attempts: 2 });
+    const reply = await chrome.tabs.sendMessage(tabId, { type: "PING" });
+    return reply?.ok ? reply.blocked === true : null;
+  } catch {
+    return null;
+  }
+}
+
+async function waitForHumanCheck(tabId, script, signal, page, title = null) {
+  setVerifyPause({ tabId, page, title, since: Date.now() });
+  holdAwake();
+  await focusTab(tabId);
+  try {
+    while (!signal?.aborted) {
+      await sleep(VERIFY_POLL_MS);
+      if (signal?.aborted) break;
+      if (!(await chrome.tabs.get(tabId).catch(() => null))) {
+        throw new Error("the tab was closed before the human check was passed");
+      }
+      if ((await stillBlocked(tabId, script)) === false) return;
+    }
+    throw new Error(STOPPED);
+  } finally {
+    setVerifyPause(null);
+    releaseAwake();
+  }
+}
+
+// A list tab that could not be carried on with — closed during a check, say —
+// told to the panel in the status line, where the feed's own news goes.
+function reportFeedError(err) {
+  broadcast({ type: "FEED_STATUS", status: { streaming: false, error: err?.message || String(err) } });
+}
+
+// START_STREAM on a board's list tab, waiting out any human check in front of
+// it first.
+async function streamFeed(tabId, source, options, signal) {
+  let reply = await tell(tabId, { type: "START_STREAM", options }, source.script);
+  while (reply?.blocked) {
+    await waitForHumanCheck(tabId, source.script, signal, "search");
+    reply = await tell(tabId, { type: "START_STREAM", options }, source.script);
+  }
+  tellFeed({ type: "ACCEPTED", count: acceptedCount });
+  return reply;
+}
+
+// ---------------------------------------------------------------------------
 // The detail pass
 //
 // Each caught card's URL is opened in its own tab, switched to, read, and
@@ -467,6 +607,7 @@ const DETAIL_LOAD_TIMEOUT = 25000;
 const API_BASE = "http://localhost:4500";
 const CHECK_ENDPOINT = `${API_BASE}/get-item`;
 const SAVE_ENDPOINT = `${API_BASE}/save-data`;
+const USERS_ENDPOINT = `${API_BASE}/api/users`;
 const SAVE_TIMEOUT_MS = 10000;
 
 const queue = [];
@@ -564,19 +705,29 @@ async function drainChecks() {
       const signal = runSignal();
       if (signal?.aborted) break;
 
-      // The list is full; further candidates are not worth asking about.
+      // The list is full. On a board that goes on in batches the candidates
+      // still waiting are held for the next batch, which checks them first —
+      // they are marked seen already, so dropping them would lose them for
+      // good. Anywhere else the run ends here, and they are not worth asking
+      // about.
       if (acceptedCount >= MAX_STORED) {
-        checkQueue.length = 0;
+        if (!SOURCES[runSource]?.scrollBatches) checkQueue.length = 0;
         break;
       }
 
       const job = checkQueue.shift();
 
-      // Only meaningful while saving is on: with it off the collector holds
-      // nothing, so every candidate is new.
-      const check = saveEnabled
-        ? await checkExisting(job, signal)
-        : { ok: true, exists: false };
+      // Asked once per profile picked in Settings: a job is new while any of
+      // them does not have it yet. Only meaningful while saving is on: with it
+      // off the collector holds nothing, so every candidate is new. Profiles
+      // that cannot be read are no reason to drop a job — it goes ahead, and
+      // the queue reports the same failure on its row.
+      const selection = await selectedProfiles();
+      const check = !selection.ok
+        ? { ok: false, pending: null, existing: [], error: selection.error }
+        : saveEnabled
+          ? await checkExisting(job, signal, selection.profiles)
+          : { ok: true, pending: selection.profiles, existing: [] };
 
       if (check.stopped) {
         checked.delete(job.key);
@@ -584,19 +735,24 @@ async function drainChecks() {
         break;
       }
 
-      if (check.exists) {
+      if (check.pending && !check.pending.length) {
         skippedCount++;
         queueStatus();
-        continue; // dropped: not stored, not shown, not opened
+        continue; // every profile has it: not stored, not shown, not opened
       }
 
       acceptedCount++;
       await addJob(job);
       broadcast({ type: "JOB_ADDED", job });
 
-      // A check that failed rides along, so the panel can say the job was
-      // saved without a working duplicate check.
-      enqueue(check.error ? { ...job, checkError: check.error } : job);
+      // Which profiles it is built for rides along to the queue, with the ones
+      // that already have it and a check that failed, so the panel can say so.
+      enqueue({
+        ...job,
+        ...(check.pending && { profileIds: check.pending.map((p) => p.id) }),
+        ...(check.existing.length && { existingOn: check.existing }),
+        ...(check.error && { checkError: check.error })
+      });
       tellFeed({ type: "ACCEPTED", count: acceptedCount });
     }
   } finally {
@@ -605,23 +761,24 @@ async function drainChecks() {
     // A page whose cards were all already in the collector queues nothing,
     // so drain() never runs for it — this is where that page is finished.
     nextPageWhenDone();
+    nextBatchWhenDone();
   }
 }
 
 // ---------------------------------------------------------------------------
-// Dice: the next page, once this one is done
+// Dice and Indeed: the next page, once this one is done
 //
-// On Dice a run works one search page at a time. When every card found on the
+// On a nextPage board a run works one search page at a time. When every card found on the
 // page has been through the filter and every job it let through has had its
 // resume built and sent, the page's "Next" is clicked and the new page is
 // read like the first. It ends at the last page (no Next, or a disabled one),
-// at MAX_STORED new jobs, at MAX_DICE_PAGES, or on Stop.
+// at MAX_STORED new jobs, at MAX_PAGES, or on Stop.
 //
 // Called whenever either queue empties; it does nothing unless both are empty
 // at once, so a lull between two checks does not turn the page early.
 // ---------------------------------------------------------------------------
 
-const MAX_DICE_PAGES = 30;
+const MAX_PAGES = 30;
 // Cards can still be arriving from the page when the queues first empty; this
 // gives them a moment to land before the page is called finished.
 const PAGE_SETTLE_MS = 1500;
@@ -634,7 +791,8 @@ let paging = false;
 const pipelineIdle = () => !checking && !checkQueue.length && !draining && !queue.length;
 
 async function nextPageWhenDone() {
-  if (runSource !== "dice" || paging || !pipelineIdle()) return;
+  // A run paused on a human check moves on once it is passed, not before.
+  if (!SOURCES[runSource]?.nextPage || paging || verifyPause || !pipelineIdle()) return;
   paging = true;
 
   let turned = false;
@@ -644,7 +802,7 @@ async function nextPageWhenDone() {
     // Stopped, still busy after all, full, or out of pages: not this time.
     // A job still in flight calls back here when it finishes.
     if (!signal || signal.aborted || !visitEnabled || !pipelineIdle()) return;
-    if (acceptedCount >= MAX_STORED || pagesTurned >= MAX_DICE_PAGES) return;
+    if (acceptedCount >= MAX_STORED || pagesTurned >= MAX_PAGES) return;
     if (feedTabId === null) return;
 
     const reply = await chrome.tabs
@@ -657,12 +815,15 @@ async function nextPageWhenDone() {
     if (signal.aborted) return;
 
     // Either a new document (the script is re-injected and starts fresh) or
-    // the same one re-rendered (its dedupe keeps what was already seen).
-    await tell(feedTabId, { type: "START_STREAM", options: {} }, SOURCES.dice.script);
-    tellFeed({ type: "ACCEPTED", count: acceptedCount });
+    // the same one re-rendered (its dedupe keeps what was already seen) — or
+    // a human check, waited out first.
+    await streamFeed(feedTabId, SOURCES[runSource], {}, signal);
     turned = true;
   } catch (err) {
-    console.warn("[jobright] could not open the next Dice page:", err?.message || err);
+    if (!wasStopped(err)) {
+      console.warn("[jobright] could not open the next page:", err?.message || err);
+      reportFeedError(err);
+    }
   } finally {
     paging = false;
   }
@@ -675,7 +836,8 @@ async function nextPageWhenDone() {
 }
 
 // Resolves once the click has taken the tab somewhere and the page is loaded:
-// the URL has moved on (Dice puts ?page= in it) and the tab reports complete.
+// the URL has moved on (Dice puts ?page= in it, Indeed &start=) and the tab
+// reports complete.
 // A Next that re-renders in place without touching the URL simply runs out
 // the clock, and the page is read as it is by then.
 async function waitForPageChange(tabId, fromUrl, signal) {
@@ -683,11 +845,115 @@ async function waitForPageChange(tabId, fromUrl, signal) {
   while (Date.now() < deadline && !signal?.aborted) {
     await sleep(300);
     const tab = await chrome.tabs.get(tabId).catch(() => null);
-    if (!tab) throw new Error("the Dice tab was closed");
+    if (!tab) throw new Error("the job board tab was closed");
     if (tab.url !== fromUrl && tab.status === "complete") break;
   }
   // The job list is rendered after the document loads.
   await sleep(PAGE_SETTLE_MS);
+}
+
+// ---------------------------------------------------------------------------
+// Jobright: the next batch, once this one is done
+//
+// Jobright's feed is one long list scrolled for more, with no pages. A run
+// takes MAX_STORED new jobs at a time. Once the list is full and every one
+// of them has had its resume built and sent, the list is cleared — in
+// storage, the badge and the panel — and the feed tab scrolls on from where
+// it stopped for the next MAX_STORED. What has been seen stays seen, so no
+// job comes round twice; candidates that arrived after the list filled are
+// checked first. It ends when the feed runs out (a batch that never fills),
+// or on Stop. The jobs themselves are in the collector by then; only the
+// panel's list is cleared.
+//
+// Called whenever either queue empties, like nextPageWhenDone.
+// ---------------------------------------------------------------------------
+
+let batchesDone = 0;
+let batching = false;
+
+// The batch's own work is done: nothing being checked or worked on. Unlike
+// pipelineIdle, candidates held over for the next batch do not count.
+const batchDone = () => !checking && !draining && !queue.length;
+
+async function nextBatchWhenDone() {
+  if (!SOURCES[runSource]?.scrollBatches || batching || acceptedCount < MAX_STORED || !batchDone()) return;
+  batching = true;
+
+  try {
+    // A job still arriving, or a queue about to pick one up, is not done.
+    await sleep(PAGE_SETTLE_MS);
+    const signal = runSignal();
+    if (!signal || signal.aborted || acceptedCount < MAX_STORED || !batchDone()) return;
+    if (feedTabId === null) return;
+
+    batchesDone++;
+    acceptedCount = 0;
+    await clearJobs();
+    broadcast({ type: "BATCH_CLEARED", batch: batchesDone, size: MAX_STORED });
+
+    // The held-over candidates first, then the feed scrolls on for more.
+    tellFeed({ type: "ACCEPTED", count: 0 });
+    drainChecks();
+    await tell(feedTabId, { type: "NEXT_BATCH" }, SOURCES[runSource].script);
+  } catch (err) {
+    console.warn("[jobright] could not start the next batch:", err?.message || err);
+    reportFeedError(err);
+  } finally {
+    batching = false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Indeed: the search a run opens
+//
+// Indeed is read like Dice — a search page in a tab, content-indeed.js on it,
+// the pager's Next once a page is done — with each job's description read by
+// clicking its card on that page. The search is not fixed, though: the
+// panel's search form says what to look for, and Start opens that search on
+// the picked country's Indeed site.
+// ---------------------------------------------------------------------------
+
+// Each country's own Indeed site, by the ISO code the panel's Country sends —
+// keep in step with #searchCountry in sidepanel.html.
+const INDEED_COUNTRIES = {
+  US: "www", GB: "uk", CA: "ca", AU: "au", IN: "in", DE: "de", FR: "fr", IE: "ie", NL: "nl",
+  ES: "es", IT: "it", PL: "pl", SE: "se", CH: "ch", BE: "be", AT: "at", PT: "pt", SG: "sg",
+  JP: "jp", PH: "ph", AE: "ae", ZA: "za", NZ: "nz", BR: "br", MX: "mx"
+};
+
+// The panel's Job type values are Indeed's own (jt(fulltime) and so on).
+const INDEED_JOB_TYPES = new Set(["fulltime", "parttime", "contract", "internship"]);
+// Indeed's attribute key for remote jobs.
+const INDEED_REMOTE = "DSQF7";
+
+// What the panel asked to search for, with anything unusable dropped.
+function indeedSearchOf(raw) {
+  const s = raw && typeof raw === "object" ? raw : {};
+  return {
+    role: String(s.role || "").trim().slice(0, 200),
+    country: Object.hasOwn(INDEED_COUNTRIES, s.country) ? s.country : "US",
+    location: String(s.location || "").trim().slice(0, 200),
+    jobType: INDEED_JOB_TYPES.has(s.jobType) ? s.jobType : "",
+    postedDays: Math.max(0, Math.min(30, Math.floor(Number(s.postedDays) || 0))),
+    remote: !!s.remote
+  };
+}
+
+// The search as Indeed's own filters write it, newest first:
+//   /jobs?q=data+engineer&l=Austin%2C+TX&fromage=7&sc=0kf%3Aattr%28DSQF7%29jt%28fulltime%29%3B&sort=date
+// q and l are what Indeed's own two search boxes send — "What" (the role) and
+// "Where" (a city, state, zip code or "remote"; blank for the whole country) —
+// so this is the same search as typing into them and pressing Find jobs. fromage
+// the days since posting, and sc the remote and job-type filters together.
+function indeedSearchUrl(search) {
+  const url = new URL(`https://${INDEED_COUNTRIES[search.country]}.indeed.com/jobs`);
+  url.searchParams.set("q", search.role);
+  if (search.location) url.searchParams.set("l", search.location);
+  if (search.postedDays) url.searchParams.set("fromage", String(search.postedDays));
+  const filters = (search.remote ? `attr(${INDEED_REMOTE})` : "") + (search.jobType ? `jt(${search.jobType})` : "");
+  if (filters) url.searchParams.set("sc", `0kf:${filters};`);
+  url.searchParams.set("sort", "date");
+  return url.href;
 }
 
 // Tells the feed tab how many candidates have survived the filter, so it knows
@@ -714,12 +980,13 @@ function broadcast(message) {
 // say "waiting for ChatGPT" on that job's own row. Kept here rather than only
 // sent once, because every status carries it: a panel opened mid-generation
 // still learns what the current job is doing. `at` is when the step began, so
-// the panel can count the seconds a slow answer has been taking.
-//   opening → reading → waiting (for ChatGPT) → building → saving
+// the panel can count the seconds a slow answer has been taking, and `profile`
+// is whose resume the step is for, once there is one.
+//   opening → reading → (per profile) waiting (for ChatGPT) → building → saving
 let active = null;
 
-function setStage(job, stage) {
-  active = job && stage ? { key: job.key, title: job.title, stage, at: Date.now() } : null;
+function setStage(job, stage, profile = null) {
+  active = job && stage ? { key: job.key, title: job.title, stage, profile, at: Date.now() } : null;
   queueStatus();
 }
 
@@ -767,33 +1034,45 @@ async function drain() {
       }
 
       // Only non-LinkedIn jobs are saved — a LinkedIn origin ends the pass at
-      // the closed tab, with nothing read and nothing sent.
+      // the closed tab, with nothing read and nothing sent. The page is read
+      // once; each profile then gets its own resume from that one reading.
       if (saveEnabled && detail.ok && !detail.isLinkedIn) {
-        const profile = await getProfile();
-        detail.resume = await generateResume(profile, detail, signal, (stage) => setStage(job, stage));
-        if (detail.resume.ok) generatedCount++;
-
-        // Nothing is sent unless the resume actually built. A job that fails
-        // here is deliberately left unsaved rather than stored half-done —
-        // which also means /get-item still reports it missing, so the next
-        // run picks it up and tries again.
-        if (detail.resume.ok) {
-          setStage(job, "saving");
-          detail.save = await saveJob(job, detail, signal, profile);
-          if (detail.save.ok) savedCount++;
-          // The duplicate check that let this job through did not answer
-          // cleanly — worth surfacing, but not worth withholding the job over.
-          if (job.checkError) detail.save.checkError = job.checkError;
+        const results = [...(job.partialResults || [])];
+        const selection = await selectedProfiles();
+        if (!selection.ok) {
+          detail.profilesError = selection.error;
+        } else {
+          // The profiles the duplicate check found without this job — or,
+          // for a job checked before the profiles could be read, every one
+          // picked — less any already done before a Stop.
+          const done = new Set(results.map((r) => r.profileId));
+          const todo = selection.profiles.filter(
+            (p) => (!job.profileIds || job.profileIds.includes(p.id)) && !done.has(p.id)
+          );
+          for (const profile of todo) {
+            const result = await buildFor(job, detail, selection.settings, profile, signal);
+            if (result.stopped) {
+              detail.stopped = true;
+              break;
+            }
+            results.push(result);
+          }
         }
+        detail.results = results;
+        if (job.existingOn) detail.existingOn = job.existingOn;
+        // The duplicate check that let this job through did not answer
+        // cleanly — worth surfacing, but not worth withholding the job over.
+        if (job.checkError) detail.checkError = job.checkError;
+        // Kept for a Stop below, so a later Start carries on with the
+        // profiles still to do rather than writing the others' again.
+        job.partialResults = results;
       }
 
-      // A job interrupted mid-read is not a result. Leave the record clean and
-      // put it back at the front so a later Start picks it up where it left
-      // off, rather than storing a half-reading.
-      // Interrupted during the read, or during its POST — either way there is
-      // no complete result to store.
+      // A job interrupted mid-read, mid-answer or mid-POST is not a result.
+      // Leave the record clean and put it back at the front so a later Start
+      // picks it up where it left off, rather than storing half of one.
       // It stays in `queued` — it is still spoken for, just back at the front.
-      if (detail.stopped || detail.resume?.stopped || detail.save?.stopped) {
+      if (detail.stopped) {
         queue.unshift(job);
         break;
       }
@@ -813,7 +1092,31 @@ async function drain() {
     releaseAwake();
     queueStatus({ drained: true });
     nextPageWhenDone();
+    nextBatchWhenDone();
   }
+}
+
+// One profile's resume for a job that has been read: written from that
+// profile's own prompt, master resume and style, and — only once it has built
+// — filed under that profile's own tab. Nothing is sent unless the resume
+// actually built: a profile that fails here is deliberately left unsaved
+// rather than stored half-done, which also means /get-item still reports it
+// missing on that tab, so the next run picks it up and tries again.
+// `{ stopped: true }` when Stop cut it short, with nothing counted.
+async function buildFor(job, detail, settings, profile, signal) {
+  const onStage = (stage) => setStage(job, stage, profile.name);
+  const resume = await generateResume(writerFor(settings, profile), detail, signal, onStage);
+  if (resume.stopped) return { stopped: true };
+
+  const result = { profileId: profile.id, profileName: profile.name, resume, save: null };
+  if (resume.ok) {
+    onStage("saving");
+    result.save = await saveJob(job, detail, resume, signal, profile.name);
+    if (result.save.stopped) return { stopped: true };
+    generatedCount++;
+    if (result.save.ok) savedCount++;
+  }
+  return result;
 }
 
 // POSTs one job to the local collector. Never throws: a save failure is a
@@ -848,33 +1151,172 @@ function describeFetchError(err, url) {
     : `${err?.message || err} — is ${url} running?`;
 }
 
-// Asks the collector whether it already holds this job, by company and title.
+// Asks the collector whether each profile's tab already holds this job, by
+// company and title. The same job on another profile's tab is that profile's
+// application, so this one still goes ahead for the rest. Answers with the
+// profiles still to build for (`pending`) and the names of those that have it
+// (`existing`).
 //
-// Only the exact answer { code: 200, msg: "already exist" } suppresses the
-// save. Anything else — a different code, a different message, a non-200, or
+// Only the exact answer { code: 200, msg: "already exist" } counts a profile
+// out. Anything else — a different code, a different message, a non-200, or
 // no reply at all — is treated as "not a duplicate", so the check failing open
-// can never silently cost you a job.
-async function checkExisting(job, signal) {
-  try {
-    const { res, data } = await postJson(
-      CHECK_ENDPOINT,
-      { company: job.company, job_title: job.title },
-      signal
-    );
-
-    const exists = res.ok && data?.code === 200 && data?.msg === "already exist";
-    return { ok: true, exists };
-  } catch (err) {
-    if (signal?.aborted) return { ok: false, stopped: true, exists: false };
-    return { ok: false, exists: false, error: describeFetchError(err, CHECK_ENDPOINT) };
+// can never silently cost a profile a job.
+async function checkExisting(job, signal, profiles) {
+  const pending = [];
+  const existing = [];
+  const errors = [];
+  for (const profile of profiles) {
+    try {
+      const { res, data } = await postJson(
+        CHECK_ENDPOINT,
+        // The same `user` saveJob sends, so the check looks on the tab the
+        // save would land on.
+        { company: job.company, job_title: job.title, user: profile.name },
+        signal
+      );
+      if (res.ok && data?.code === 200 && data?.msg === "already exist") existing.push(profile.name);
+      else pending.push(profile);
+    } catch (err) {
+      if (signal?.aborted) return { ok: false, stopped: true, pending: [], existing: [] };
+      pending.push(profile);
+      errors.push(`${profile.name}: ${describeFetchError(err, CHECK_ENDPOINT)}`);
+    }
   }
+  return { ok: !errors.length, pending, existing, error: errors.join("; ") || undefined };
+}
+
+// ---------------------------------------------------------------------------
+// Profiles
+//
+// A profile is one of the dashboard's tabs: a person applying in a country
+// for a role, under their own Profile (D) name — with their own prompt,
+// master resume and resume style kept on the tab as well, edited from this
+// extension's Profile screen. Settings picks a country and a role, and every
+// profile with both gets its own resume for each job caught: written from its
+// own master resume with its own prompt, laid out in its own style, and filed
+// under its own tab.
+// ---------------------------------------------------------------------------
+
+const matchKey = (s) => String(s ?? "").trim().toLowerCase();
+
+// Every tab on the dashboard, in its order, as the collector describes it:
+// { id, name, sheet: { applicant, country, role },
+//   resume: { prompt, masterResume, masterResumeMode, style } }.
+async function listProfiles() {
+  try {
+    const res = await fetch(USERS_ENDPOINT, { signal: AbortSignal.timeout(SAVE_TIMEOUT_MS) });
+    if (!res.ok) return { ok: false, error: `HTTP ${res.status} ${res.statusText}` };
+    const data = await res.json();
+    const profiles = (data?.users || []).filter((u) => String(u?.name || "").trim());
+    await migrateLegacyStyles(profiles);
+    return { ok: true, profiles };
+  } catch (err) {
+    return { ok: false, error: describeFetchError(err, USERS_ENDPOINT) };
+  }
+}
+
+// Saves a profile's own prompt, master resume or resume style to its tab.
+async function updateProfile(id, patch) {
+  const url = `${USERS_ENDPOINT}/${encodeURIComponent(id)}`;
+  try {
+    const res = await fetch(url, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+      signal: AbortSignal.timeout(SAVE_TIMEOUT_MS)
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data?.user) return { ok: false, error: data?.error || `HTTP ${res.status} ${res.statusText}` };
+    return { ok: true, profile: data.user };
+  } catch (err) {
+    return { ok: false, error: describeFetchError(err, url) };
+  }
+}
+
+// Matched the way the dashboard matches tabs to each other: ignoring case and
+// surrounding spaces.
+function matchingProfiles(profiles, settings) {
+  const country = matchKey(settings.country);
+  const role = matchKey(settings.role);
+  if (!country || !role) return [];
+  return profiles.filter((p) => matchKey(p.sheet?.country) === country && matchKey(p.sheet?.role) === role);
+}
+
+// The profiles a job is built for, read fresh each time, so one edited
+// mid-run is written with what was saved last.
+async function selectedProfiles() {
+  const settings = await getSettings();
+  const list = await listProfiles();
+  if (!list.ok) return { ok: false, error: `could not load the profiles — ${list.error}` };
+  const profiles = matchingProfiles(list.profiles, settings);
+  if (!profiles.length) {
+    return {
+      ok: false,
+      error:
+        !settings.country || !settings.role
+          ? "no country and role picked — choose them in Settings → Profile"
+          : `no profile on the dashboard has Country "${settings.country}" and Role "${settings.role}"`
+    };
+  }
+  return { ok: true, settings, profiles };
+}
+
+// What one profile's resume is written with: the key and model from ChatGPT
+// setting, everything else the profile's own. A blank prompt or style is the
+// built-in default, the way a fresh profile starts.
+function writerFor(settings, profile) {
+  const own = profile.resume || {};
+  return {
+    name: profile.name,
+    profileId: profile.id,
+    apiKey: settings.apiKey,
+    model: settings.model,
+    prompt: String(own.prompt || "").trim() ? own.prompt : DEFAULT_PROMPT,
+    masterResume: own.masterResume || "",
+    masterResumeMode: own.masterResumeMode === "none" ? "none" : "use",
+    resumeStyle: own.style || DEFAULT_RESUME_STYLE
+  };
+}
+
+// The prompt, master resume and resume style used to be one set for the
+// whole extension, filed under the one tab Country name picked. The first
+// time the profiles can be read, that set goes to that tab — unless the tab
+// has its own already — and the tab's country and role become the ones
+// picked, so a run carries on building for it as before. Until the collector
+// answers, it is simply tried again next time.
+async function migrateLegacySettings() {
+  const settings = await getSettings();
+  if (settings.migratedToProfiles) return;
+
+  const legacyTab = String(settings.countryName || "").trim();
+  if (legacyTab) {
+    const list = await listProfiles();
+    if (!list.ok) return;
+    const tab = list.profiles.find((p) => matchKey(p.name) === matchKey(legacyTab));
+    if (tab) {
+      const own = tab.resume || {};
+      const hasOwn = [own.prompt, own.masterResume, own.style].some((v) => String(v || "").trim());
+      const patch = {};
+      if (!hasOwn) {
+        if (settings.prompt && settings.prompt !== DEFAULT_PROMPT) patch.prompt = settings.prompt;
+        if (settings.masterResume) patch.masterResume = settings.masterResume;
+        if (settings.masterResumeMode === "none") patch.masterResumeMode = "none";
+        if (settings.resumeStyle && settings.resumeStyle !== DEFAULT_RESUME_STYLE) patch.resumeStyle = settings.resumeStyle;
+      }
+      if (Object.keys(patch).length && !(await updateProfile(tab.id, patch)).ok) return;
+      if (!settings.country && !settings.role) {
+        await setSettings({ country: tab.sheet?.country || "", role: tab.sheet?.role || "" });
+      }
+    }
+  }
+  await setSettings({ migratedToProfiles: true });
 }
 
 // ---------------------------------------------------------------------------
 // Building the resume document
 //
-// The resume template — one file per style in RESUME_STYLES, picked under
-// ChatGPT setting — carries only the layout. Every word comes from the answer:
+// The resume template — one file per style in RESUME_STYLES, or an added one,
+// picked per profile — carries only the layout. Every word comes from the answer:
 // the header from CONTACT, the summary, the skills lines, one job block per
 // EXPERIENCE entry drawn from the template's first job block as the pattern,
 // one edu-item per EDUCATION entry and one cert-item per CERTIFICATIONS entry
@@ -896,11 +1338,11 @@ const templateCache = new Map();
 // removed — falls back to the default rather than failing the job. Losing the
 // chosen layout is a much smaller loss than losing the resume.
 //
-// An added style is read from storage every time rather than cached, so
-// replacing it with a new file takes effect on the very next job.
-async function loadTemplate(style) {
+// An added style — one of `profileId`'s own — is read from storage every time
+// rather than cached, so replacing it takes effect on the very next job.
+async function loadTemplate(style, profileId) {
   if (!Object.hasOwn(RESUME_STYLES, style)) {
-    const custom = (await getCustomStyles())[style];
+    const custom = (await getProfileStyles(profileId))[style];
     if (custom?.html) return custom.html;
   }
 
@@ -1455,16 +1897,34 @@ function declarationValueAt(src, name) {
   return i;
 }
 
-// The second shape ChatGPT may answer in — a profile object rather than the
-// CONTACT/SUMMARY arrays:
+// The cover letter, wherever the answer put it as a key of an object:
+// cover_letter (the shape the prompt asks for), coverletter, coverLetter —
+// any case, with or without an underscore, space or hyphen — as one string,
+// or as a list of paragraphs. Null when there is none.
+function coverLetterOf(obj) {
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return null;
+  const key = Object.keys(obj).find((k) => /^cover[\s_-]?letter$/i.test(k));
+  const value = key === undefined ? null : obj[key];
+  const text = Array.isArray(value)
+    ? value.filter((p) => typeof p === "string").join("\n\n")
+    : typeof value === "string"
+      ? value
+      : "";
+  return text.trim() || null;
+}
+
+// The shape ChatGPT answers in — the one DEFAULT_PROMPT asks for — a profile
+// object rather than the older CONTACT/SUMMARY arrays:
 //
-//   { name, title,
+//   const resume = {
+//     name, title,
 //     contact: { email, phone, linkedin, location },
 //     resume: { summary, skills: [...],
 //               experience: [{ company, position, location, duration, content: [...] }],
 //               education: [{ degree, school, year }],
 //               certifications?: [...] },
-//     coverletter? }
+//     cover_letter: "…"
+//   };
 //
 // Turned into the array shape here, so the rest of the parser, the builder
 // and every template work from one shape. An object that is already in the
@@ -1498,17 +1958,24 @@ function fromProfileShape(d) {
     // A degree comes as one string ("Bachelor of Science in X"), so it fills
     // the degree slot and leaves the field empty.
     EDUCATION: list(r.education).map((e) => [str(e.school), [[str(e.degree), str(e.field)]], str(e.year ?? e.duration)]),
-    coverletter: d.coverletter ?? r.coverletter ?? d.coverLetter ?? r.coverLetter
+    // cover_letter beside "resume", where the prompt asks for it — or inside it.
+    coverletter: coverLetterOf(d) ?? coverLetterOf(r)
   };
 }
 
 function parseModelAnswer(raw) {
   const src = stripFence(String(raw));
 
+  // A cover letter in a declaration of its own, after the resume object:
+  // `const coverletter = "…"`, as the older prompt asked, or cover_letter /
+  // coverLetter.
   let coverletter = null;
-  const ci = declarationValueAt(src, "coverletter");
-  if (ci !== -1 && QUOTES[src[ci]]) {
-    coverletter = readStringLiteral(src, ci).value.trim() || null;
+  for (const name of ["coverletter", "cover_letter", "coverLetter"]) {
+    const ci = declarationValueAt(src, name);
+    if (ci !== -1 && QUOTES[src[ci]]) {
+      coverletter = readStringLiteral(src, ci).value.trim() || null;
+      break;
+    }
   }
 
   let data = null;
@@ -1547,10 +2014,9 @@ function parseModelAnswer(raw) {
     throw new Error("the answer has no SUMMARY string");
   }
 
-  // A cover letter written as a key of the object instead of its own const.
-  if (!coverletter && typeof data.coverletter === "string") {
-    coverletter = data.coverletter.trim() || null;
-  }
+  // A cover letter written as a key of the object instead of its own const —
+  // cover_letter in the shape the prompt asks for.
+  if (!coverletter) coverletter = coverLetterOf(data);
 
   const strings = (a) =>
     Array.isArray(a) ? a.filter((s) => typeof s === "string").map((s) => s.trim()).filter(Boolean) : [];
@@ -1628,6 +2094,89 @@ function parseModelAnswer(raw) {
     coverletter
   };
 }
+
+// ---------------------------------------------------------------------------
+// Style preview
+//
+// A template filled exactly the way a job's resume is — buildResumeHtml, from
+// an answer in the shape the prompt asks ChatGPT for — so the preview is what
+// a job built with that style will look like. The data is the newest resume
+// actually generated for the profile being previewed, so it reads as that
+// profile's own; until there is one, the sample answer below, read by the
+// same parser a real answer is.
+// ---------------------------------------------------------------------------
+
+const PREVIEW_SAMPLE_ANSWER = `const resume = {
+  "CONTACT": ["Alex Morgan", "Senior Software Engineer", "Austin, TX 78701", "(512) 555-0142", "alex.morgan@example.com", "https://linkedin.com/in/alex-morgan"],
+  "SUMMARY": "Software engineer with nine years building data-heavy web platforms, from ingestion pipelines to the dashboards that read them. Leads small teams through design, delivery and on-call, and cares about systems that stay fast and boring at scale.",
+  "SKILLS": [
+    "Languages: TypeScript, Python, Go, SQL",
+    "Frameworks: React, Node.js, FastAPI, Django",
+    "Cloud & Data: AWS, PostgreSQL, Kafka, Snowflake, Terraform"
+  ],
+  "EXPERIENCE": [
+    ["Northwind Analytics", "Senior Software Engineer", "Austin, TX", "Mar 2021 – Present",
+      "Led a team of five rebuilding the reporting pipeline on Kafka and Snowflake, cutting report latency from hours to minutes.",
+      "Designed the multi-tenant permissions model now used by every product surface.",
+      "Mentored four engineers through promotion to mid and senior levels."],
+    ["Contoso Health", "Software Engineer II", "Remote", "Jun 2018 – Feb 2021",
+      "Built the patient-scheduling API serving 2M requests a day at a p99 under 120 ms.",
+      "Moved deployments to Terraform and blue-green releases, ending weekend release windows."],
+    ["Fabrikam Labs", "Software Engineer", "Dallas, TX", "Aug 2016 – May 2018",
+      "Shipped the React rewrite of the customer portal, raising its conversion rate by 18%.",
+      "Wrote the integration test suite that gated every merge to main."]
+  ],
+  "CERTIFICATIONS": ["AWS Certified Solutions Architect – Associate"],
+  "EDUCATION": [
+    ["University of Texas at Austin", [["Bachelor of Science (B.S.)", "Computer Science"]], "2012 – 2016"]
+  ]
+};`;
+
+// The shape parseModelAnswer gives today. A resume stored by an older build
+// can be in an older one, and is passed over rather than previewed half-built.
+const buildable = (d) =>
+  typeof d?.SUMMARY === "string" &&
+  ["CONTACT", "SKILLS", "EXPERIENCE", "EDUCATION", "CERTIFICATIONS"].every((k) => Array.isArray(d[k])) &&
+  d.EXPERIENCE.every((e) => Array.isArray(e?.bullets)) &&
+  d.EDUCATION.every((e) => Array.isArray(e?.degrees));
+
+// The newest resume built for this profile, or null. Jobs are kept oldest
+// first, each with one resume per profile it was written for (`results`).
+// Another profile's resume is never used: a style is previewed as its own
+// profile's resume will look, so it is filled with that profile's data or,
+// until there is some, the sample.
+async function latestGenerated(profileId) {
+  const { jobs = [] } = await chrome.storage.local.get("jobs");
+  for (let i = jobs.length - 1; i >= 0; i--) {
+    const built = (jobs[i].detail?.results || []).find(
+      (r) => r.profileId === profileId && r.resume?.ok && buildable(r.resume.data)
+    );
+    if (built) {
+      return { data: built.resume.data, from: [jobs[i].company, jobs[i].title].filter(Boolean).join(" — ") };
+    }
+  }
+  return null;
+}
+
+// `html` is a template still being written in a profile's editor; without
+// it, `style` names one the profile can pick. Answers with the filled
+// document and what the builder had to say about the template: the holes Add
+// new would refuse it for, and the parts it had to leave as they were.
+async function previewStyle({ profileId, html, style }) {
+  const template = typeof html === "string" ? html : await loadTemplate(style, profileId);
+  const latest = await latestGenerated(profileId);
+  const built = buildResumeHtml(template, latest?.data ?? parseModelAnswer(PREVIEW_SAMPLE_ANSWER));
+  return {
+    ok: true,
+    html: built.html,
+    from: latest?.from ?? null,
+    missing: missingHoles(template),
+    // Only the warnings about the template: ones about the data — a role
+    // count, a role without bullets — say nothing about the layout.
+    warnings: built.warnings.filter((w) => /template/.test(w))
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Resume generation
 //
@@ -1644,8 +2193,8 @@ const GENERATE_TIMEOUT_MS = 120000;
 // `onStage` hears "waiting" as the request goes out and "building" once the
 // answer is back and being laid into the template — the two halves of the
 // wait the panel shows against the job.
-async function generateResume(profile, detail, signal, onStage = () => {}) {
-  if (!profile.apiKey) {
+async function generateResume(writer, detail, signal, onStage = () => {}) {
+  if (!writer.apiKey) {
     return { ok: false, skipped: true, error: "no API key set — open ChatGPT setting on the Generate tab" };
   }
   // The model is given the readable text, not the markup: the HTML is chrome
@@ -1657,7 +2206,7 @@ async function generateResume(profile, detail, signal, onStage = () => {}) {
 
   let template;
   try {
-    template = await loadTemplate(profile.resumeStyle);
+    template = await loadTemplate(writer.resumeStyle, writer.profileId);
   } catch (err) {
     return { ok: false, error: err?.message || String(err) };
   }
@@ -1668,21 +2217,21 @@ async function generateResume(profile, detail, signal, onStage = () => {}) {
   // The prompt goes out exactly as it was typed — nothing is appended to it.
   // The user message carries the two inputs, each under its own heading so the
   // model cannot mistake the candidate's resume for part of the job posting.
-  // With the master resume switched off in ChatGPT setting, or none set, the
-  // job description goes out on its own.
-  const useMaster = profile.masterResumeMode !== "none";
-  const masterResume = useMaster ? (profile.masterResume || "").trim() : "";
+  // With the profile's master resume switched off, or none set, the job
+  // description goes out on its own.
+  const useMaster = writer.masterResumeMode !== "none";
+  const masterResume = useMaster ? (writer.masterResume || "").trim() : "";
   const userContent = masterResume
     ? `=== JOB DESCRIPTION ===\n${description}\n\n=== MASTER RESUME ===\n${masterResume}`
     : description;
   if (!useMaster) {
-    console.log("[jobright] master resume switched off in ChatGPT setting — sending the job description only");
+    console.log(`[jobright] ${writer.name}: master resume switched off — sending the job description only`);
   } else if (!masterResume) {
-    console.warn("[jobright] no master resume set in ChatGPT setting — sending the job description only");
+    console.warn(`[jobright] ${writer.name}: no master resume set in Settings → Profile — sending the job description only`);
   }
 
   const messages = [
-    { role: "system", content: profile.prompt },
+    { role: "system", content: writer.prompt },
     { role: "user", content: userContent }
   ];
 
@@ -1698,7 +2247,7 @@ async function generateResume(profile, detail, signal, onStage = () => {}) {
   // The model goes in the header line as text, not only inside the object —
   // it should be readable without expanding anything, and it survives a copy
   // out of the console.
-  console.log(`[jobright] → OpenAI request · ${profile.model}`, { model: profile.model, messages });
+  console.log(`[jobright] → OpenAI request · ${writer.model} · ${writer.name}`, { model: writer.model, profile: writer.name, messages });
   console.log("[jobright]   system message:\n" + messages[0].content);
   console.log("[jobright]   user message:\n" + messages[1].content);
 
@@ -1708,10 +2257,10 @@ async function generateResume(profile, detail, signal, onStage = () => {}) {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${profile.apiKey}`
+        Authorization: `Bearer ${writer.apiKey}`
       },
       body: JSON.stringify({
-        model: profile.model,
+        model: writer.model,
         // No response_format here: JSON mode would force a bare JSON object,
         // and the answer wanted is JavaScript source carrying two declarations.
         messages
@@ -1753,7 +2302,7 @@ async function generateResume(profile, detail, signal, onStage = () => {}) {
     }
 
     const { html, warnings } = buildResumeHtml(template, parsed);
-    if (!parsed.coverletter) warnings.push("no coverletter in the answer");
+    if (!parsed.coverletter) warnings.push("no cover letter in the answer (cover_letter)");
 
     return {
       ok: true,
@@ -1762,7 +2311,7 @@ async function generateResume(profile, detail, signal, onStage = () => {}) {
       data: parsed,
       raw: text,
       warnings,
-      model: data?.model || profile.model
+      model: data?.model || writer.model
     };
   } catch (err) {
     if (signal?.aborted) return { ok: false, stopped: true, error: STOPPED };
@@ -1848,6 +2397,72 @@ async function testConnection(apiKey, model) {
 }
 
 // ---------------------------------------------------------------------------
+// The models the API key can use
+//
+// What the Model list under ChatGPT setting offers: OpenAI's own answer to
+// "which models can this key use" (GET /v1/models), cut down to the ones that
+// can write a resume here — text models that answer Chat Completions. Newest
+// first, and the dated snapshots (gpt-4o-2024-08-06) apart from the names
+// that always point at the latest. Kept in storage with the key's last four
+// characters, so the panel can show it again without asking, and knows when
+// the key has changed under it.
+// ---------------------------------------------------------------------------
+
+const OPENAI_MODELS_ENDPOINT = "https://api.openai.com/v1/models";
+
+// Text models, by family: gpt-…, chatgpt-…, and the o-series (o3, o4-mini).
+const WRITES_TEXT = /^(gpt-|chatgpt-|o\d)/i;
+// …less the ones that are not for this: speech, images, embeddings,
+// moderation, search, the older completions-only "instruct", agents and code
+// models, and the "pro" models, which only answer the Responses API.
+const NOT_FOR_WRITING =
+  /audio|realtime|tts|transcribe|whisper|embedding|image|dall-e|moderation|search|instruct|computer-use|codex|sora|deep-research|-pro\b/i;
+// A pinned snapshot: a date (or an old four-digit release) at the end.
+const SNAPSHOT = /-(\d{4}-\d{2}-\d{2}|\d{4})$/;
+
+async function listModels(apiKey) {
+  apiKey = String(apiKey || "").trim();
+  if (!apiKey) return { ok: false, error: "no API key given" };
+
+  try {
+    const res = await fetch(OPENAI_MODELS_ENDPOINT, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(TEST_TIMEOUT_MS)
+    });
+    let data = null;
+    try {
+      data = await res.json();
+    } catch {
+      data = null; // not JSON; the status still tells us what happened
+    }
+    if (!res.ok) return { ok: false, error: `HTTP ${res.status} — ${data?.error?.message || res.statusText}` };
+
+    const all = Array.isArray(data?.data) ? data.data : [];
+    const usable = all
+      .filter((m) => typeof m?.id === "string" && WRITES_TEXT.test(m.id) && !NOT_FOR_WRITING.test(m.id))
+      .sort((a, b) => (b.created || 0) - (a.created || 0) || a.id.localeCompare(b.id));
+    const list = {
+      models: usable.filter((m) => !SNAPSHOT.test(m.id)).map((m) => m.id),
+      snapshots: usable.filter((m) => SNAPSHOT.test(m.id)).map((m) => m.id),
+      total: all.length,
+      loadedAt: Date.now(),
+      keyEnd: apiKey.slice(-4)
+    };
+    await chrome.storage.local.set({ openaiModels: list });
+    console.log(`[jobright] ← OpenAI models: ${list.models.length} + ${list.snapshots.length} snapshot(s) of ${list.total}`);
+    return { ok: true, ...list };
+  } catch (err) {
+    return {
+      ok: false,
+      error:
+        err?.name === "TimeoutError" || err?.name === "AbortError"
+          ? `no response in ${TEST_TIMEOUT_MS / 1000}s`
+          : `${err?.message || err} — is api.openai.com reachable?`
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Sending a job to the collector
 // ---------------------------------------------------------------------------
 
@@ -1861,17 +2476,17 @@ async function testConnection(apiKey, model) {
 const wrapCoverLetter = (text) =>
   text ? `<textarea>${escapeHtml(text)}</textarea>` : null;
 
-async function saveJob(job, detail, signal, profile) {
+// One profile's resume for a job: the job's own description, that profile's
+// resume and cover letter, filed under that profile's tab (`user`).
+async function saveJob(job, detail, resume, signal, user) {
   const payload = {
     job_url: job.href,
     job_des: detail.descriptionHtml,
-    resume: detail.resume?.html ?? null,
-    coverletter: wrapCoverLetter(detail.resume?.coverletter),
+    resume: resume?.html ?? null,
+    coverletter: wrapCoverLetter(resume?.coverletter),
     company: job.company,
     job_title: job.title,
-    // Which country tab this lands on in the shared archive. Blank leaves it
-    // off every tab there rather than guessing.
-    user: profile?.countryName || ""
+    user
   };
 
   try {
@@ -1888,10 +2503,11 @@ async function saveJob(job, detail, signal, profile) {
 // ---------------------------------------------------------------------------
 // A job typed in by hand
 //
-// Manual mode is the queue's pass -- duplicate check, generate, then save --
-// with the two things visitJob would have read off the page handed over
-// instead. As on the feed, a job the collector already holds stops at the
-// check. Nothing here opens a tab or touches the feed, so it can be used
+// Manual mode is the queue's pass -- duplicate check, then generate and save
+// for each profile picked -- with the two things visitJob would have read off
+// the page handed over instead. As on the feed, a profile whose tab already
+// holds the job is counted out at the check, and a job every one of them
+// holds goes no further. Nothing here opens a tab or touches the feed, so it can be used
 // while a run is streaming, and Stop (which aborts the run signal) does not
 // reach it: this pass carries no signal, only generateResume's own timeout.
 // ---------------------------------------------------------------------------
@@ -1926,15 +2542,19 @@ async function generateManual(input) {
   manualBusy = true;
   holdAwake();
   try {
-    // Asked before the model is, so a posting the collector already holds
-    // costs no API call. A check that fails fails open, as on the feed: the
-    // job goes ahead and the error is reported beside the result.
-    const job = { href: url, company, title };
-    const check = await checkExisting(job, undefined);
-    if (check.exists) return { ok: true, duplicate: true, resume: null, save: null };
+    await migrateLegacySettings();
+    const selection = await selectedProfiles();
+    if (!selection.ok) return { ok: false, error: selection.error };
 
-    broadcast({ type: "MANUAL_STATUS", stage: "generating" });
-    const profile = await getProfile();
+    // Asked before the model is, so a posting a profile's tab already holds
+    // costs that profile no API call. A check that fails fails open, as on
+    // the feed: the job goes ahead and the error is reported beside the result.
+    const job = { href: url, company, title };
+    const check = await checkExisting(job, undefined, selection.profiles);
+    if (!check.pending.length) {
+      return { ok: true, duplicate: true, existingOn: check.existing, results: [] };
+    }
+
     const detail = {
       ok: true,
       descriptionFound: true,
@@ -1942,21 +2562,26 @@ async function generateManual(input) {
       descriptionHtml: manualDescriptionHtml(description)
     };
 
-    const resume = await generateResume(profile, detail, undefined, (stage) =>
-      broadcast({ type: "MANUAL_STATUS", stage })
-    );
-    // Same rule as the queue: nothing is sent unless the resume built, so a
-    // failed generation leaves the collector untouched rather than storing a
-    // job with no documents against it.
-    if (!resume.ok) return { ok: true, resume, save: null, checkError: check.error };
-    detail.resume = resume;
+    // One profile at a time, as the queue does. Same rule as the queue too:
+    // nothing is sent for a profile unless its resume built, so a failed
+    // generation leaves that tab untouched rather than storing a job with no
+    // documents against it. Deliberately not counted into the queue's tally:
+    // that strip reports what the feed run did, and a hand-typed job is not
+    // part of one.
+    const results = [];
+    for (const profile of check.pending) {
+      const tell = (stage) => broadcast({ type: "MANUAL_STATUS", stage, profile: profile.name });
+      tell("generating");
+      const resume = await generateResume(writerFor(selection.settings, profile), detail, undefined, tell);
+      const result = { profileId: profile.id, profileName: profile.name, resume, save: null };
+      if (resume.ok) {
+        tell("saving");
+        result.save = await saveJob(job, detail, resume, undefined, profile.name);
+      }
+      results.push(result);
+    }
 
-    broadcast({ type: "MANUAL_STATUS", stage: "saving" });
-    // Deliberately not counted into the queue's tally: that strip reports what
-    // the feed run did, and a hand-typed job is not part of one.
-    const save = await saveJob(job, detail, undefined, profile);
-
-    return { ok: true, resume, save, duplicate: false, checkError: check.error };
+    return { ok: true, duplicate: false, results, existingOn: check.existing, checkError: check.error };
   } finally {
     manualBusy = false;
     releaseAwake();
@@ -1984,9 +2609,77 @@ async function createDetailTab(url) {
   return chrome.tabs.create(base);
 }
 
+// A wait nothing else can cut short — a content script still working on its
+// answer — given up the moment Stop is pressed.
+function stoppable(promise, signal) {
+  if (!signal) return promise;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      if (signal.aborted) reject(new Error(STOPPED));
+      signal.addEventListener("abort", () => reject(new Error(STOPPED)), { once: true });
+    })
+  ]);
+}
+
+// Indeed: the job is read on the search page the run is on. The card is
+// clicked in the list tab and the description tag it fills read (READ_PANE
+// in content-indeed.js); no tab is opened for the job, ever. A description
+// that could not be read for it is a reading that failed, said on the job's
+// row like any other.
+//
+// The click itself cannot open a tab — the content script cancels the
+// browser's own action once Indeed's handler has had the click — but
+// Indeed's own script could still open one from its handler. So while the
+// card is being read, a tab the search tab opens is closed again at once,
+// and the search tab put back in front.
+async function readInPane(job, signal, onStage) {
+  const script = sourceOf(job).script;
+  const listTab = feedTabId;
+  if (listTab === null) return { ok: false, error: "the Indeed search tab is gone — press Start again" };
+  const jk = job.jk || new URL(job.href).searchParams.get("jk");
+  const ask = async () => {
+    await ensureContentScript(listTab, { signal, script });
+    return stoppable(chrome.tabs.sendMessage(listTab, { type: "READ_PANE", jk, title: job.title }), signal);
+  };
+
+  const closeStray = (tab) => {
+    if (tab.openerTabId !== listTab) return;
+    chrome.tabs.remove(tab.id).catch(() => {});
+    focusTab(listTab);
+  };
+  chrome.tabs.onCreated.addListener(closeStray);
+
+  onStage("pane");
+  try {
+    let detail = await ask();
+    // A human check in place of the job: waited out, then the card asked for again.
+    while (detail?.blocked && !signal?.aborted) {
+      onStage("verify");
+      await waitForHumanCheck(listTab, script, signal, "job", job.title);
+      onStage("pane");
+      detail = await ask();
+    }
+    if (signal?.aborted) throw new Error(STOPPED);
+    if (!detail || typeof detail !== "object") throw new Error("no reading came back from the Indeed search tab");
+    return detail;
+  } catch (err) {
+    if (wasStopped(err) || signal?.aborted) throw new Error(STOPPED);
+    return { ok: false, error: `the Indeed search tab did not answer (${err?.message || err})` };
+  } finally {
+    chrome.tabs.onCreated.removeListener(closeStray);
+  }
+}
+
 async function visitJob(job, signal, onStage = () => {}) {
   if (signal?.aborted) throw new Error(STOPPED);
+  // Indeed: no tab of its own — the card is clicked and read beside the list.
+  if (sourceOf(job).readsInPane) return readInPane(job, signal, onStage);
+  return readJobPage(job, signal, onStage);
+}
 
+// The job's own page, in a tab of its own: opened, read, closed.
+async function readJobPage(job, signal, onStage) {
   const tab = await createDetailTab(job.href);
 
   // Closing the tab is also what unblocks a pending scrape: sendMessage
@@ -1998,8 +2691,19 @@ async function visitJob(job, signal, onStage = () => {}) {
   try {
     await waitForComplete(tab.id, DETAIL_LOAD_TIMEOUT, signal);
     onStage("reading");
-    await ensureContentScript(tab.id, { signal, script: sourceOf(job).script });
-    const detail = await chrome.tabs.sendMessage(tab.id, { type: "SCRAPE_DETAIL" });
+    const script = sourceOf(job).script;
+    await ensureContentScript(tab.id, { signal, script });
+    let detail = await chrome.tabs.sendMessage(tab.id, { type: "SCRAPE_DETAIL" });
+
+    // A human check where the job should be: the queue waits, with the tab
+    // left open in front, until someone passes it, then reads the job.
+    while (detail?.blocked && !signal?.aborted) {
+      onStage("verify");
+      await waitForHumanCheck(tab.id, script, signal, "job", job.title);
+      onStage("reading");
+      await ensureContentScript(tab.id, { signal, script });
+      detail = await chrome.tabs.sendMessage(tab.id, { type: "SCRAPE_DETAIL" });
+    }
     if (signal?.aborted) throw new Error(STOPPED);
     if (!detail || typeof detail !== "object") {
       throw new Error("no reading came back from the detail page");
@@ -2019,10 +2723,17 @@ async function visitJob(job, signal, onStage = () => {}) {
 
 async function handle(msg) {
   switch (msg?.type) {
+    // With the human check being waited on, if there is one, so a panel
+    // opened mid-pause says so.
     case "GET_STATE": {
       const { jobs = [] } = await chrome.storage.local.get("jobs");
-      return { ok: true, jobs };
+      return { ok: true, jobs, verifyPause };
     }
+
+    // The panel's "Show the tab" while a run waits on a human check.
+    case "FOCUS_VERIFY":
+      if (verifyPause) await focusTab(verifyPause.tabId);
+      return { ok: true, pause: verifyPause };
 
     // Opening the URL and starting the stream are one action, so the panel
     // only has to say "start".
@@ -2032,16 +2743,44 @@ async function handle(msg) {
       // happens.
       const sourceKey = msg.options?.source || "jobright";
       const source = SOURCES[sourceKey];
-      if (!source) return { ok: false, error: `${sourceKey} is not supported yet — only Jobright, Dice, Glassdoor and ZipRecruiter` };
+      if (!source) {
+        return { ok: false, error: `${sourceKey} is not supported yet — only Jobright, Dice, Glassdoor, Indeed and ZipRecruiter` };
+      }
+
+      // Indeed opens the search the panel asked for rather than a fixed page,
+      // and a search needs something to search for.
+      const search = source.searched ? indeedSearchOf(msg.options?.search) : null;
+      if (search && !search.role) return { ok: false, error: "type a role to search Indeed for" };
+
+      // A run that saves builds resumes for the profiles picked in Settings,
+      // and with none to build for it would only open pages to read them —
+      // said before a tab is opened rather than against every job.
+      if (msg.options?.saveJobs !== false) {
+        await migrateLegacySettings();
+        const selection = await selectedProfiles();
+        if (!selection.ok) return { ok: false, error: selection.error };
+      }
 
       visitEnabled = msg.options?.visitJobs !== false;
       saveEnabled = msg.options?.saveJobs !== false;
       runSource = sourceKey;
       pagesTurned = 0;
+      batchesDone = 0;
       beginRun();
 
-      const tabId = await openFeedTab(source);
+      const tabId = await openFeedTab(source, search ? indeedSearchUrl(search) : source.url);
       const reply = await tell(tabId, { type: "START_STREAM", options: msg.options }, source.script);
+
+      // A human check in front of the list is waited out on its own, not
+      // here: the panel would otherwise sit on "Opening…" for as long as it
+      // takes someone to pass it. The panel hears about the wait from
+      // VERIFY_STATUS, and the stream starts once the check is passed.
+      if (reply?.blocked) {
+        const signal = runSignal();
+        waitForHumanCheck(tabId, source.script, signal, "search")
+          .then(() => streamFeed(tabId, source, msg.options, signal))
+          .catch((err) => wasStopped(err) || reportFeedError(err));
+      }
 
       // Anything left over from a previous Stop resumes now.
       tellFeed({ type: "ACCEPTED", count: acceptedCount });
@@ -2076,24 +2815,55 @@ async function handle(msg) {
       if (!visitEnabled) queue.length = 0;
       return { ok: true, visitEnabled };
 
-    case "GET_PROFILE":
+    // The settings, and what a profile falls back on when it has no prompt or
+    // style of its own — for the panel to show as such.
+    case "GET_SETTINGS":
+      await migrateLegacySettings();
       return {
         ok: true,
-        profile: await getProfile(),
-        styles: listCustomStyles(await getCustomStyles())
+        settings: await getSettings(),
+        defaults: { prompt: DEFAULT_PROMPT, resumeStyle: DEFAULT_RESUME_STYLE }
       };
 
+    case "SET_SETTINGS":
+      return { ok: true, settings: await setSettings(msg.patch) };
+
+    // Every profile, and the styles each has added: { [profileId]: [{ name }] }.
+    case "GET_PROFILES": {
+      const list = await listProfiles();
+      if (!list.ok) return list;
+      const { profileStyles = {} } = await chrome.storage.local.get("profileStyles");
+      const styles = Object.fromEntries(list.profiles.map((p) => [p.id, listCustomStyles(profileStyles[p.id] || {})]));
+      return { ...list, styles };
+    }
+
+    case "UPDATE_PROFILE":
+      return updateProfile(msg.id, msg.patch);
+
     case "ADD_STYLE":
-      return { ok: true, ...(await addCustomStyle(msg.name, msg.file, msg.html)) };
+      return { ok: true, ...(await addCustomStyle(msg.profileId, msg.name, msg.html)) };
+
+    case "GET_STYLE_HTML":
+      return { ok: true, ...(await getStyleHtml(msg.profileId, msg.name)) };
+
+    case "PREVIEW_STYLE":
+      return previewStyle(msg);
 
     case "REMOVE_STYLE":
-      return { ok: true, ...(await removeCustomStyle(msg.name)) };
-
-    case "SET_PROFILE":
-      return { ok: true, profile: await setProfile(msg.patch) };
+      return { ok: true, ...(await removeCustomStyle(msg.profileId, msg.name)) };
 
     case "TEST_CONNECTION":
       return await testConnection(msg.apiKey, msg.model);
+
+    // The models the given key can use, asked of OpenAI and kept.
+    case "LIST_MODELS":
+      return await listModels(msg.apiKey);
+
+    // The list last asked for, as kept — or none yet.
+    case "GET_MODELS": {
+      const { openaiModels = null } = await chrome.storage.local.get("openaiModels");
+      return { ok: true, list: openaiModels };
+    }
 
     case "GET_THEME":
       return { ok: true, theme: await getTheme() };
@@ -2112,6 +2882,7 @@ async function handle(msg) {
       return generateManual(msg.job);
 
     case "CLEAR": {
+      batchesDone = 0;
       queue.length = 0;
       queued.clear();
       checkQueue.length = 0;

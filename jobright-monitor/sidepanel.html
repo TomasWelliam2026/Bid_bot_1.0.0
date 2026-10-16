@@ -62,10 +62,84 @@
           <option value="jobright">Jobright</option>
           <option value="dice">Dice</option>
           <option value="glassdoor">Glassdoor</option>
+          <option value="indeed">Indeed</option>
           <option value="monster">Monster</option>
           <option value="ziprecruiter">ZipRecruiter</option>
         </select>
         <p id="sourceNote" class="hint warn source-note" hidden></p>
+
+        <!-- Indeed is searched rather than opened at one fixed page: what to
+             search for, shown only while Indeed is the board. Country picks
+             which country's Indeed site is searched, by ISO code. -->
+        <fieldset id="indeedSearch" class="search-form" hidden>
+          <legend class="field-label">Indeed search</legend>
+
+          <!-- Indeed's own two search boxes, "What" and "Where". -->
+          <label class="field-label" for="searchRole">Role</label>
+          <input id="searchRole" type="text" autocomplete="off" placeholder="Job title, keywords, or company">
+
+          <label class="field-label" for="searchLocation">Where</label>
+          <input id="searchLocation" type="text" autocomplete="off" placeholder="City, state, zip code, or &quot;remote&quot;">
+
+          <div class="field-row">
+            <div>
+              <label class="field-label" for="searchCountry">Country</label>
+              <select id="searchCountry">
+                <option value="US">United States</option>
+                <option value="GB">United Kingdom</option>
+                <option value="CA">Canada</option>
+                <option value="AU">Australia</option>
+                <option value="IN">India</option>
+                <option value="DE">Germany</option>
+                <option value="FR">France</option>
+                <option value="IE">Ireland</option>
+                <option value="NL">Netherlands</option>
+                <option value="ES">Spain</option>
+                <option value="IT">Italy</option>
+                <option value="PL">Poland</option>
+                <option value="SE">Sweden</option>
+                <option value="CH">Switzerland</option>
+                <option value="BE">Belgium</option>
+                <option value="AT">Austria</option>
+                <option value="PT">Portugal</option>
+                <option value="SG">Singapore</option>
+                <option value="JP">Japan</option>
+                <option value="PH">Philippines</option>
+                <option value="AE">United Arab Emirates</option>
+                <option value="ZA">South Africa</option>
+                <option value="NZ">New Zealand</option>
+                <option value="BR">Brazil</option>
+                <option value="MX">Mexico</option>
+              </select>
+            </div>
+            <div>
+              <label class="field-label" for="searchJobType">Job type</label>
+              <select id="searchJobType">
+                <option value="">Any</option>
+                <option value="fulltime">Full-time</option>
+                <option value="parttime">Part-time</option>
+                <option value="contract">Contract</option>
+                <option value="internship">Internship</option>
+              </select>
+            </div>
+            <div>
+              <label class="field-label" for="searchPosted">Posted</label>
+              <select id="searchPosted">
+                <option value="">Any time</option>
+                <option value="1">Last 24 hours</option>
+                <option value="3">Last 3 days</option>
+                <option value="7">Last 7 days</option>
+                <option value="14">Last 14 days</option>
+              </select>
+            </div>
+          </div>
+
+          <label class="switch-row" for="searchRemote">
+            <input id="searchRemote" class="switch-input" type="checkbox">
+            <span class="switch" aria-hidden="true"><span class="switch-knob"></span></span>
+            Remote only
+          </label>
+        </fieldset>
 
         <div class="controls">
           <button id="start" class="primary">Start</button>
@@ -73,15 +147,20 @@
           <button id="clear">Clear</button>
         </div>
       </div>
-
-      <p id="manual-lead" class="hint" hidden>
-        One posting, typed in — no tab is opened and the feed is left alone.
-      </p>
     </header>
 
     <div id="auto-body" class="mode-body">
       <p id="status">Idle.</p>
       <p id="queue" hidden></p>
+
+      <!-- Shown while a run waits for someone to pass a site's human check. -->
+      <div id="verifyNotice" class="verify-notice" role="alert" hidden>
+        <p class="verify-title">Paused — Indeed wants a human check</p>
+        <p id="verifyText" class="verify-text"></p>
+        <div class="controls">
+          <button id="verifyShow" class="primary" type="button">Show the tab</button>
+        </div>
+      </div>
 
       <ul id="list" aria-live="polite"></ul>
 
@@ -106,10 +185,6 @@
       <label class="field-label" for="manualDescription">Job description</label>
       <textarea id="manualDescription" rows="14"
                 placeholder="Paste the posting — responsibilities, requirements, the lot."></textarea>
-
-      <p class="hint">Sent to OpenAI with your prompt and master resume, exactly as a job read
-        from the feed is. The resume that comes back is POSTed to
-        <code>localhost:4500/save-data</code>, which writes the PDFs.</p>
 
       <div class="controls form-actions">
         <button id="manualGenerate" class="primary" type="button">Generate</button>
@@ -142,10 +217,6 @@
               aria-selected="true" aria-controls="subpane-chatgpt" tabindex="0">
         ChatGPT setting
       </button>
-      <button id="subtab-resumeStyle" class="tab" role="tab"
-              aria-selected="false" aria-controls="subpane-resumeStyle" tabindex="-1">
-        Resume style
-      </button>
       <button id="subtab-profile" class="tab" role="tab"
               aria-selected="false" aria-controls="subpane-profile" tabindex="-1">
         Profile
@@ -157,6 +228,9 @@
         <label class="field-label" for="apiKey">OpenAI API key</label>
         <input id="apiKey" type="password" autocomplete="off" spellcheck="false"
                placeholder="sk-…">
+        <!-- Until the key's own models are loaded, a built-in list; once they
+             are, exactly the models this key can use (sidepanel.js
+             renderModels replaces these options). -->
         <label class="field-label" for="model">Model</label>
         <select id="model">
           <option value="gpt-4o-mini">gpt-4o-mini — fast and cheap</option>
@@ -171,50 +245,56 @@
         <input id="modelCustom" type="text" autocomplete="off" spellcheck="false"
                placeholder="model id, e.g. gpt-4o-2024-11-20" hidden>
         <div class="controls test-actions">
+          <button id="loadModels" type="button">Load models</button>
+          <p id="modelsStatus" class="hint" hidden></p>
+        </div>
+        <div class="controls test-actions">
           <button id="testConnection" type="button">Test connection</button>
           <p id="testStatus" class="hint" hidden></p>
         </div>
-
-        <label class="field-label" for="prompt">Prompt</label>
-        <textarea id="prompt" rows="7"
-                  placeholder="Instructions sent with each job description…"></textarea>
-        <p class="field-label">Master resume</p>
-        <label class="switch-row" for="masterResumeUse">
-          <input id="masterResumeUse" class="switch-input" type="checkbox" role="switch" checked>
-          <span class="switch" aria-hidden="true"><span class="switch-knob"></span></span>
-          <span id="masterResumeState">Use master resume</span>
-        </label>
-        <textarea id="masterResume" rows="12" aria-label="Master resume"
-                  placeholder="Paste your full resume — every role, bullet and skill. Sent with each job description so the tailored resume is built from your real experience."></textarea>
-        <p id="masterResumeHint" class="hint">Sent to OpenAI with every job, together with the prompt and the job description.</p>
       </section>
 
-      <section id="subpane-resumeStyle" class="subpane" role="tabpanel" aria-labelledby="subtab-resumeStyle" hidden>
-        <label class="field-label" for="resumeStyle">Resume style</label>
-        <select id="resumeStyle">
-          <option value="DE-1">Sisu_DE_1</option>
-          <option value="DE-2">Sisu_DE_2</option>
-          <option value="SF-1">SF Resume style 1</option>
-          <option value="SF-2">CreditStar_SF_1</option>
-        </select>
-        <div class="controls style-actions">
-          <button id="addStyle" type="button">Style add</button>
-          <button id="removeStyle" type="button" disabled>Remove style</button>
-        </div>
-        <input id="styleFile" type="file" accept=".html,.htm,text/html" hidden>
-        <p class="hint">The layout the generated resume is built with. Applies to the next job written.
-          <strong>Style add</strong> loads your own HTML template. The file needs a
-          <code>&lt;p id="summary"&gt;</code>, a <code>&lt;div id="skills"&gt;</code> and one
-          <code>&lt;ul data-exp="n"&gt;</code> per role.</p>
-        <p id="styleStatus" class="hint" hidden></p>
-      </section>
-
+      <!-- A profile is one of the dashboard's tabs. Country and Role pick which
+           of them a caught job gets resumes for; each one listed below has its
+           own prompt, master resume and resume style, kept on its tab. -->
       <section id="subpane-profile" class="subpane" role="tabpanel" aria-labelledby="subtab-profile" hidden>
-        <label class="field-label" for="countryName">Country name</label>
-        <input id="countryName" type="text" autocomplete="off" spellcheck="false"
-               placeholder="e.g. United States">
-        <p class="hint">Tags every application this profile saves with a country, so the shared
-          dashboard files it under that tab. Leave it blank and it won't show up under any tab there.</p>
+        <div class="field-row">
+          <div>
+            <label class="field-label" for="profileCountry">Country</label>
+            <select id="profileCountry">
+              <option value="">— Select —</option>
+            </select>
+          </div>
+          <div>
+            <label class="field-label" for="profileRole">Role</label>
+            <select id="profileRole">
+              <option value="">— Select —</option>
+            </select>
+          </div>
+        </div>
+        <div class="controls test-actions">
+          <button id="reloadProfiles" type="button">Reload profiles</button>
+          <p id="profilesStatus" class="hint" hidden></p>
+        </div>
+
+        <div id="profileList" class="profile-list"></div>
+        <p id="profileEmpty" class="hint warn" hidden></p>
+
+        <!-- The built resume at letter width, scaled down to the panel. Sandboxed
+             without scripts; same-origin only so its height can be read. Kept
+             here while closed, and moved into the card whose style it shows. -->
+        <div id="stylePreview" class="style-preview" hidden>
+          <div class="style-preview-bar">
+            <span id="stylePreviewTitle" class="style-preview-title"></span>
+            <button id="stylePreviewOpen" type="button">Open full size</button>
+            <button id="stylePreviewClose" type="button">Close</button>
+          </div>
+          <div class="style-preview-page">
+            <div id="stylePreviewSizer" class="style-preview-sizer">
+              <iframe id="stylePreviewFrame" sandbox="allow-same-origin" title="Resume preview"></iframe>
+            </div>
+          </div>
+        </div>
       </section>
 
       <div class="controls form-actions">

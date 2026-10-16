@@ -19,7 +19,19 @@ const when = (iso) => (iso ? new Date(iso).toLocaleDateString() : '');
 
 const hasFiles = (record) => KINDS.some(([kind]) => record[`${kind}_path`]);
 
+// A resume and a cover letter are written for one profile -- its name, its
+// experience -- so on a row shared in from another tab they are that tab's,
+// and are not offered as this one's. The job description is the same posting
+// whoever applies to it. Each by the short name the row shows and the long one
+// its tooltip uses.
+const PROFILE_KINDS = new Map([
+  ['resume', ['resume', 'resume']],
+  ['cover', ['cover', 'cover letter']],
+]);
+
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+const NO_SHARED_TABS = new Map();
 
 // Fewest rows a page is ever cut down to, however short the window is: below
 // this the pager costs more room than the rows it pages through.
@@ -115,9 +127,23 @@ function pageList(current, total) {
  * same dialog, which asks the one question that matters: whether the PDFs on
  * disk go with the record. The record is a note; the PDF is the work, so
  * removing the files is never implied by removing the row.
+ *
+ * Rows filed under another tab with the same Country (C) and Role --
+ * `sharedTabs`, by id -- are listed alongside the open tab's own (`ownerId`).
+ * They can be sent to the sheet from here like any other row: a send writes
+ * the open tab's Country (C) and Profile (D), whichever tab the row is filed
+ * under. The Sheet column only ever speaks for the profile on screen, so a
+ * shared row reads as sent once this tab has sent it -- its own tab's send
+ * is that tab's, and shows there. Deleting one deletes only this tab's part of
+ * it: it leaves this list and this tab's sheet status for it goes, while the
+ * record, its files and its own tab's status stay. Its resume and cover letter
+ * were written for its own tab's profile, so only its job description is
+ * offered here -- see PROFILE_KINDS.
  */
 export default function RecordsTable({
   records,
+  ownerId,
+  sharedTabs = NO_SHARED_TABS,
   connected,
   onDelete,
   sheetSending,
@@ -167,7 +193,19 @@ export default function RecordsTable({
     // one thing that moves the table without resizing the window.
   }, [connected, records.length === 0]);
 
-  // A record deleted in another tab is gone from the archive, so it cannot stay
+  // Another tab's row, listed here only because it shares this tab's Country (C)
+  // and Role.
+  const isShared = (record) => record.user_id !== ownerId;
+
+  // The tab a shared row is filed under, by name.
+  const tabNameOf = (record) => sharedTabs.get(record.user_id)?.name ?? 'its own tab';
+
+  // A selection is made on one tab and belongs to it. Switching tabs drops it:
+  // a row picked on its own tab is also listed on a tab sharing its country
+  // and role, where deleting it means something else entirely.
+  useEffect(() => setSelected(new Set()), [ownerId]);
+
+  // A record deleted elsewhere is gone from this list, so it cannot stay
   // picked here -- otherwise the count would outlive the rows it counts.
   useEffect(() => {
     setSelected((current) => {
@@ -244,34 +282,41 @@ export default function RecordsTable({
     return () => document.removeEventListener('keydown', onKey);
   }, [confirm, busy]);
 
+  // Every delete says which tab it is made on. The server deletes a record
+  // filed under this tab, and for one shared in from another tab deletes only
+  // this tab's part of it -- answering with `hidden` instead of `ids`.
   const run = async () => {
     setBusy(true);
 
     let result;
     if (confirm.scope === 'one') {
-      result = await onDelete(confirm.record.id, withFiles);
+      result = await onDelete(confirm.record.id, withFiles, ownerId);
     } else {
       // A hand-picked set is neither one row nor the whole log, which is all
       // the API deletes, so it goes one at a time -- stopping at the first
       // refusal rather than carrying on past it, and still reporting what went.
       const ids = [];
+      const hidden = [];
       let filesRemoved = 0;
       for (const id of confirm.ids) {
-        const step = await onDelete(id, withFiles);
+        const step = await onDelete(id, withFiles, ownerId);
         if (step && step.error) {
-          result = { error: step.error, ids, filesRemoved };
+          result = { error: step.error, ids, hidden, filesRemoved };
           break;
         }
-        ids.push(...(step.ids || [id]));
+        if (step.hidden?.length) hidden.push(...step.hidden);
+        else ids.push(...(step.ids || [id]));
         filesRemoved += step.filesRemoved || 0;
       }
-      result = result || { ids, filesRemoved };
+      result = result || { ids, hidden, filesRemoved };
     }
 
     setBusy(false);
     setConfirm(null);
 
-    const gone = result.ids || [];
+    const deleted = result.ids || [];
+    const removed = result.hidden || [];
+    const gone = [...deleted, ...removed];
     if (gone.length) {
       setSelected((current) => {
         const next = new Set(current);
@@ -285,16 +330,24 @@ export default function RecordsTable({
         tone: 'bad',
         text:
           `Delete failed — ${result.error}` +
-          (gone.length ? ` (${plural(gone.length, 'record')} went before it stopped)` : ''),
+          (gone.length ? ` (${plural(gone.length, 'row')} went before it stopped)` : ''),
       });
       return;
     }
 
+    const deletedText =
+      `Deleted ${plural(deleted.length, 'record')}` +
+      (result.filesRemoved ? ` and ${plural(result.filesRemoved, 'file')}` : '');
+    const removedText = `${plural(removed.length, 'shared row')} from this tab — still on ${
+      removed.length === 1 ? 'its own tab' : 'their own tabs'
+    }`;
     setNote({
       tone: 'ok',
-      text:
-        `Deleted ${plural(gone.length, 'record')}` +
-        (result.filesRemoved ? ` and ${plural(result.filesRemoved, 'file')}` : ''),
+      text: !removed.length
+        ? deletedText
+        : deleted.length
+          ? `${deletedText}; removed ${removedText}`
+          : `Removed ${removedText}`,
     });
   };
 
@@ -305,11 +358,18 @@ export default function RecordsTable({
       : confirm
         ? [confirm.record]
         : [];
-  // Only offer the file question when there is actually something on disk.
-  const filesInScope = inScope.some(hasFiles);
+  // A shared row's files are its own tab's, and never go from here: the file
+  // question is only about this tab's own records, and only asked when one of
+  // them actually has something on disk.
+  const ownInScope = inScope.filter((record) => !isShared(record));
+  const sharedInScope = inScope.filter(isShared);
+  const filesInScope = ownInScope.some(hasFiles);
 
   const marked = (record) =>
     confirm?.record?.id === record.id || (confirm?.scope === 'selected' && confirm.ids.includes(record.id));
+
+  const sharedCount = records.filter(isShared).length;
+  const sharedNames = [...sharedTabs.values()].map((user) => user.name).join(', ');
 
   return (
     <section className="panel">
@@ -330,7 +390,17 @@ export default function RecordsTable({
               </button>
             </>
           ) : (
-            <span className="tile-detail">{records.length} total</span>
+            <span
+              className="tile-detail"
+              title={
+                sharedCount
+                  ? `Also listed: ${sharedNames}'s applications — the same Country (C) and Role. Sending one from here writes this tab's Country (C) and Profile (D).`
+                  : undefined
+              }
+            >
+              {records.length - sharedCount} total
+              {sharedCount ? ` · ${sharedCount} from ${sharedNames}` : null}
+            </span>
           )}
         </div>
       </div>
@@ -386,13 +456,36 @@ export default function RecordsTable({
             </thead>
             <tbody>
               {visible.map((record) => {
+                // In flight and failed are this tab's, by record id -- see
+                // useSheetSync -- so a send from another tab never shows here.
                 const isSending = sheetSending.has(record.id);
-                // The archive's own answer: every record arrives unsent and
-                // stays that way until a send to the sheet comes back OK.
-                const isSent = record.sent_status === 'sent';
+                // A same-country, same-role tab's row: sent, picked and deleted
+                // from here like any other, but what a send writes and what a
+                // delete takes are this tab's -- see run() and useSheetSync.
+                const shared = isShared(record);
+                const owner = shared ? sharedTabs.get(record.user_id) : null;
+                const ownerName = tabNameOf(record);
+                // The archive's own answer, for this tab's profile only: every
+                // record arrives unsent and stays that way until a send to the
+                // sheet comes back OK. A row's own tab's send is the record's
+                // `sent_status`; any other tab's is its entry in `sheet_sends`.
+                const isSent = shared
+                  ? (record.sheet_sends ?? []).some((send) => send.user_id === ownerId)
+                  : record.sent_status === 'sent';
                 const sheetError = sheetErrors[record.id];
+                // The documents on disk, less -- on a shared row -- the ones
+                // written for its own tab's profile, which are named instead.
+                const filed = KINDS.filter(([kind]) => record[`${kind}_path`]);
+                const docs = shared ? filed.filter(([kind]) => !PROFILE_KINDS.has(kind)) : filed;
+                const otherProfileDocs = shared
+                  ? [...PROFILE_KINDS].filter(([kind]) => record[`${kind}_path`]).map(([, names]) => names)
+                  : [];
                 const picked = selected.has(record.id);
-                const rowClass = [marked(record) ? 'row-marked' : '', picked ? 'row-picked' : '']
+                const rowClass = [
+                  marked(record) ? 'row-marked' : '',
+                  picked ? 'row-picked' : '',
+                  shared ? 'row-shared' : '',
+                ]
                   .filter(Boolean)
                   .join(' ');
                 return (
@@ -413,9 +506,10 @@ export default function RecordsTable({
                           title={
                             !sheetWebAppUrl
                               ? 'Set the Apps Script Web App URL in Sheet sync above first'
-                              : isSent
-                                ? 'Sent — click to send again'
-                                : `Send #${record.id} to the sheet`
+                              : (isSent ? 'Sent — click to send again' : `Send #${record.id} to the sheet`) +
+                                (shared
+                                  ? ` with this tab's Country (C) and Profile (D) — ${ownerName}'s own send is separate`
+                                  : '')
                           }
                           aria-label={
                             isSent
@@ -438,11 +532,25 @@ export default function RecordsTable({
                         ) : (
                           record.job_title
                         )}
-                        <div className="sub">{record.mode === 'auto' ? 'automatic' : 'human check'}</div>
+                        <div className="sub">
+                          {record.mode === 'auto' ? 'automatic' : 'human check'}
+                          {shared ? (
+                            <span
+                              className="tag muted shared-from"
+                              title={
+                                `Filed under ${ownerName}` +
+                                (owner?.sheet?.applicant ? `, Profile (D) ${owner.sheet.applicant}` : '') +
+                                ` — the same Country (C) and Role as this tab, so it is listed here. Sending it from here writes this tab's Country (C) and Profile (D).`
+                              }
+                            >
+                              {ownerName}
+                            </span>
+                          ) : null}
+                        </div>
                         {record.error ? <div className="sub bad">{record.error}</div> : null}
                       </td>
                       <td className="nowrap">
-                        {KINDS.filter(([kind]) => record[`${kind}_path`]).map(([kind, label]) => (
+                        {docs.map(([kind, label]) => (
                           <a
                             key={kind}
                             className="doc"
@@ -453,7 +561,20 @@ export default function RecordsTable({
                             {label}
                           </a>
                         ))}
-                        {hasFiles(record) ? null : <span className="sub">—</span>}
+                        {otherProfileDocs.length ? (
+                          <span
+                            className="sub"
+                            title={
+                              `The ${otherProfileDocs.map(([, long]) => long).join(' and ')} ` +
+                              `${otherProfileDocs.length === 1 ? 'was' : 'were'} written for ${ownerName}'s ` +
+                              `profile, so ${otherProfileDocs.length === 1 ? 'it is' : 'they are'} not this ` +
+                              `tab's. Open ${otherProfileDocs.length === 1 ? 'it' : 'them'} from ${ownerName}.`
+                            }
+                          >
+                            {ownerName}'s {otherProfileDocs.map(([short]) => short).join(' & ')}
+                          </span>
+                        ) : null}
+                        {docs.length || otherProfileDocs.length ? null : <span className="sub">—</span>}
                       </td>
                       <td className="path" title={record.dir_path || ''}>
                         {record.dir_path || ''}
@@ -461,8 +582,16 @@ export default function RecordsTable({
                       <td className="col-action">
                         <button
                           className="icon-btn"
-                          title={`Delete record #${record.id}`}
-                          aria-label={`Delete record ${record.id}, ${record.company}`}
+                          title={
+                            shared
+                              ? `Remove #${record.id} from this tab — it stays on ${ownerName}`
+                              : `Delete record #${record.id}`
+                          }
+                          aria-label={
+                            shared
+                              ? `Remove record ${record.id}, ${record.company}, from this tab`
+                              : `Delete record ${record.id}, ${record.company}`
+                          }
                           onClick={() => ask({ scope: 'one', record })}
                         >
                           ✕
@@ -555,8 +684,10 @@ export default function RecordsTable({
           <div className="modal" role="dialog" aria-modal="true" aria-labelledby="delete-title">
             <h3 className="modal-title" id="delete-title">
               {confirm.scope === 'selected'
-                ? `Delete ${plural(confirm.ids.length, 'selected record')}?`
-                : 'Delete this record?'}
+                ? `Delete ${plural(confirm.ids.length, 'selected row')}?`
+                : ownInScope.length
+                  ? 'Delete this record?'
+                  : 'Remove this row from this tab?'}
             </h3>
 
             <div className="modal-body">
@@ -570,20 +701,31 @@ export default function RecordsTable({
                   {inScope.slice(0, 5).map((record) => (
                     <li key={record.id}>
                       <strong>#{record.id}</strong> {record.company} — {record.job_title}
+                      {isShared(record) ? <span className="sub"> · {tabNameOf(record)}'s</span> : null}
                     </li>
                   ))}
                   {inScope.length > 5 ? <li className="sub">…and {inScope.length - 5} more</li> : null}
                 </ul>
               )}
 
-              {filesInScope ? (
+              {/* What deleting means for a row shared in from another tab: only
+                  this tab's part of it goes. */}
+              {sharedInScope.length ? (
+                <p className="modal-note">
+                  {confirm.scope === 'one'
+                    ? `This is ${tabNameOf(confirm.record)}'s application. Only this tab's part of it goes: it leaves this list, and this tab's sheet status for it is cleared. It stays on ${tabNameOf(confirm.record)} with its files and sheet status.`
+                    : `${sharedInScope.length} of these ${sharedInScope.length === 1 ? 'is' : 'are'} shared from another tab. For those, only this tab's part goes — they leave this list and this tab's sheet status for them is cleared — and they stay on their own tab with their files.`}
+                </p>
+              ) : null}
+
+              {!ownInScope.length ? null : filesInScope ? (
                 <label className="with-files">
                   <input
                     type="checkbox"
                     checked={withFiles}
                     onChange={(event) => setWithFiles(event.target.checked)}
                   />
-                  also delete the stored PDF files
+                  also delete the stored PDF files{sharedInScope.length ? ' of this tab’s own records' : ''}
                 </label>
               ) : (
                 <p className="sub">Nothing is on disk for this.</p>
@@ -595,7 +737,13 @@ export default function RecordsTable({
                 Cancel
               </button>
               <button className="btn danger solid" disabled={busy} autoFocus onClick={run}>
-                {busy ? 'Deleting…' : withFiles ? 'Delete with files' : 'Delete'}
+                {busy
+                  ? 'Deleting…'
+                  : withFiles
+                    ? 'Delete with files'
+                    : ownInScope.length
+                      ? 'Delete'
+                      : 'Remove from this tab'}
               </button>
             </div>
           </div>

@@ -154,9 +154,9 @@ export function useArchive() {
   const reject = useCallback((id) => post(`/api/records/${id}/reject`), []);
 
   // Tabs. `createUser` names a new one; `updateUser` covers renaming it,
-  // flipping its Automatic/Human-check preference, and saving its Profile (D)
-  // value -- all of it is just columns on the same row, so one PATCH covers
-  // whichever of them a caller is changing. `deleteUser` only succeeds once
+  // flipping its Automatic/Human-check preference, and saving its Profile (D),
+  // Country (C) and Role values -- all of it is just columns on the same row,
+  // so one PATCH covers whichever of them a caller is changing. `deleteUser` only succeeds once
   // the server finds nothing left attributed to it.
   const createUser = useCallback((name) => post('/api/users', { name }), []);
   const updateUser = useCallback((id, patch) => request('PATCH', `/api/users/${id}`, patch), []);
@@ -167,13 +167,24 @@ export function useArchive() {
   const updateSheetSettings = useCallback((patch) => request('PATCH', '/api/sheet-settings', patch), []);
 
   // Record that a row reached the Google Sheet. The browser does the sending;
-  // this is what makes the result outlive the tab that did it.
-  const markSent = useCallback((id, sent = true) => post(`/api/records/${id}/sent`, { sent }), []);
+  // this is what makes the result outlive the tab that did it. `userId` is the
+  // archive tab that sent it -- its sheet status, which for a row shared from
+  // another tab is not the row's own.
+  const markSent = useCallback(
+    (id, sent = true, userId = null) => post(`/api/records/${id}/sent`, { sent, user_id: userId }),
+    [],
+  );
 
   // `withFiles` decides whether the stored PDFs go with the record. The row
   // disappears when the server confirms it on the stream, not before.
+  // `userId` is the tab the delete is made on: for a row shared into it from
+  // another tab, only that tab's part of the row goes, and the record stays.
   const remove = useCallback(
-    (id, withFiles) => request('DELETE', `/api/records/${id}?files=${withFiles ? 1 : 0}`),
+    (id, withFiles, userId = null) =>
+      request(
+        'DELETE',
+        `/api/records/${id}?files=${withFiles ? 1 : 0}${userId == null ? '' : `&user_id=${userId}`}`,
+      ),
     [],
   );
 

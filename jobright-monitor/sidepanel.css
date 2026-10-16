@@ -345,6 +345,24 @@ header {
 .source-note { margin: -4px 0 8px; }
 .source-note[hidden] { display: none; }
 
+/* What Indeed is searched for. A fieldset so a run can switch every field off
+   at once; its inputs take the settings form's look (see .form below). */
+.search-form {
+  min-width: 0;
+  margin: 0 0 10px;
+  padding: 9px 10px 4px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+.search-form[hidden] { display: none; }
+.search-form:disabled { opacity: 0.6; }
+.search-form legend { float: left; width: 100%; margin: 0 0 6px; }
+.search-form .field-label { display: block; margin: 8px 0 3px; }
+.search-form legend + .field-label { margin-top: 0; }
+.search-form .field-row { gap: 8px; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); }
+.search-form .switch-row { margin: 10px 0 6px; font-size: 12px; }
+
 /* Both mode bodies are columns so the feed list inside one of them can still
    take the leftover height; like .pane, the hidden one needs saying. */
 .mode-body {
@@ -355,8 +373,7 @@ header {
 }
 .mode-body[hidden] { display: none; }
 
-#auto-controls[hidden],
-#manual-lead[hidden] { display: none; }
+#auto-controls[hidden] { display: none; }
 
 /* The notes and the answer box under the manual form, which are the same
    elements the feed puts on a row. */
@@ -455,6 +472,29 @@ button:disabled:hover { border-color: var(--line); }
 }
 #queue[hidden] { display: none; }
 
+/* A run waiting on a person: not an error, but the one thing that needs
+   doing, so it stands apart from the strips above in the accent colour. */
+.verify-notice {
+  flex: none;
+  margin: 10px 12px 0;
+  padding: 10px 12px;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius);
+}
+.verify-notice[hidden] { display: none; }
+.verify-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.verify-text {
+  margin: 4px 0 9px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--fg-soft);
+}
+
 /* ==========================================================================
    The job list
    ========================================================================== */
@@ -508,6 +548,14 @@ a.job-title:hover { color: var(--accent); text-decoration: underline; }
   margin-top: 1px;
   font-size: 12px;
   color: var(--fg-soft);
+  overflow-wrap: anywhere;
+}
+
+/* Where, what it pays and when it was posted — for boards whose results say. */
+.job-info {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--muted);
   overflow-wrap: anywhere;
 }
 
@@ -660,7 +708,9 @@ a.job-title:hover { color: var(--accent); text-decoration: underline; }
 .form input[type="tel"],
 .form input[type="url"],
 .form select,
-.form textarea {
+.form textarea,
+.search-form input[type="text"],
+.search-form select {
   width: 100%;
   padding: 7px 9px;
   font: inherit;
@@ -677,17 +727,23 @@ a.job-title:hover { color: var(--accent); text-decoration: underline; }
   resize: vertical;
 }
 .form input::placeholder,
-.form textarea::placeholder { color: var(--muted); opacity: 0.75; }
+.form textarea::placeholder,
+.search-form input::placeholder { color: var(--muted); opacity: 0.75; }
 
 .form input:focus,
 .form select:focus,
-.form textarea:focus {
+.form textarea:focus,
+.search-form input:focus,
+.search-form select:focus {
   outline: none;
   border-color: var(--accent);
   box-shadow: var(--ring);
 }
 
-.form select { cursor: pointer; }
+.form select,
+.search-form select { cursor: pointer; }
+.search-form input[type="text"],
+.search-form select { padding: 6px 8px; font-size: 12px; }
 /* On/off switch: a checkbox drawn as a track and knob. The real input stays
    in the tab order (visually hidden), so keyboard and screen readers work. */
 .switch-row {
@@ -800,6 +856,108 @@ a.job-title:hover { color: var(--accent); text-decoration: underline; }
 }
 
 .style-actions { margin-top: 6px; }
+
+/* Profile: one card per profile the picked Country and Role select, each
+   holding that profile's own prompt, master resume and resume style. A card is
+   a <details>, so a long master resume can be folded out of the way. */
+.profile-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+.profile-list:empty { display: none; }
+.profile-card {
+  padding: 0 10px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+.profile-card[open] { padding-bottom: 10px; }
+.profile-card > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  padding: 8px 0;
+  list-style: none;
+  cursor: pointer;
+}
+.profile-card > summary::marker,
+.profile-card > summary::-webkit-details-marker { display: none; }
+.profile-card > summary::before {
+  content: "▸";
+  font-size: 9px;
+  color: var(--muted);
+  transition: transform 0.15s ease;
+}
+.profile-card[open] > summary::before { transform: rotate(90deg); }
+.profile-name { flex: none; font-size: 12.5px; font-weight: 600; }
+.profile-sub {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+/* Unsaved edits in this card, said on the card itself — it may be folded. */
+.profile-dirty { flex: none; font-size: 11px; color: var(--accent); }
+.profile-dirty[hidden] { display: none; }
+.profile-card .field-label:first-of-type { margin-top: 2px; }
+
+/* Template HTML is markup, read and edited as code: a monospace face, and
+   long lines scroll sideways rather than wrapping into each other. */
+.form textarea.code {
+  min-height: 180px;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 11px;
+  white-space: pre;
+  overflow-wrap: normal;
+}
+
+/* Resume style's preview. The built resume is laid out for a letter page, far
+   wider than the panel, so its frame keeps the page's width (816px, 8.5in) and
+   is scaled down to fit — the scale and the height are set from
+   sidepanel.js. White whatever the theme: it is a printed page. */
+.style-preview {
+  margin-top: 12px;
+  overflow: hidden;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+.style-preview[hidden] { display: none; }
+.style-preview-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+}
+.style-preview-bar button { flex: none; }
+.style-preview-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.style-preview-page {
+  max-height: 560px;
+  overflow-y: auto;
+  background: #fff;
+}
+.style-preview-sizer { overflow: hidden; }
+.style-preview-sizer iframe {
+  display: block;
+  width: 816px;
+  border: 0;
+  background: #fff;
+  transform-origin: 0 0;
+}
 
 /* Unlike the other .controls rows, this button sits beside its own result
    rather than a second button — sized to its label instead of stretching,

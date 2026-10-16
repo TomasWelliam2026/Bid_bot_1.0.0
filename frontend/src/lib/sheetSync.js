@@ -80,7 +80,7 @@ export async function probeScript(webAppUrl) {
  * with `new Date(...)`: a bare `YYYY-MM-DD` would be read as UTC midnight and
  * could land on the day before in a timezone behind it.
  */
-export function payloadFor(record, sheetSettings, tabName, applicant, sentAt = new Date(), requestId = '') {
+export function payloadFor(record, sheetSettings, country, applicant, sentAt = new Date(), requestId = '') {
   return {
     secret: sheetSettings.secret,
     // Names this send, so a retry of it can be recognised as the same send
@@ -94,11 +94,10 @@ export function payloadFor(record, sheetSettings, tabName, applicant, sentAt = n
     company: record.company,
     position: record.job_title,
     jobUrl: record.job_url || '',
-    // Column C (Category) -- always the archive tab's own name, not a
-    // separately configured value, so it can never drift out of sync with
-    // which tab a record actually lives on.
-    region: tabName,
-    // Column D (Profile) -- still each tab's own value, unlike the rest of
+    // Column C (Category) -- the tab's own Country (C), set separately from
+    // its name. Blank leaves the script's own default in its place.
+    region: country,
+    // Column D (Profile) -- each tab's own value too, unlike the rest of
     // sheetSettings above.
     applicant,
   };

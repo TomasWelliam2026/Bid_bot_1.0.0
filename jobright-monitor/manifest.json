@@ -13,6 +13,7 @@
     "https://www.dice.com/*",
     "https://www.glassdoor.com/*",
     "https://www.ziprecruiter.com/*",
+    "https://*.indeed.com/*",
     "http://localhost/*",
     "http://127.0.0.1/*",
     "https://api.openai.com/*"
@@ -45,6 +46,11 @@
     {
       "matches": ["https://www.ziprecruiter.com/*"],
       "js": ["content-ziprecruiter.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://*.indeed.com/*"],
+      "js": ["content-indeed.js"],
       "run_at": "document_idle"
     }
   ],
