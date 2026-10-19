@@ -11,9 +11,10 @@
             aria-selected="true" aria-controls="pane-generate" tabindex="0">
       Generate JD &amp; Resume
     </button>
+    <!-- Auto Fill; the ids are the ones the tab had as "Job bid". -->
     <button id="tab-bid" class="tab" role="tab"
             aria-selected="false" aria-controls="pane-bid" tabindex="-1">
-      Job bid
+      Auto Fill
     </button>
   </nav>
 
@@ -195,14 +196,96 @@
     </div>
   </section>
 
+  <!-- Auto Fill: the applicant's details, and "Fill this page" puts them into
+       the job application form on the page in front (autofill.js). -->
   <section id="pane-bid" class="pane" role="tabpanel" aria-labelledby="tab-bid" hidden>
-    <p class="empty">
-      <strong>Job bid</strong> has no behaviour yet — this pane is the shell for it.
-    </p>
-    <p class="empty">
-      <span id="bidCount">0</span> job(s) collected so far are available to it,
-      with their description, company, title and URL already read.
-    </p>
+    <div class="form">
+      <p class="hint autofill-intro">
+        Fills the job application form on the page you are looking at with the
+        details below — every field it recognises, and only the empty ones.
+      </p>
+
+      <!-- Each dashboard profile has its own details: the one picked here is
+           shown, saved and filled with. -->
+      <label class="field-label" for="afProfile">Profile</label>
+      <div class="af-profile-row">
+        <select id="afProfile"></select>
+        <button id="afReloadProfiles" type="button">Reload</button>
+      </div>
+      <p id="afProfileNote" class="hint" hidden></p>
+
+      <fieldset id="afDetails" class="af-details">
+      <legend class="sr-only">Auto Fill details for the picked profile</legend>
+
+      <!-- A JSON file of applicants: each one's keys fill the details, and its
+           "answers" answer the form questions they name. -->
+      <div class="controls test-actions">
+        <button id="afImport" type="button">Import JSON</button>
+        <button id="afTemplate" type="button">JSON template</button>
+        <input id="afJsonFile" type="file" accept=".json,application/json" hidden>
+      </div>
+      <p id="afImportStatus" class="hint" hidden></p>
+      <div id="afRowWrap" hidden>
+        <label class="field-label" for="afRow">Applicant (from the JSON)</label>
+        <select id="afRow"></select>
+      </div>
+
+      <table class="af-table">
+        <thead>
+          <tr><th scope="col">Question</th><th scope="col">Answer</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><label for="afFirstName">First name</label></td>
+            <td><input id="afFirstName" type="text" autocomplete="off"></td>
+          </tr>
+          <tr>
+            <td><label for="afLastName">Last name</label></td>
+            <td><input id="afLastName" type="text" autocomplete="off"></td>
+          </tr>
+          <tr>
+            <td><label for="afEmail">Email</label></td>
+            <td><input id="afEmail" type="text" inputmode="email" autocomplete="off" spellcheck="false"></td>
+          </tr>
+          <tr>
+            <td><label for="afPhone">Phone</label></td>
+            <td><input id="afPhone" type="tel" autocomplete="off"></td>
+          </tr>
+          <tr>
+            <td><label for="afLocation">Location</label></td>
+            <td><input id="afLocation" type="text" autocomplete="off" placeholder="City, State"></td>
+          </tr>
+          <tr>
+            <td><label for="afLinkedin">LinkedIn</label></td>
+            <td><input id="afLinkedin" type="url" autocomplete="off" spellcheck="false" placeholder="https://linkedin.com/in/…"></td>
+          </tr>
+          <tr>
+            <td><label for="afWebsite">Website or portfolio</label></td>
+            <td><input id="afWebsite" type="url" autocomplete="off" spellcheck="false" placeholder="https://…"></td>
+          </tr>
+        </tbody>
+        <!-- The imported "answers": each one fills the form field asking it. -->
+        <tbody id="afExtra"></tbody>
+      </table>
+
+      <div id="afExtraWrap" class="controls test-actions" hidden>
+        <button id="afExtraClear" type="button">Clear answers</button>
+      </div>
+
+      <div class="controls form-actions">
+        <button id="afFill" class="primary" type="button">Fill this page</button>
+        <button id="afCatch" type="button">Catch from page</button>
+        <button id="afSave" type="button" disabled>Save details</button>
+      </div>
+      <div class="controls test-actions">
+        <button id="afSample" type="button">Use sample details</button>
+        <button id="afTry" type="button">Try on the sample form</button>
+      </div>
+      </fieldset>
+
+      <p id="afStatus" class="hint" hidden></p>
+      <ul id="afFilled" class="af-filled"></ul>
+    </div>
   </section>
 
   <!-- Opened by the "Settings" button on the Generate pane, not a top-level tab. -->

@@ -14,7 +14,6 @@ const emptyEl = $("empty");
 const startEl = $("start");
 const stopEl = $("stop");
 const queueEl = $("queue");
-const bidCountEl = $("bidCount");
 
 // Keep in step with MAX_ITEMS in content.js and MAX_STORED in background.js.
 const MAX_ITEMS = 50;
@@ -390,7 +389,6 @@ function field(label, text) {
 function updateCount() {
   countEl.textContent = String(rendered.size);
   emptyEl.hidden = rendered.size > 0;
-  bidCountEl.textContent = String(rendered.size);
 }
 
 function setRunning(next) {
@@ -1708,14 +1706,14 @@ revertProfileEl.addEventListener("click", () => {
 // ---------------------------------------------------------------------------
 // Tabs
 //
-// Two independent strips share this wiring: the top-level Generate/Job bid
+// Two independent strips share this wiring: the top-level Generate/Auto Fill
 // pair, and the ChatGPT setting/Profile pair inside the settings screen.
 // Each is wired separately so arrow-key navigation stays scoped to its own
 // strip — switching between the settings tabs must not also step through
-// Generate/Job bid.
+// Generate/Auto Fill.
 //
 // Switching only shows and hides. The feed keeps streaming into the Generate
-// pane while the Job bid tab is in front, and an edit in a profile's master
+// pane while the Auto Fill tab is in front, and an edit in a profile's master
 // resume survives a trip to ChatGPT setting, because the panes are still in
 // the document, just not displayed.
 // ---------------------------------------------------------------------------
@@ -1751,9 +1749,12 @@ function wireTabStrip(listEl, { onSelect } = {}) {
 
 const mainTabs = wireTabStrip($("mainTabs"), {
   // Picking a top-level tab also leaves the settings screen, if it is open.
-  onSelect: () => {
+  // Auto Fill's profile list is read fresh each time its tab is opened, so a
+  // profile just added on the dashboard is there to pick.
+  onSelect: (tab) => {
     $("pane-profile").hidden = true;
     $("openSettings").setAttribute("aria-expanded", "false");
+    if (tab.id === "tab-bid") loadAfProfiles();
   }
 });
 
@@ -1794,6 +1795,731 @@ closeSettingsEl.addEventListener("click", () => {
   showSettings(false);
   openSettingsEl.focus();
 });
+
+// ---------------------------------------------------------------------------
+// Auto Fill
+//
+// The applicant's details, kept by the worker, and "Fill this page", which
+// puts them into the job application form on the page in front: autofill.js
+// is injected there and recognises each field by its label, name and the
+// like, filling only the empty ones. A site the extension has no access to
+// is asked for once, by Chrome's own prompt (optional_host_permissions). The
+// extension's own sample form cannot be injected into, so it is asked by
+// message instead.
+// ---------------------------------------------------------------------------
+
+const AF_FIELDS = {
+  firstName: $("afFirstName"),
+  lastName: $("afLastName"),
+  email: $("afEmail"),
+  phone: $("afPhone"),
+  location: $("afLocation"),
+  linkedin: $("afLinkedin"),
+  website: $("afWebsite")
+};
+const afFillEl = $("afFill");
+const afCatchEl = $("afCatch");
+const afSaveEl = $("afSave");
+const afStatusEl = $("afStatus");
+const afFilledEl = $("afFilled");
+const SAMPLE_FORM = "autofill-sample.html";
+
+// Made-up details to try the fill with: example.com addresses and a 555-01xx
+// number, which are reserved for exactly this.
+const SAMPLE_DETAILS = {
+  firstName: "Alex",
+  lastName: "Morgan",
+  email: "alex.morgan@example.com",
+  phone: "+1 (555) 010-0123",
+  location: "Austin, TX",
+  linkedin: "https://www.linkedin.com/in/alex-morgan-example",
+  website: "https://alexmorgan.example.com",
+  // Answers to the sample form's own questions.
+  extra: [
+    { question: "How did you hear about us?", answer: "LinkedIn" },
+    { question: "Years of experience", answer: "6" },
+    { question: "Work authorization", answer: "Authorized to work in the US" }
+  ]
+};
+
+let savedDetails = {};
+// The answers to form questions, from an imported JSON's "answers":
+// [{ question, answer }]. Shown below the details, kept with them on Save.
+let extraAnswers = [];
+
+const readDetails = () => ({
+  ...Object.fromEntries(Object.entries(AF_FIELDS).map(([key, el]) => [key, el.value.trim()])),
+  extra: extraAnswers
+});
+
+// Something to fill a page with: a detail, or an answer.
+const hasDetails = (d) => Object.keys(AF_FIELDS).some((k) => d[k]) || d.extra.length > 0;
+
+function fillDetails(details) {
+  for (const [key, el] of Object.entries(AF_FIELDS)) el.value = details?.[key] ?? "";
+  extraAnswers = Array.isArray(details?.extra) ? details.extra : [];
+  renderExtra();
+  syncDetailsSave();
+}
+
+// Save is on while the picked profile's details differ from what is saved for
+// it, and the profile's line in the list says so.
+function syncDetailsSave() {
+  afSaveEl.disabled = afProfileId === null || !detailsDirty();
+  refreshAfProfileLabel();
+}
+
+function renderExtra() {
+  const body = $("afExtra");
+  body.replaceChildren(
+    ...extraAnswers.map(({ question, answer }) => {
+      const row = document.createElement("tr");
+      row.append(
+        Object.assign(document.createElement("td"), { textContent: question }),
+        Object.assign(document.createElement("td"), { textContent: answer })
+      );
+      return row;
+    })
+  );
+  $("afExtraWrap").hidden = extraAnswers.length === 0;
+}
+
+$("afExtraClear").addEventListener("click", () => {
+  extraAnswers = [];
+  renderExtra();
+  syncDetailsSave();
+});
+
+function showAfStatus(text, kind = "") {
+  afStatusEl.hidden = !text;
+  afStatusEl.className = `hint ${kind}`.trim();
+  afStatusEl.textContent = text;
+}
+
+for (const el of Object.values(AF_FIELDS)) el.addEventListener("input", syncDetailsSave);
+
+// --- One set of details per profile ----------------------------------------
+//
+// Each dashboard profile has its own details, picked at the top of the pane:
+// what is shown, saved and filled with is the picked profile's. An edit not
+// yet saved stays with its profile while another one is looked at, marked ●
+// in the list. The profile picked last is picked again next time. The single
+// set saved before Auto Fill was per profile is offered, unsaved, to a
+// profile with none of its own, until it is saved to one.
+
+const afProfileEl = $("afProfile");
+const AF_PROFILE_KEY = "autofillProfile";
+let afProfiles = [];
+let afProfileId = null; // the picked profile's id, or null with none to pick
+const afDrafts = new Map(); // profile id -> { details, fromLegacy } not yet saved
+let afFromLegacy = false; // the form holds the old single set, offered to this profile
+
+const afProfile = () => afProfiles.find((p) => p.id === afProfileId) || null;
+
+// The form differs from what is saved for the picked profile.
+function detailsDirty() {
+  const now = readDetails();
+  return (
+    Object.keys(AF_FIELDS).some((k) => now[k] !== (savedDetails[k] ?? "")) ||
+    JSON.stringify(now.extra) !== JSON.stringify(savedDetails.extra ?? [])
+  );
+}
+
+function profileLabel(p) {
+  const sheet = p.sheet || {};
+  const where = [sheet.country, sheet.role].filter(Boolean).join(" · ");
+  const who = sheet.applicant && sheet.applicant !== p.name ? ` · ${sheet.applicant}` : "";
+  const unsaved = p.id === afProfileId ? detailsDirty() : afDrafts.has(p.id);
+  return `${unsaved ? "● " : ""}${p.name}${who}${where ? ` (${where})` : ""}`;
+}
+
+function renderAfProfiles() {
+  afProfileEl.replaceChildren(
+    ...(afProfiles.length
+      ? afProfiles.map((p) => new Option(profileLabel(p), String(p.id), false, p.id === afProfileId))
+      : [new Option("— No profiles —", "", true, true)])
+  );
+  afProfileEl.disabled = !afProfiles.length;
+}
+
+// Just the picked profile's line, as the form is edited.
+function refreshAfProfileLabel() {
+  const option = afProfileEl.selectedOptions[0];
+  const profile = afProfile();
+  if (option && profile) option.text = profileLabel(profile);
+}
+
+function showAfProfileNote(text, kind = "") {
+  const el = $("afProfileNote");
+  el.hidden = !text;
+  el.className = `hint ${kind}`.trim();
+  el.textContent = text;
+}
+
+function rememberedProfile() {
+  try {
+    return localStorage.getItem(AF_PROFILE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+async function pickAfProfile(id) {
+  // The profile being left keeps what was typed for it.
+  if (afProfileId !== null) {
+    if (detailsDirty()) afDrafts.set(afProfileId, { details: readDetails(), fromLegacy: afFromLegacy });
+    else afDrafts.delete(afProfileId);
+  }
+  afProfileId = id;
+  try {
+    if (id !== null) localStorage.setItem(AF_PROFILE_KEY, String(id));
+  } catch {
+    // not remembered; picked for now all the same
+  }
+  $("afDetails").disabled = id === null;
+  afFilledEl.replaceChildren();
+  showAfStatus("");
+
+  if (id === null) {
+    savedDetails = {};
+    afFromLegacy = false;
+    fillDetails({});
+    renderAfProfiles();
+    return;
+  }
+
+  const reply = await send({ type: "GET_AUTOFILL", profileId: id });
+  if (afProfileId !== id) return; // another was picked while this one loaded
+  const profile = afProfile();
+  savedDetails = (reply.ok && reply.details) || {};
+  const draft = afDrafts.get(id);
+  afDrafts.delete(id);
+  afFromLegacy = draft?.fromLegacy ?? false;
+
+  if (draft) {
+    fillDetails(draft.details);
+  } else if (reply.ok && !reply.details && reply.legacy) {
+    afFromLegacy = true;
+    fillDetails(reply.legacy);
+    showAfStatus(
+      `These are the details saved before Auto Fill kept them per profile — Save details to keep them for ${profile?.name}, or change them first.`
+    );
+  } else {
+    fillDetails(savedDetails);
+  }
+  if (!reply.ok) showAfStatus(`Could not load this profile's details: ${reply.error}`, "warn");
+  renderAfProfiles();
+}
+
+// The dashboard's profiles, fresh: on opening the tab, and on Reload. The
+// profile picked stays picked, with whatever is in the form; otherwise the
+// one picked last time, then the first with the Country and Role picked in
+// Settings, then the first.
+async function loadAfProfiles() {
+  const reloadEl = $("afReloadProfiles");
+  reloadEl.disabled = true;
+  const reply = await send({ type: "GET_PROFILES" });
+  reloadEl.disabled = false;
+
+  if (!reply.ok) {
+    afProfiles = [];
+    showAfProfileNote(`Could not load the dashboard's profiles: ${reply.error}`, "warn");
+    await pickAfProfile(null);
+    return;
+  }
+  afProfiles = reply.profiles || [];
+  // A profile gone from the dashboard takes its unsaved edits with it.
+  for (const id of [...afDrafts.keys()]) if (!afProfiles.some((p) => p.id === id)) afDrafts.delete(id);
+
+  if (!afProfiles.length) {
+    showAfProfileNote("The dashboard has no profiles yet — add one there first.", "warn");
+    await pickAfProfile(null);
+    return;
+  }
+  showAfProfileNote("");
+
+  const has = (id) => afProfiles.some((p) => p.id === id);
+  const remembered = afProfiles.find((p) => String(p.id) === rememberedProfile());
+  const forSettings =
+    savedSettings &&
+    afProfiles.find(
+      (p) =>
+        matchKey(p.sheet?.country) === matchKey(savedSettings.country) &&
+        matchKey(p.sheet?.role) === matchKey(savedSettings.role)
+    );
+  const id = has(afProfileId) ? afProfileId : (remembered || forSettings || afProfiles[0]).id;
+
+  if (id === afProfileId) renderAfProfiles();
+  else await pickAfProfile(id);
+}
+
+afProfileEl.addEventListener("change", () => {
+  const profile = afProfiles.find((p) => String(p.id) === afProfileEl.value);
+  if (profile) pickAfProfile(profile.id);
+});
+
+$("afReloadProfiles").addEventListener("click", loadAfProfiles);
+
+// Saves whatever is in the table now to the picked profile. Used by the Save
+// button itself, and by Catch, which remembers what it caught right away
+// rather than leaving it to be lost if the panel is closed first.
+async function saveAfDetails() {
+  const profile = afProfile();
+  if (!profile) return { ok: false, error: "no profile picked" };
+  const reply = await send({
+    type: "SET_AUTOFILL",
+    profileId: profile.id,
+    details: readDetails(),
+    dropLegacy: afFromLegacy
+  });
+  if (!reply.ok) return reply;
+  savedDetails = reply.details;
+  afFromLegacy = false;
+  syncDetailsSave();
+  return reply;
+}
+
+afSaveEl.addEventListener("click", async () => {
+  const profile = afProfile();
+  if (!profile) return;
+  const reply = await saveAfDetails();
+  showAfStatus(
+    reply.ok ? `Details saved for ${profile.name}.` : `Could not save: ${reply.error}`,
+    reply.ok ? "saved" : "warn"
+  );
+});
+
+$("afSample").addEventListener("click", () => {
+  fillDetails(SAMPLE_DETAILS);
+  showAfStatus("Sample details filled in — Save them, or just press Fill this page.");
+});
+
+$("afTry").addEventListener("click", () => {
+  chrome.tabs.create({ url: chrome.runtime.getURL(SAMPLE_FORM) });
+});
+
+// --- JSON import --------------------------------------------------------------
+//
+// A JSON file of applicants: one object, an array of them, or an object
+// holding the array under "applicants" (or "profiles", "people"). Each
+// applicant's keys name the details — firstName, lastName (or one name),
+// email, phone, location, linkedin, website — and "answers"
+// holds the answers to form questions, as { "question": "answer" }. Keys are
+// matched loosely ("first_name", "E-mail"), and a nested "contact" object
+// counts too, so a resume answer's own "contact" shape can be imported as it
+// is. With more than one applicant, the one to load is picked from a list. The
+// file is read here, in the panel; nothing of it is kept but the applicant
+// loaded into the form, and that only once Save details is pressed.
+
+// A key, compared without case, spaces or punctuation: "First_Name" is
+// "firstname".
+const normKey = (k) =>
+  String(k || "")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, "");
+
+const JSON_KEYS = {
+  firstName: ["firstname", "givenname", "first"],
+  lastName: ["lastname", "surname", "familyname", "last"],
+  fullName: ["name", "fullname", "applicantname", "candidatename"],
+  email: ["email", "emailaddress", "mail"],
+  phone: ["phone", "phonenumber", "mobile", "mobilenumber", "telephone", "tel", "cell"],
+  location: ["location", "city", "address"],
+  linkedin: ["linkedin", "linkedinurl", "linkedinprofile"],
+  website: ["website", "portfolio", "url", "github", "personalwebsite"]
+};
+const DETAIL_KEY = new Map(Object.entries(JSON_KEYS).flatMap(([key, names]) => names.map((n) => [n, key])));
+const ANSWER_KEYS = new Set(["answers", "questions", "extra", "qa"]);
+const CONTACT_KEYS = new Set(["contact", "contactinfo", "contacts"]);
+const LIST_KEYS = ["applicants", "profiles", "people"];
+
+// A value as text: strings and numbers as they are, a list of paragraphs
+// joined with blank lines; anything else is no value.
+function textOf(v) {
+  if (typeof v === "string") return v.trim();
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+  if (Array.isArray(v) && v.every((p) => typeof p === "string")) return v.join("\n\n").trim();
+  return "";
+}
+
+// { question: answer } or [{ question, answer }] (or [question, answer] pairs).
+function answersFrom(v) {
+  const pairs = Array.isArray(v)
+    ? v.map((x) => (Array.isArray(x) ? [x[0], x[1]] : [x?.question, x?.answer]))
+    : v && typeof v === "object"
+      ? Object.entries(v)
+      : [];
+  return pairs
+    .map(([q, a]) => ({ question: String(q ?? "").trim(), answer: textOf(a) }))
+    .filter((x) => x.question && x.answer);
+}
+
+// One applicant as details. Keys that are neither a detail, "answers" nor
+// "contact" are reported back as ignored, not guessed at.
+function entryDetails(entry) {
+  const details = { extra: [] };
+  const ignored = [];
+  const take = (obj) => {
+    for (const [k, v] of Object.entries(obj || {})) {
+      const nk = normKey(k);
+      const key = DETAIL_KEY.get(nk);
+      if (key) {
+        const value = textOf(v);
+        if (value && !details[key]) details[key] = value;
+      } else if (ANSWER_KEYS.has(nk)) details.extra.push(...answersFrom(v));
+      else if (CONTACT_KEYS.has(nk) && v && typeof v === "object") take(v);
+      else ignored.push(k);
+    }
+  };
+  take(entry);
+  // One "name": first word first name, the rest last name.
+  if (details.fullName && !details.firstName && !details.lastName) {
+    const [firstName, ...rest] = details.fullName.split(/\s+/);
+    details.firstName = firstName;
+    details.lastName = rest.join(" ");
+  }
+  delete details.fullName;
+  return { details, ignored };
+}
+
+// The applicants in a file's text. Plain JSON — or, forgivingly, a JS
+// declaration around it (`const resume = {…};`), as a saved model answer is.
+function parseApplicants(text) {
+  const src = String(text).replace(/^﻿/, "").trim();
+  let data;
+  try {
+    data = JSON.parse(src);
+  } catch (err) {
+    const bare = src.replace(/^(?:export\s+default|(?:const|let|var)\s+[\w$]+\s*=)\s*/, "").replace(/;\s*$/, "");
+    try {
+      data = JSON.parse(bare);
+    } catch {
+      throw new Error(`it is not valid JSON (${err.message})`);
+    }
+  }
+  const list = Array.isArray(data)
+    ? data
+    : data && typeof data === "object"
+      ? LIST_KEYS.map((k) => data[k]).find(Array.isArray) || [data]
+      : [];
+  return list.filter((x) => x && typeof x === "object" && !Array.isArray(x));
+}
+
+let applicants = null; // { fileName, entries } of the file imported this session
+const afRowEl = $("afRow");
+
+function showImportStatus(text, kind = "") {
+  const el = $("afImportStatus");
+  el.hidden = !text;
+  el.className = `hint ${kind}`.trim();
+  el.textContent = text;
+}
+
+const nameOf = (d) => [d.firstName, d.lastName].filter(Boolean).join(" ");
+
+function loadEntry(index) {
+  const { details } = entryDetails(applicants.entries[index]);
+  fillDetails(details);
+  afFilledEl.replaceChildren();
+  showAfStatus(
+    `${nameOf(details) || `Applicant ${index + 1}`} loaded from the JSON — Save details to keep them, or just press Fill this page.`
+  );
+}
+
+$("afImport").addEventListener("click", () => $("afJsonFile").click());
+
+$("afJsonFile").addEventListener("change", async (e) => {
+  const file = e.target.files?.[0];
+  e.target.value = ""; // the same file picked again still counts as a change
+  if (!file) return;
+
+  let entries;
+  try {
+    entries = parseApplicants(await file.text());
+  } catch (err) {
+    showImportStatus(`Could not read ${file.name}: ${err?.message || err}`, "warn");
+    return;
+  }
+  if (!entries.length) {
+    showImportStatus(`${file.name} has no applicant in it — an object, or an array of them.`, "warn");
+    return;
+  }
+
+  applicants = { fileName: file.name, entries };
+  const read = entries.map(entryDetails);
+  const ignored = [...new Set(read.flatMap((r) => r.ignored))];
+  const answers = read.reduce((n, r) => n + r.details.extra.length, 0);
+  showImportStatus(
+    `${file.name} · ${entries.length} applicant(s) · ${answers} answer(s) to form questions` +
+      (ignored.length ? ` · ignored: ${ignored.slice(0, 6).join(", ")}${ignored.length > 6 ? "…" : ""}` : ""),
+    "saved"
+  );
+
+  // One applicant: loaded as it is. Several: picked from a list — starting
+  // at the one named like the picked profile's applicant, if one is.
+  afRowEl.replaceChildren(
+    ...read.map(({ details: d }, i) => new Option(`${i + 1} · ${nameOf(d) || "(no name)"}${d.email ? ` · ${d.email}` : ""}`, String(i)))
+  );
+  $("afRowWrap").hidden = entries.length < 2;
+  const profile = afProfile();
+  const wanted = normKey(profile?.sheet?.applicant || profile?.name);
+  const match = wanted ? read.findIndex(({ details: d }) => normKey(nameOf(d)) === wanted) : -1;
+  const start = match === -1 ? 0 : match;
+  afRowEl.value = String(start);
+  loadEntry(start);
+});
+
+afRowEl.addEventListener("change", () => {
+  if (applicants) loadEntry(Number(afRowEl.value));
+});
+
+// A ready-made file showing the layout, with two made-up applicants whose
+// answers are to the sample form's questions.
+const JSON_TEMPLATE = [
+  {
+    firstName: "Alex",
+    lastName: "Morgan",
+    email: "alex.morgan@example.com",
+    phone: "+1 (555) 010-0123",
+    location: "Austin, TX",
+    linkedin: "https://www.linkedin.com/in/alex-morgan-example",
+    website: "https://alexmorgan.example.com",
+    answers: {
+      "How did you hear about us?": "LinkedIn",
+      "Years of experience": "6",
+      "Work authorization": "Authorized to work in the US"
+    }
+  },
+  {
+    firstName: "Jordan",
+    lastName: "Lee",
+    email: "jordan.lee@example.com",
+    phone: "+1 (555) 010-0177",
+    location: "Denver, CO",
+    linkedin: "https://www.linkedin.com/in/jordan-lee-example",
+    website: "https://jordanlee.example.com",
+    answers: {
+      "How did you hear about us?": "A friend",
+      "Years of experience": "9",
+      "Work authorization": "Require sponsorship"
+    }
+  }
+];
+
+$("afTemplate").addEventListener("click", () => {
+  const text = JSON.stringify(JSON_TEMPLATE, null, 2) + "\n";
+  const url = URL.createObjectURL(new Blob([text], { type: "application/json" }));
+  Object.assign(document.createElement("a"), { href: url, download: "autofill-template.json" }).click();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+});
+
+// The page in front, kept up to date, so that asking for its site's
+// permission can be the very first thing a click on Fill does — Chrome shows
+// that prompt only from inside the click.
+let frontTab = null;
+
+async function refreshFrontTab() {
+  try {
+    [frontTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  } catch {
+    frontTab = null;
+  }
+}
+
+chrome.tabs?.onActivated?.addListener(refreshFrontTab);
+chrome.tabs?.onUpdated?.addListener((_id, info) => {
+  if (info.url || info.status === "complete") refreshFrontTab();
+});
+refreshFrontTab();
+
+// What was filled, what already held something and was left, and a question
+// whose dropdown has no option for the answer.
+function showAfReport(reply) {
+  afFilledEl.replaceChildren();
+  if (!reply?.ok) {
+    showAfStatus(`Could not fill the page: ${reply?.error || "it did not answer"}`, "warn");
+    return;
+  }
+  const missed = reply.missed || [];
+  const page = reply.title ? `“${reply.title}”` : "this page";
+  const kept = reply.kept.length ? ` ${reply.kept.length} already had something and were left as they were.` : "";
+  const noOption = missed.length ? ` ${missed.length} question(s) had no option matching the answer.` : "";
+  showAfStatus(
+    reply.filled.length
+      ? `Filled ${reply.filled.length} field(s) on ${page}.${kept}${noOption}`
+      : `Nothing filled on ${page} — no empty field it recognises.${kept}${noOption}`,
+    reply.filled.length ? "saved" : "warn"
+  );
+  const pill = (className, textContent) => afFilledEl.appendChild(Object.assign(document.createElement("li"), { className, textContent }));
+  for (const f of reply.filled) pill("", f.name);
+  for (const f of reply.kept) pill("kept", `${f.name} · kept`);
+  for (const f of missed) pill("missed", `${f.name} · no option “${f.answer}”`);
+}
+
+afFillEl.addEventListener("click", async () => {
+  const details = readDetails();
+  if (!hasDetails(details)) {
+    showAfStatus("Enter your details first — or press Use sample details, or Import JSON.", "warn");
+    return;
+  }
+  const tab = frontTab;
+  const url = tab?.url || "";
+  afFilledEl.replaceChildren();
+
+  let reply;
+  afFillEl.disabled = true;
+  try {
+    if (url.startsWith(chrome.runtime.getURL(SAMPLE_FORM))) {
+      reply = await chrome.runtime.sendMessage({ type: "AUTOFILL_RUN", details });
+    } else if (/^https?:\/\//i.test(url)) {
+      const site = new URL(url);
+      // First, while the click still counts: a site the extension may not
+      // touch yet is asked for. Chrome answers at once for one it may.
+      const allowed = await chrome.permissions.request({ origins: [`${site.origin}/*`] });
+      if (!allowed) {
+        showAfStatus(`Not filled — the extension needs your OK to fill forms on ${site.hostname}.`, "warn");
+        return;
+      }
+      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["autofill.js"] });
+      const [result] = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: (d) => window.__jobrightAutofill(d),
+        args: [details]
+      });
+      reply = result?.result;
+    } else {
+      showAfStatus(
+        tab
+          ? "This page cannot be filled — Chrome's own pages and the Web Store are off limits to extensions. Open the application form first."
+          : "No page to fill — open the application form in a tab first.",
+        "warn"
+      );
+      return;
+    }
+  } catch (err) {
+    showAfStatus(`Could not fill the page: ${err?.message || err}`, "warn");
+    return;
+  } finally {
+    afFillEl.disabled = false;
+  }
+  showAfReport(reply);
+});
+
+// For comparing a caught question against the ones already in the table —
+// case, punctuation and spacing do not count. Mirrors autofill.js's own norm().
+const normQ = (s) =>
+  String(s || "")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+
+// What a catch found: how many table rows it added or updated to match what
+// is on the page now — a row already holding the same value does not count,
+// but one that differs is overwritten, not skipped, so editing an answer on
+// the page and catching again actually updates the table instead of always
+// reporting nothing new. Then remembered at once, so it is not lost if the
+// panel closes before Save details is pressed by hand.
+async function showAfCatchReport(reply) {
+  if (!reply?.ok) {
+    showAfStatus(`Could not catch from the page: ${reply?.error || "it did not answer"}`, "warn");
+    return;
+  }
+  const page = reply.title ? `“${reply.title}”` : "this page";
+  const details = { ...reply.details };
+  if (details.fullName && !details.firstName && !details.lastName) {
+    const parts = String(details.fullName).trim().split(/\s+/);
+    details.firstName = parts.shift() || "";
+    details.lastName = parts.join(" ");
+  }
+
+  let caught = 0;
+  for (const key of Object.keys(AF_FIELDS)) {
+    const value = details[key];
+    if (value && AF_FIELDS[key].value.trim() !== value) {
+      AF_FIELDS[key].value = value;
+      caught++;
+    }
+  }
+
+  const byQuestion = new Map(extraAnswers.map((x, i) => [normQ(x.question), i]));
+  for (const x of reply.extra || []) {
+    const q = normQ(x.question);
+    if (!q) continue;
+    const at = byQuestion.get(q);
+    if (at === undefined) {
+      byQuestion.set(q, extraAnswers.length);
+      extraAnswers.push(x);
+      caught++;
+    } else if (extraAnswers[at].answer !== x.answer) {
+      extraAnswers[at] = x;
+      caught++;
+    }
+  }
+  renderExtra();
+  syncDetailsSave();
+
+  if (!caught) {
+    showAfStatus(`Nothing new caught from ${page}.`, "warn");
+    return;
+  }
+
+  const profile = afProfile();
+  if (!profile) {
+    showAfStatus(`Caught ${caught} item(s) from ${page} — pick a profile to remember them.`, "warn");
+    return;
+  }
+  const saved = await saveAfDetails();
+  showAfStatus(
+    saved.ok
+      ? `Caught ${caught} item(s) from ${page} and saved them for ${profile.name}.`
+      : `Caught ${caught} item(s) from ${page}, but could not save: ${saved.error}`,
+    saved.ok ? "saved" : "warn"
+  );
+}
+
+afCatchEl.addEventListener("click", async () => {
+  const tab = frontTab;
+  const url = tab?.url || "";
+
+  let reply;
+  afCatchEl.disabled = true;
+  try {
+    if (url.startsWith(chrome.runtime.getURL(SAMPLE_FORM))) {
+      reply = await chrome.runtime.sendMessage({ type: "AUTOFILL_CATCH" });
+    } else if (/^https?:\/\//i.test(url)) {
+      const site = new URL(url);
+      // First, while the click still counts: a site the extension may not
+      // touch yet is asked for. Chrome answers at once for one it may.
+      const allowed = await chrome.permissions.request({ origins: [`${site.origin}/*`] });
+      if (!allowed) {
+        showAfStatus(`Not caught — the extension needs your OK to read forms on ${site.hostname}.`, "warn");
+        return;
+      }
+      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["autofill.js"] });
+      const [result] = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: () => window.__jobrightAutofillCatch()
+      });
+      reply = result?.result;
+    } else {
+      showAfStatus(
+        tab
+          ? "This page cannot be read — Chrome's own pages and the Web Store are off limits to extensions. Open the application form first."
+          : "No page to catch from — open the application form in a tab first.",
+        "warn"
+      );
+      return;
+    }
+  } catch (err) {
+    showAfStatus(`Could not catch from the page: ${err?.message || err}`, "warn");
+    return;
+  } finally {
+    afCatchEl.disabled = false;
+  }
+  await showAfCatchReport(reply);
+});
+
+loadAfProfiles();
 
 // ---------------------------------------------------------------------------
 // Theme

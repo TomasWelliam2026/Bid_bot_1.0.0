@@ -2865,6 +2865,42 @@ async function handle(msg) {
       return { ok: true, list: openaiModels };
     }
 
+    // Auto Fill's applicant details — one set per profile, by the profile's
+    // id: strings under the keys autofill.js fills from, and `extra`, the
+    // answers to form questions an imported JSON's "answers" gave,
+    // [{ question, answer }]. Kept in this extension's storage, like a
+    // profile's added resume styles, under "autofillProfiles".
+    //
+    // `legacy` is the one set saved before Auto Fill was per profile, offered
+    // to a profile that has none of its own until a profile is saved with it.
+    case "GET_AUTOFILL": {
+      const { autofillProfiles = {}, autofill: legacy = null } = await chrome.storage.local.get([
+        "autofillProfiles",
+        "autofill"
+      ]);
+      const details = autofillProfiles[msg.profileId] || null;
+      return { ok: true, details, legacy: !details && legacy && Object.keys(legacy).length ? legacy : null };
+    }
+
+    case "SET_AUTOFILL": {
+      if (msg.profileId === undefined || msg.profileId === null || msg.profileId === "") {
+        return { ok: false, error: "no profile picked" };
+      }
+      const keys = ["firstName", "lastName", "email", "phone", "location", "linkedin", "website"];
+      const details = Object.fromEntries(keys.map((k) => [k, String(msg.details?.[k] ?? "").trim()]));
+      details.extra = (Array.isArray(msg.details?.extra) ? msg.details.extra : [])
+        .map((x) => ({ question: String(x?.question ?? "").trim(), answer: String(x?.answer ?? "").trim() }))
+        .filter((x) => x.question && x.answer)
+        .slice(0, 200);
+
+      const { autofillProfiles = {} } = await chrome.storage.local.get("autofillProfiles");
+      autofillProfiles[msg.profileId] = details;
+      await chrome.storage.local.set({ autofillProfiles });
+      // The old single set, now saved to the profile it was offered to.
+      if (msg.dropLegacy) await chrome.storage.local.remove("autofill");
+      return { ok: true, details };
+    }
+
     case "GET_THEME":
       return { ok: true, theme: await getTheme() };
 
@@ -2918,6 +2954,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return false;
   }
   if (msg?.type === "FEED_STATUS") return false;
+  // Auto Fill's messages to the sample form page; the page answers them.
+  if (msg?.type === "AUTOFILL_RUN" || msg?.type === "AUTOFILL_CATCH") return false;
 
   (async () => {
     let reply;

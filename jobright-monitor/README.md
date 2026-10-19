@@ -403,18 +403,18 @@ The panel has two top-level tabs:
 | Tab | State |
 |-----|-------|
 | **Generate JD & Resume** | The feed, the duplicate filter, the visit queue, generation, the POST |
-| **Job bid** | Shell only, no behaviour yet |
+| **Auto Fill** | Fills a job application form with your details — see [Auto Fill](#auto-fill) |
 
 The **Settings** button on the Generate tab opens a third screen — not a
 top-level tab itself — in place of the feed; **← Back** (or picking Generate
-or Job bid) returns to it. Settings holds two tabs of its own: **ChatGPT
+or Auto Fill) returns to it. Settings holds two tabs of its own: **ChatGPT
 setting** (the OpenAI API key and model, used for every profile) and
 **Profile** (the country and role resumes are built for, and each matching
 profile's own prompt, master resume and resume styles — see
 [Profile](#profile) below).
 
 Switching only shows and hides, at both levels. The feed keeps streaming into
-the Generate pane while Job bid is in front, and an unsaved edit in a
+the Generate pane while Auto Fill is in front, and an unsaved edit in a
 profile's master resume survives a trip to ChatGPT setting — nothing is torn down or
 re-fetched on the way back, because every pane stays in the document and is
 merely not displayed.
@@ -428,6 +428,116 @@ test asserting the hidden pane really computes to `display: none`.
 Arrow keys move between tabs, and each strip is its own single stop in the tab
 order (roving `tabindex`) — the standard tablist pattern, wired separately per
 strip so the settings pair and the top-level pair never cycle into each other.
+
+## Auto Fill
+
+The **Auto Fill** tab (it was the empty "Job bid" tab) fills the job
+application form on the page you're looking at with your details. It is a
+sample of the feature: it fills the text fields a typical application asks
+for, and leaves everything else to you.
+
+**Each profile has its own details.** The **Profile** list at the top of the
+tab holds the dashboard's profiles (the same ones as Settings → Profile),
+labelled with the tab name, the applicant and country · role. The details
+below, and everything Save details and Fill this page do, belong to the
+profile picked there.
+
+- The list is read fresh each time the tab is opened, and on **Reload**.
+  With the collector unreachable or no profiles on the dashboard, the panel
+  says so and the details are switched off.
+- The profile picked last is picked again next time. Otherwise it's the first
+  with the Country and Role picked in Settings, then the first.
+- An edit not yet saved stays with its profile while you look at another.
+  Its line in the list is marked ● until it's saved.
+- The details are kept in the extension's storage by profile id
+  (`autofillProfiles`), like a profile's added resume styles, not on the
+  dashboard tab.
+- The single set saved before Auto Fill was per profile is offered, unsaved,
+  to any profile with no details of its own. Saving it to a profile removes
+  the old copy.
+
+1. Pick the profile, then fill in its details: first and last name, email, phone, location,
+   LinkedIn, and website or portfolio. Or **Import
+   CSV** (below). Press **Save details** to keep them (in the extension's
+   storage). **Use sample details** puts in made-up ones,
+   `alex.morgan@example.com` and a `555-01xx` number, plus answers to the
+   sample form's three questions, to try it with.
+2. Open the application form in a tab and press **Fill this page**. Every
+   field it recognises that is still empty gets filled and outlined for a few
+   seconds. The panel lists what was filled, what it left because the field
+   already held something, and any question whose dropdown had no option for
+   the answer.
+3. **Try on the sample form** opens `autofill-sample.html`, a job application
+   inside the extension, to see it work without a real site. Its fields are
+   labelled the different ways real forms label them. It has three screening
+   questions (two text fields and a dropdown) that only answers fill, and a
+   resume upload that nothing fills.
+
+### From a CSV file
+
+**Import CSV** reads a `.csv` file whose first row names its columns:
+
+```
+First name,Last name,Email,Phone,Location,LinkedIn,Website,How did you hear about us?,Years of experience,Work authorization
+Alex,Morgan,alex.morgan@example.com,+1 (555) 010-0123,"Austin, TX",https://…,https://…,LinkedIn,6,Authorized to work in the US
+Jordan,Lee,jordan.lee@example.com,…
+```
+
+- **Columns named like a detail fill it.** Case and punctuation don't matter:
+  First name, Last name, a single **Name** (split into first and last),
+  Email / E-mail, Phone / Mobile, Location / City, LinkedIn / LinkedIn URL,
+  Website / Portfolio / GitHub.
+- **Every other column is an answer to a form question.** The column name is
+  the question, and the cell is the answer. On the page, it fills the field
+  whose label reads as that question ("Years of experience *" for "Years of
+  experience"). For a dropdown, it picks the option that reads as the answer.
+  If no option matches, the panel says so and the dropdown is left alone.
+  Answers are listed under the details as **Answers to form questions**, and
+  **Clear answers** drops them.
+- **One row per applicant.** With more than one row, an **Applicant (CSV
+  row)** list picks which one to load. A blank cell leaves that detail or
+  answer out for that row.
+- **The format:** standard CSV. Quoted cells can hold commas, line breaks and
+  doubled quotes (`""`). LF or CRLF line endings both work, and Excel's UTF-8
+  byte-order mark is fine. A first line with more semicolons than commas is
+  read as a semicolon CSV, as Excel saves in much of Europe.
+- **CSV template** downloads `autofill-template.csv` with exactly that layout
+  and two made-up applicants. Its question columns are the sample form's.
+- **The row for the picked profile.** With several rows, the import starts on
+  the row whose name matches the picked profile's applicant (Profile (D)), or
+  the tab name. Otherwise it starts on the first.
+- The file is read in the panel and isn't stored. Only the row loaded into
+  the form is kept, for the picked profile, and only once **Save details** is
+  pressed (`extra` beside the details in storage).
+
+How a field is recognised (`autofill.js`):
+
+- **Strong hints first:** `autocomplete="given-name"`, `family-name`, `email`,
+  `tel` and so on, or `type="email"`, `tel`, `url`.
+- **Then the field's own words:** its `<label>` (by `for`, or wrapping it),
+  `aria-labelledby`, `aria-label`, `placeholder`, `name`, `id`, `title`, or
+  the text just before it. Words are matched in order, specific before
+  general: email, phone, LinkedIn (before website, so "LinkedIn URL" isn't a
+  website), first name, last name, full name (from first + last, or split into
+  them if only a full name is given), website, location, and cover letter
+  (textareas only).
+- **Answers to form questions** (from a CSV, or the sample details) are tried
+  on any field that isn't a standard detail. A field matches when its label
+  is the question, contains it, or is a long enough part of it. Dropdowns are
+  filled only this way.
+- **Only empty, visible, enabled fields** are filled: text fields, textareas,
+  and dropdowns still on their "Select…" prompt. File uploads, checkboxes,
+  radios and anything already filled are left alone.
+- **Values go in as if typed:** through the native `value` setter, then
+  `input` and `change` events, so React-style forms register them.
+
+Permissions: the extension can already touch the job boards it reads. For any
+other site, the first **Fill this page** there shows Chrome's own prompt to
+allow that one site (`optional_host_permissions` in the manifest, asked per
+site with `chrome.permissions.request`). Chrome's own pages and the Web Store
+can't be filled by any extension. The sample form is an extension page, which
+can't be injected into, so the panel asks it with an `AUTOFILL_RUN` message
+instead, and `autofill.js`, loaded by that page, answers.
 
 ## Light and dark mode
 
@@ -850,6 +960,8 @@ to `0` — it is the only place the threshold appears.
 | `content-glassdoor.js` | The same for glassdoor.com: cards, "Show more jobs", the job page |
 | `content-ziprecruiter.js` | The same for ziprecruiter.com: cards, later pages by fetch, the job page |
 | `content-indeed.js` | The same for indeed.com (every country's site): cards, each job's description from its tag once the card is clicked, the pager's Next once a page is done, the human check |
+| `autofill.js` | Auto Fill: recognises an application form's fields and fills the empty ones; injected into the page in front |
+| `autofill-sample.html` | A sample job application inside the extension, to try Auto Fill on |
 | `background.js`  | Opens the tab, guarantees an injected content script, persists jobs |
 | `sidepanel.html` | The panel shell — tab bar and the three panes |
 | `sidepanel.css`  | Panel styling, light and dark |

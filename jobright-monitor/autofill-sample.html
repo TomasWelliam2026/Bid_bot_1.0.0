@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sample application form</title>
+  <!-- The extension's own sample job application, to try Auto Fill on. Its
+       fields are labelled the different ways real forms label them — a
+       <label for>, a wrapping label, aria-label, a placeholder alone, names
+       like job_application[first_name] — and it has fields Auto Fill should
+       leave alone. Nothing here is sent anywhere: the button does nothing. -->
+  <style>
+    :root {
+      --bg: #f6f6fa; --surface: #ffffff; --line: #dcdce6; --fg: #1b1b23; --muted: #767685;
+      --accent: #6a5fdb; --accent-soft: #ece9fb;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #0f0f13; --surface: #191920; --line: #2c2c37; --fg: #eeeef4; --muted: #8e8e9e;
+              --accent: #8b85f5; --accent-soft: #242040; }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 24px 16px 48px; font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+           color: var(--fg); background: var(--bg); }
+    main { max-width: 640px; margin: 0 auto; }
+    .note { padding: 10px 12px; margin-bottom: 18px; font-size: 13px; background: var(--accent-soft);
+            border: 1px solid var(--accent); border-radius: 8px; }
+    h1 { margin: 0 0 2px; font-size: 22px; }
+    .company { margin: 0 0 20px; color: var(--muted); }
+    form { padding: 20px; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; }
+    .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+    .field { display: block; margin-bottom: 14px; }
+    .field > span, label.title { display: block; margin-bottom: 4px; font-size: 13px; font-weight: 600; }
+    input, textarea, select { width: 100%; padding: 8px 10px; font: inherit; color: var(--fg);
+                              background: var(--bg); border: 1px solid var(--line); border-radius: 6px; }
+    textarea { min-height: 130px; resize: vertical; }
+    .hint { margin: 2px 0 0; font-size: 12px; color: var(--muted); }
+    h2 { margin: 22px 0 10px; font-size: 15px; }
+    button { padding: 9px 16px; font: inherit; font-weight: 600; color: #fff; background: var(--accent);
+             border: 0; border-radius: 6px; cursor: not-allowed; opacity: 0.8; }
+  </style>
+</head>
+<body>
+  <main>
+    <p class="note">
+      <strong>Sample form.</strong> Open the extension's side panel → <strong>Auto Fill</strong> →
+      <strong>Fill this page</strong>. The fields it fills are outlined for a few seconds.
+      Nothing on this page is sent anywhere.
+    </p>
+
+    <h1>Senior Data Engineer</h1>
+    <p class="company">Northwind Analytics · Remote (US)</p>
+
+    <form autocomplete="off">
+      <div class="row">
+        <!-- A <label for>, and a name in the bracketed style many forms use. -->
+        <div class="field">
+          <label class="title" for="first_name">First Name *</label>
+          <input id="first_name" name="job_application[first_name]" type="text">
+        </div>
+        <!-- No label element at all: aria-label is all it says. -->
+        <div class="field">
+          <span>Last Name *</span>
+          <input name="lastName" type="text" aria-label="Last name">
+        </div>
+      </div>
+
+      <div class="row">
+        <!-- type=email says enough. -->
+        <div class="field">
+          <label class="title" for="contact_email">Email *</label>
+          <input id="contact_email" name="contact" type="email" placeholder="you@example.com">
+        </div>
+        <!-- A placeholder and a name, nothing else. -->
+        <div class="field">
+          <span>Phone</span>
+          <input name="phone_number" type="text" placeholder="Phone">
+        </div>
+      </div>
+
+      <!-- A label wrapping its input. -->
+      <label class="field">
+        <span>Location (City)</span>
+        <input name="candidate_location" type="text">
+      </label>
+
+      <h2>Links</h2>
+      <div class="field">
+        <label class="title" for="li">LinkedIn Profile</label>
+        <input id="li" name="urls[LinkedIn]" type="text">
+      </div>
+      <div class="field">
+        <label class="title" for="web">Website / Portfolio</label>
+        <input id="web" name="urls[Portfolio]" type="text">
+      </div>
+
+      <h2>Documents</h2>
+      <!-- Left alone: a file is the applicant's to attach. -->
+      <div class="field">
+        <label class="title" for="resume">Resume / CV *</label>
+        <input id="resume" name="resume" type="file">
+        <p class="hint">Auto Fill leaves file uploads to you.</p>
+      </div>
+      <div class="field">
+        <label class="title" for="cl">Cover Letter</label>
+        <textarea id="cl" name="cover_letter_text"></textarea>
+      </div>
+
+      <h2>A few questions</h2>
+      <!-- Left alone: nothing in the details answers these. -->
+      <div class="field">
+        <label class="title" for="source">How did you hear about us?</label>
+        <input id="source" name="question_8812" type="text">
+      </div>
+      <div class="field">
+        <label class="title" for="years">Years of experience</label>
+        <input id="years" name="question_8813" type="text">
+      </div>
+      <div class="field">
+        <label class="title" for="auth">Work authorization</label>
+        <select id="auth" name="question_8814">
+          <option value="">Select…</option>
+          <option>Authorized to work in the US</option>
+          <option>Require sponsorship</option>
+        </select>
+      </div>
+
+      <button type="button" title="This is a sample — nothing is submitted">Submit application</button>
+    </form>
+  </main>
+  <script src="autofill.js"></script>
+</body>
+</html>

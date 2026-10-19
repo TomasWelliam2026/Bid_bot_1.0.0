@@ -127,11 +127,28 @@ window.chrome = {
       set(obj) {
         Object.assign(window.__storage, obj);
         return Promise.resolve();
+      },
+      remove(keys) {
+        for (const k of [].concat(keys)) delete window.__storage[k];
+        return Promise.resolve();
       }
     }
   },
-  action: { setBadgeText() { return Promise.resolve(); }, setBadgeBackgroundColor() { return Promise.resolve(); } }
+  action: { setBadgeText() { return Promise.resolve(); }, setBadgeBackgroundColor() { return Promise.resolve(); } },
+  // Placeholders, so code that looks for these at load finds them: the panel
+  // tracks the page in front through chrome.tabs events (Auto Fill). A test
+  // replaces whichever methods it drives, and fires the events it needs
+  // through window.__tabListeners.
+  tabs: {
+    query() { return Promise.resolve([]); },
+    create(o) { return Promise.resolve({ id: 999, ...o }); },
+    onActivated: { addListener(fn) { window.__tabListeners.activated.push(fn); } },
+    onUpdated: { addListener(fn) { window.__tabListeners.updated.push(fn); } }
+  },
+  permissions: { request() { return Promise.resolve(false); }, contains() { return Promise.resolve(false); } },
+  scripting: { executeScript() { return Promise.reject(new Error("no pages to inject into in the harness")); } }
 };
+window.__tabListeners = { activated: [], updated: [] };
 
 // Only api.openai.com is intercepted. EDIT THE RESPONSES BELOW per what
 // you're actually testing this session — this is a starting template, not a

@@ -102,8 +102,19 @@ element with `[data-testid="vj-job-description-heading"]` and
 `#jobDescriptionText` inside. Add a click handler on `a.jcs-JobTitle` that sets
 `vjk=` with `pushState` and swaps the pane a moment later, as Indeed does.
 Leave the click uncancelled and the link with `target="_blank"`. That proves
-the extension's own click can't open a tab. Stop needs `chrome.tabs.query` stubbed
-(to `[]`), or its reply reports an error even though the run did stop.
+the extension's own click can't open a tab. The stub's `chrome.tabs.query`
+answers `[]`, which is all Stop needs.
+
+**Auto Fill.** The stub carries placeholder `chrome.tabs`, `chrome.permissions`
+and `chrome.scripting`, and keeps the panel's tab listeners in
+`window.__tabListeners`. To fill a page from the panel, point
+`chrome.tabs.query` at an `https://` tab and fire
+`window.__tabListeners.activated` so the panel sees it. Have
+`chrome.permissions.request` answer `true` (or `false` for the refusal), and
+let `chrome.scripting.executeScript` run its `func` against a page you control,
+e.g. `/autofill-sample.html` in an iframe, which loads `autofill.js` itself.
+The fill logic can also be driven directly on `/autofill-sample.html` with
+`window.__jobrightAutofill(details)`.
 
 ## Flows worth driving
 

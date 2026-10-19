@@ -472,6 +472,90 @@ button:disabled:hover { border-color: var(--line); }
 }
 #queue[hidden] { display: none; }
 
+/* Auto Fill: what was filled on the page, as pills — green for filled, quiet
+   for a field that already held something and was left. */
+.autofill-intro { margin: 0 0 12px; }
+
+/* The profile picker, its Reload beside it; and everything below, in one
+   fieldset so it can all be switched off while no profile is picked. */
+.af-profile-row { display: flex; gap: 6px; align-items: center; }
+.af-profile-row select { flex: 1 1 auto; min-width: 0; }
+.af-profile-row button { flex: none; min-width: 0; }
+.af-details { min-width: 0; margin: 14px 0 0; padding: 12px 0 0; border: 0; border-top: 1px solid var(--line); }
+.af-details:disabled { opacity: 0.55; }
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+.af-filled {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.af-filled:empty { display: none; }
+.af-filled li {
+  padding: 3px 8px;
+  font-size: 11px;
+  color: var(--ok);
+  background: var(--ok-soft);
+  border-radius: var(--pill);
+}
+.af-filled li.kept {
+  color: var(--fg-soft);
+  background: var(--sunken);
+}
+.af-filled li.missed {
+  color: var(--err);
+  background: var(--err-soft);
+}
+
+/* The details as a Question/Answer table: a fixed row per known field, plus
+   one imported "answers" row per form question, both wrapping rather than
+   widening the panel. */
+.af-table {
+  width: 100%;
+  margin: 10px 0 0;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+.af-table th,
+.af-table td {
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+.af-table thead th {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg-soft);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  background: var(--surface);
+}
+.af-table td:first-child {
+  width: 38%;
+  color: var(--fg-soft);
+  overflow-wrap: anywhere;
+}
+.af-table td:last-child { overflow-wrap: anywhere; white-space: pre-line; }
+.af-table input,
+.af-table textarea {
+  width: 100%;
+  margin: 0;
+}
+.af-table textarea { min-height: 54px; resize: vertical; }
+/* .controls above is display:flex, which otherwise beats [hidden] on
+   specificity alone — the same trap .pane[hidden] exists for. */
+#afExtraWrap[hidden] { display: none; }
+
 /* A run waiting on a person: not an error, but the one thing that needs
    doing, so it stands apart from the strips above in the accent colour. */
 .verify-notice {
