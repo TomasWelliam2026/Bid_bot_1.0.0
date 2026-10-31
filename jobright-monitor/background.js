@@ -3118,11 +3118,19 @@ async function readJobPage(job, signal, onStage) {
 // profile picked there.
 // ---------------------------------------------------------------------------
 
-const GMAIL_COMPOSE_URL = "https://mail.google.com/mail/u/0/#inbox?compose=new";
-const RECRUITER_SUBJECT = "I'm just looking for a fully Remote Position.";
+// Gmail's own new-message address, with the recipient and the subject in it:
+// Gmail puts both in itself, so the recipient is there whether or not the
+// browser window has the focus (typed in, an address only becomes a
+// recipient on leaving the field, which a window behind another never sees).
+// It is the form Gmail itself turns ?view=cm into, so the page loads once
+// rather than redirecting.
+const gmailComposeUrl = (to, subject) =>
+  `https://mail.google.com/mail/u/0/?fs=1&tf=cm&to=${encodeURIComponent(to)}&su=${encodeURIComponent(subject)}`;
+const RECRUITER_SUBJECT = "I'm just looking for a fully remote position.";
 const MAX_RECRUITERS = 2000;
 const GMAIL_LOAD_TIMEOUT = 45000;
 const FILL_ATTEMPTS = 4;
+const SEND_CONFIRM_TIMEOUT = 30000;
 
 const isEmail = (s) => /^[^\s@<>()"',;]+@[^\s@<>()"',;]+\.[^\s@<>()"',;]+$/.test(s);
 const recruiterKey = (r) => `${r.email_address.toLowerCase()}|${r.email_title.toLowerCase()}`;
@@ -3172,10 +3180,10 @@ async function importRecruiters(raw) {
 // Runs inside the Gmail tab, so it carries everything it needs. Waits for
 // the new-message window, fills it in the way a person would — focus, insert
 // the text (which runs Gmail's own input handling), move on, which turns the
-// typed address into a recipient — and, once the recipient, the subject and
-// the body are all in place, clicks Send and waits for Gmail to say it went.
-// Nothing is sent unless every part is in place.
-async function fillAndSendGmail(to, subject, body, waitMs) {
+// typed address into a recipient. It stops with the message ready: sending is
+// a step of its own (clickGmailSend), so that a script run again after Gmail
+// swaps its page can never send twice.
+async function fillGmailMessage(to, subject, body, waitMs) {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const shown = (el) => !!el && el.isConnected && el.getClientRects().length > 0;
   const first = (selectors) => {
@@ -3185,24 +3193,97 @@ async function fillAndSendGmail(to, subject, body, waitMs) {
     }
     return null;
   };
-  const TO = ['input[aria-label="To recipients"]', 'input[aria-label="To"]', 'div[name="to"] input', 'textarea[name="to"]'];
+  // English labels first, then what Gmail marks the same parts with in every
+  // language: the recipient box's peoplekit-id, the subject's name, the
+  // body's g_editable, the Send button's aoO class.
+  const TO = [
+    'input[aria-label="To recipients"]', 'input[aria-label="To"]', 'input[peoplekit-id]',
+    'div[name="to"] input', 'input[name="to"]', 'textarea[name="to"]'
+  ];
   const SUBJECT = ['input[name="subjectbox"]', 'input[aria-label="Subject"]'];
-  const BODY = ['div[aria-label="Message Body"][contenteditable="true"]', 'div[role="textbox"][aria-label^="Message Body"]', 'div[aria-label="Message Body"]'];
-  const SEND = ['div[role="button"][data-tooltip^="Send"]', 'div[role="button"][aria-label^="Send"]', 'button[aria-label^="Send"]'];
+  // The body only once it can be typed in: Gmail makes it editable when it
+  // is first clicked.
+  const BODY = [
+    'div[aria-label="Message Body"][contenteditable="true"]', 'div[g_editable="true"][contenteditable="true"]',
+    'div[role="textbox"][contenteditable="true"][aria-label^="Message Body"]'
+  ];
+  // What is shown in their place until then. A new message in a window that
+  // does not have the focus (the desktop app keeps itself on top) starts with
+  // its recipients folded into one "Recipients" row and its body not yet
+  // editable; a click on each opens them, as it would for a person.
+  const RECIPIENTS_ROW = ["div.aoD.hl", 'div[tabindex="1"].aoD'];
+  const BODY_SHELL = ['div[aria-label="Message Body"]', "div.Am.aiL"];
+  const SEND = [
+    'div[role="button"][data-tooltip^="Send"]', 'div[role="button"][aria-label^="Send"]',
+    'button[aria-label^="Send"]', 'div[role="button"].aoO'
+  ];
+  // Gmail's own Compose button, for when the address alone did not open a
+  // new message.
+  const COMPOSE = ['div[role="button"][gh="cm"]', '[gh="cm"]'];
+
+  // Gmail's buttons and rows act on the mouse going down and up, as a click does.
+  const press = (el) => {
+    for (const type of ["mousedown", "mouseup", "click"]) {
+      el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+    }
+  };
 
   let toEl = null;
   let subjectEl = null;
   let bodyEl = null;
-  for (const until = Date.now() + waitMs; Date.now() < until; await sleep(250)) {
+  let composeClicked = false;
+  // The address is a recipient once Gmail has made it a chip, in the new
+  // message itself (the page's own account appears elsewhere on it).
+  const scope = () => (subjectEl && (subjectEl.closest('[role="dialog"]') || subjectEl.closest("form"))) || document;
+  const isChip = () =>
+    [...scope().querySelectorAll("[email], [data-hovercard-id]")].some(
+      (el) => (el.getAttribute("email") || el.getAttribute("data-hovercard-id") || "").toLowerCase() === to.toLowerCase()
+    );
+
+  let lastOpen = 0;
+  const started = Date.now();
+  for (const until = started + waitMs; Date.now() < until; await sleep(250)) {
     if (/accounts\.google\.com$/.test(location.hostname) || /ServiceLogin|signin/i.test(location.href)) {
       return { ok: false, signedOut: true, error: "Gmail asks to sign in first — sign in, then pick the recruiter again" };
     }
     toEl = first(TO);
     subjectEl = first(SUBJECT);
     bodyEl = first(BODY);
-    if (toEl && subjectEl && bodyEl) break;
+    // Ready: a subject, an editable body, and the recipient already there
+    // (put in by the address) or a To field to type it into.
+    if (subjectEl && bodyEl && (isChip() || toEl)) break;
+    // The new message is up but folded: open its recipients and its body,
+    // at most once a second so Gmail has time to redraw.
+    if (subjectEl && Date.now() - lastOpen > 1000) {
+      lastOpen = Date.now();
+      const row = !toEl && !isChip() && first(RECIPIENTS_ROW);
+      if (row) {
+        row.focus?.();
+        press(row);
+      }
+      const shell = !bodyEl && first(BODY_SHELL);
+      if (shell) press(shell);
+    }
+    // Inbox up, but no new message after a few seconds: open one.
+    if (!composeClicked && !subjectEl && Date.now() - started > 4000) {
+      const compose = first(COMPOSE);
+      if (compose) {
+        composeClicked = true;
+        press(compose);
+      }
+    }
   }
-  if (!toEl || !subjectEl || !bodyEl) return { ok: false, error: "the new-message window did not come up" };
+  const hasTo = !!toEl || isChip();
+  if (!hasTo || !subjectEl || !bodyEl) {
+    // What the page was, so the panel can say why.
+    const missing = [!hasTo && "To", !subjectEl && "Subject", !bodyEl && "body"].filter(Boolean).join(", ");
+    const where = `${location.hostname}${location.pathname}${location.hash}`.slice(0, 80);
+    return {
+      ok: false,
+      error: `the new-message window did not come up — no ${missing} found on ${where || "a blank page"}` +
+        (document.title ? ` (“${document.title.slice(0, 60)}”)` : "")
+    };
+  }
 
   const type = (el, text) => {
     el.focus();
@@ -3213,49 +3294,111 @@ async function fillAndSendGmail(to, subject, body, waitMs) {
     }
     el.dispatchEvent(new Event("change", { bubbles: true }));
   };
-  const escape = (t) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
-  type(toEl, to);
-  await sleep(300);
-  // Leaving the field is what makes Gmail take the address as a recipient.
-  type(subjectEl, subject);
-  toEl.dispatchEvent(new Event("blur"));
+  // Normally the address put the recipient in already. If not, it is typed:
+  // a comma or Enter after it may make it a chip in the field, and leaving
+  // the field does in a focused window.
+  const prefilled = isChip();
+  let chipInField = prefilled;
+  if (!prefilled) {
+    type(toEl, to);
+    await sleep(300);
+    chipInField = isChip();
+  }
+  if (!chipInField) {
+    document.execCommand("insertText", false, ",");
+    await sleep(400);
+    chipInField = isChip();
+  }
+  if (!chipInField) {
+    for (const type of ["keydown", "keypress", "keyup"]) {
+      toEl.dispatchEvent(new KeyboardEvent(type, { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+    }
+    await sleep(400);
+    chipInField = isChip();
+  }
+  // The subject as set, whatever the address put there.
+  if (subjectEl.value !== subject) type(subjectEl, subject);
+  if (!prefilled) {
+    toEl.dispatchEvent(new FocusEvent("blur"));
+    toEl.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+  }
   await sleep(300);
 
-  // The body keeps its line breaks.
+  // The summary goes at the very start of the body, ahead of anything Gmail
+  // put there already (a signature), with a blank line between the two. It
+  // is typed line by line, as a keyboard would — Gmail's page refuses HTML
+  // put in by a script (Trusted Types), so there is no inserting it whole.
   bodyEl.focus();
-  const html = escape(body).replace(/\r?\n/g, "<br>");
-  if (!document.execCommand("insertHTML", false, html)) {
-    bodyEl.innerHTML = html;
+  const caret = document.createRange();
+  caret.setStart(bodyEl, 0);
+  caret.collapse(true);
+  const selection = window.getSelection();
+  selection.removeAllRanges();
+  selection.addRange(caret);
+  const already = bodyEl.innerText.trim();
+  const lines = body.split(/\r?\n/);
+  const newLine = () => document.execCommand("insertLineBreak") || document.execCommand("insertParagraph");
+  let typed = true;
+  lines.forEach((line, i) => {
+    if (i > 0) typed = newLine() && typed;
+    if (line) typed = document.execCommand("insertText", false, line) && typed;
+  });
+  if (already) typed = newLine() && newLine() && typed;
+  const squash = (t) => t.replace(/\s+/g, " ").trim();
+  if (!typed && !squash(bodyEl.innerText).startsWith(squash(lines[0]))) {
+    // No editing commands: the same lines as plain DOM nodes.
+    const parts = [];
+    lines.forEach((line, i) => {
+      if (i > 0) parts.push(document.createElement("br"));
+      parts.push(document.createTextNode(line));
+    });
+    if (already) parts.push(document.createElement("br"), document.createElement("br"));
+    bodyEl.prepend(...parts);
     bodyEl.dispatchEvent(new Event("input", { bubbles: true }));
   }
   await sleep(400);
 
-  const recipient = [...document.querySelectorAll("[email], [data-hovercard-id]")].some(
-    (el) => (el.getAttribute("email") || el.getAttribute("data-hovercard-id") || "").toLowerCase() === to.toLowerCase()
-  );
+  const recipient = isChip();
   const flat = (t) => t.replace(/\s+/g, " ").trim();
   const filled = {
     to: recipient,
     subject: subjectEl.value === subject,
-    body: flat(bodyEl.innerText).includes(flat(body).slice(0, 200))
+    body: flat(bodyEl.innerText).startsWith(flat(body).slice(0, 200))
   };
   const missing = Object.entries(filled).filter(([, ok]) => !ok).map(([part]) => part);
   if (missing.length) return { ok: false, filled, error: `not sent — the ${missing.join(", ")} did not fill in` };
 
-  const send = first(SEND);
-  if (!send) return { ok: false, filled, error: "not sent — Gmail's Send button was not found" };
-  // Gmail's buttons act on the mouse going down and up, as a click does.
-  for (const type of ["mousedown", "mouseup", "click"]) {
-    send.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
-  }
+  const sendButton = first(SEND);
+  if (!sendButton) return { ok: false, filled, error: "not sent — Gmail's Send button was not found" };
+  return { ok: true, filled, prefilled, chipInField };
+}
 
-  // Sent once the new-message window has gone, or Gmail says so.
-  for (const until = Date.now() + 15000; Date.now() < until; await sleep(250)) {
-    const said = /Message sent/i.test(document.querySelector('[role="alert"], [aria-live]')?.innerText || "");
-    if (!shown(subjectEl) || said) return { ok: true, sent: true, filled };
+// Presses Send, once, and only on a message that still holds the body: run
+// again on a page Gmail has replaced, it finds no such message and does nothing.
+function clickGmailSend(body) {
+  const shown = (el) => el.getClientRects().length > 0;
+  const flat = (t) => t.replace(/\s+/g, " ").trim();
+  const editor = [...document.querySelectorAll('div[g_editable="true"][contenteditable="true"], div[aria-label="Message Body"][contenteditable="true"]')].find(shown);
+  if (!editor || !flat(editor.innerText).startsWith(flat(body).slice(0, 200))) return { clicked: false };
+  const button = [
+    ...document.querySelectorAll('div[role="button"][data-tooltip^="Send"], div[role="button"][aria-label^="Send"], button[aria-label^="Send"], div[role="button"].aoO')
+  ].find(shown);
+  if (!button) return { clicked: false };
+  for (const type of ["mousedown", "mouseup", "click"]) {
+    button.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
   }
-  return { ok: false, filled, error: "Send was clicked, but Gmail did not confirm the message went — check the Gmail tab" };
+  return { clicked: true };
+}
+
+// Whether Gmail's result message is on screen: "Message sent" in its
+// notice, or the full-page "Your message has been sent".
+function gmailSendResult() {
+  const notices = [...document.querySelectorAll('[role="alert"], [aria-live]')].map((el) => el.innerText || "").join(" ");
+  const composing = [...document.querySelectorAll('input[name="subjectbox"]')].some((el) => el.getClientRects().length > 0);
+  return {
+    confirmed: /message sent/i.test(notices) || (!composing && /your message has been sent/i.test(document.body?.innerText || ""))
+  };
 }
 
 // The summary of a dashboard profile, as Settings → Profile saved it.
@@ -3269,24 +3412,36 @@ async function profileSummary(profileId) {
   return { ok: true, profile, summary };
 }
 
-async function sendToRecruiter(email, profileId) {
+// Gmail's discard button on the new message, for a check that sent nothing.
+function discardGmailDraft() {
+  const b = [...document.querySelectorAll('div[role="button"][aria-label^="Discard draft"], div.og.T-I-J3')]
+    .find((el) => el.getClientRects().length);
+  if (!b) return false;
+  for (const type of ["mousedown", "mouseup", "click"]) {
+    b.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+  }
+  return true;
+}
+
+// dryRun: everything up to Send, then the draft discarded — a check against
+// the real Gmail that sends nothing (used by the tests, not the panel).
+async function sendToRecruiter(email, profileId, { dryRun = false } = {}) {
   if (!isEmail(String(email || ""))) return { ok: false, error: "not an email address" };
   const from = await profileSummary(profileId);
   if (!from.ok) return from;
 
-  const tab = await chrome.tabs.create({ url: GMAIL_COMPOSE_URL, active: true });
+  const tab = await chrome.tabs.create({ url: gmailComposeUrl(email, RECRUITER_SUBJECT), active: true });
   await waitForComplete(tab.id, GMAIL_LOAD_TIMEOUT).catch(() => {});
 
   // Gmail draws the new-message window well after the page itself has
   // loaded; the fill waits for it, and is tried again if the page was still
-  // being swapped for Gmail's own. A message filled but not sent is never
-  // retried, so nothing goes twice.
+  // being swapped for Gmail's own.
   let last = null;
   for (let attempt = 0; attempt < FILL_ATTEMPTS; attempt++) {
     try {
       const [result] = await chrome.scripting.executeScript({
         target: { tabId: tab.id },
-        func: fillAndSendGmail,
+        func: fillGmailMessage,
         args: [email, RECRUITER_SUBJECT, from.summary, 15000]
       });
       last = result?.result || null;
@@ -3297,13 +3452,56 @@ async function sendToRecruiter(email, profileId) {
     await sleep(1500);
   }
   if (!last?.ok) return { ok: false, tabId: tab.id, error: last?.error || "could not send the message" };
+  if (dryRun) {
+    const [discarded] = await chrome.scripting
+      .executeScript({ target: { tabId: tab.id }, func: discardGmailDraft })
+      .catch(() => [{ result: false }]);
+    await sleep(1500);
+    await chrome.tabs.remove(tab.id).catch(() => {});
+    return { ok: true, dryRun: true, filled: last.filled, prefilled: last.prefilled, discarded: !!discarded?.result };
+  }
+
+  // Send, then Gmail's result message: the tab stays open until it has been
+  // seen. Left unconfirmed, the tab stays for the person to look at — the
+  // message may well have gone, so it is not to be sent again blindly.
+  let clicked = null;
+  try {
+    const [result] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: clickGmailSend,
+      args: [from.summary]
+    });
+    clicked = !!result?.result?.clicked;
+  } catch {
+    // Page swapped during the click: the result message will tell.
+  }
+  if (clicked === false) return { ok: false, tabId: tab.id, error: "not sent — Gmail's Send button was not found" };
+
+  let confirmed = false;
+  for (const until = Date.now() + SEND_CONFIRM_TIMEOUT; Date.now() < until && !confirmed; ) {
+    try {
+      const [result] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: gmailSendResult });
+      confirmed = !!result?.result?.confirmed;
+    } catch {
+      // Gmail moving on after the send: looked at again.
+    }
+    if (!confirmed) await sleep(400);
+  }
+  if (!confirmed) {
+    return {
+      ok: false,
+      unconfirmed: true,
+      tabId: tab.id,
+      error: "Send was clicked, but Gmail's “Message sent” did not appear — check the Gmail tab and your Sent folder before sending again"
+    };
+  }
 
   const sentAt = new Date().toISOString();
   const recruiters = (await getRecruiters()).map((r) =>
     r.email_address.toLowerCase() === email.toLowerCase() ? { ...r, sentAt, sentAs: from.profile.name } : r
   );
   await chrome.storage.local.set({ recruiters });
-  // Sent: the tab has nothing more to show.
+  // Gmail has said so: the tab has nothing more to show.
   await chrome.tabs.remove(tab.id).catch(() => {});
   return { ok: true, sentAt, sentAs: from.profile.name };
 }
@@ -3628,7 +3826,7 @@ async function handle(msg) {
       return { ok: true };
 
     case "RECRUITER_SEND":
-      return sendToRecruiter(msg.email, msg.profileId);
+      return sendToRecruiter(msg.email, msg.profileId, { dryRun: !!msg.dryRun });
 
     case "GET_CAPTURES": {
       const { captures = [] } = await chrome.storage.local.get("captures");

@@ -2263,8 +2263,8 @@ async function sendTo(r, button, state) {
     rbStatus(`Sent to ${r.email_address} as ${reply.sentAs}.`);
   } else {
     state.className = "rb-state err";
-    state.textContent = "Not sent";
-    rbStatus(`Not sent: ${reply.error}`, "err");
+    state.textContent = reply.unconfirmed ? "Check Gmail" : "Not sent";
+    rbStatus(reply.unconfirmed ? reply.error : `Not sent: ${reply.error}`, "err");
   }
 }
 

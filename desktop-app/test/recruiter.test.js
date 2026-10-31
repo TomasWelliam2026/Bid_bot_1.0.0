@@ -7,7 +7,7 @@ const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const { startHarness } = require("./helpers/harness");
 
-const SUBJECT = "I'm just looking for a fully Remote Position.";
+const SUBJECT = "I'm just looking for a fully remote position.";
 const entry = (email, company, title = "Senior Snowflake Data Engineer - Remote") => ({
   email_address: email,
   company_name: company,
@@ -51,14 +51,20 @@ test("Recruiter Bid: import, then an email sent from Gmail", { timeout: 120000 }
     const [mail] = h.sentMail;
     assert.deepEqual(mail.recipients, ["tanmay@vaspiretech.com"]);
     assert.equal(mail.subject, SUBJECT);
-    assert.equal(mail.body.replace(/\s+/g, " ").trim(), "Hi, I'm a senior data engineer (Snowflake, Spark, Airflow). Open to fully remote roles only.");
+    // The summary first, then the signature Gmail had already put in the body.
+    assert.equal(
+      mail.body.replace(/\s+/g, " ").trim(),
+      "Hi, I'm a senior data engineer (Snowflake, Spark, Airflow). Open to fully remote roles only. -- Jeffrey Smith"
+    );
     assert.match(mail.body, /Hi,\n+I'm a senior/, "the Summary keeps its line breaks");
 
-    assert.equal(
-      h.requests.filter((r) => r.host === "mail.google.com" && r.path === "/mail/u/0/").length >= 1,
-      true,
-      "Gmail's compose address was opened"
-    );
+    // Gmail's new-message address, carrying the recipient and the subject.
+    const opened = h.requests.find((r) => r.host === "mail.google.com" && r.path.startsWith("/mail/u/0/?"));
+    assert.ok(opened, "Gmail's new-message address was opened");
+    const q = new URL(opened.path, "https://mail.google.com").searchParams;
+    assert.equal(q.get("tf"), "cm");
+    assert.equal(q.get("to"), "tanmay@vaspiretech.com");
+    assert.equal(q.get("su"), SUBJECT);
     const [kept] = (await h.send({ type: "RECRUITERS_GET" })).recruiters;
     assert.equal(kept.sentAt, reply.sentAt, "the list remembers it was sent");
     assert.equal(kept.sentAs, "US (JYZ)");

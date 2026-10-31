@@ -84,19 +84,63 @@ const diceJob = (id) => `<!doctype html><meta charset="utf-8"><title>${id}</titl
 // chip when it is left, and Send acts on the mouse going down and up. The
 // page reports what it holds on window.__compose, and each message sent to
 // the server (POST /__sent), which keeps it in `sentMail`.
-const gmail = () => `<!doctype html><meta charset="utf-8"><title>Inbox - Gmail</title>
+//   autoCompose  false: the address alone opens no new message, nor fills in
+//                the recipient and subject it carries (?view=cm&to=&su=) —
+//                only the Compose button (gh="cm") opens one
+//   lang         "es": Spanish labels, so only Gmail's language-free markers
+//                (peoplekit-id, g_editable, the aoO class) find the parts
+// Like Gmail, the page refuses HTML put in by a script (Trusted Types): only
+// its own policy may write markup, so a script that inserts HTML fails here
+// as it does there.
+//   noConfirm    the message goes, but Gmail's "Message sent" never appears
+//   unfocused    leaving the To field does nothing, as in a Chrome window
+//                that is not the one in front (no blur event fires there);
+//                only a comma or Enter in the field makes the chip
+//   folded       the new message starts as Gmail's does in a window without
+//                the focus: the To field hidden behind a "Recipients" row
+//                (div.aoD.hl) and the body not editable, each opened by a
+//                click on it
+const GMAIL_LABELS = {
+  en: { to: "To recipients", body: "Message Body", send: "Send ‪(Ctrl-Enter)‬", compose: "Compose" },
+  es: { to: "Destinatarios", body: "Cuerpo del mensaje", send: "Enviar ‪(Ctrl-Intro)‬", compose: "Redactar" }
+};
+const gmail = ({ autoCompose = true, lang = "en", folded = false, unfocused = false, noConfirm = false } = {}) => `<!doctype html><meta charset="utf-8"><title>Inbox - Gmail</title>
+<meta http-equiv="Content-Security-Policy" content="require-trusted-types-for 'script'; trusted-types gmail">
+<div role="button" gh="cm">${GMAIL_LABELS[lang].compose}</div>
 <div id="inbox">Inbox</div>
 <script>
   window.__compose = null;
-  if (location.hash.includes("compose=new")) setTimeout(() => {
+  const L = ${JSON.stringify(GMAIL_LABELS[lang])};
+  const html = trustedTypes.createPolicy("gmail", { createHTML: (s) => s });
+  document.querySelector('[gh="cm"]').addEventListener("mouseup", () => openCompose());
+  // The full-page new message (?view=cm, which Gmail turns into ?tf=cm),
+  // with its recipient and subject from the address.
+  const params = new URLSearchParams(location.search);
+  const viewCm = params.get("view") === "cm" || params.get("tf") === "cm";
+  if (${autoCompose} && (location.hash.includes("compose=new") || viewCm)) setTimeout(openCompose, 2000);
+  function openCompose() {
+    if (document.querySelector('[role="dialog"]')) return;
     const box = document.createElement("div");
     box.setAttribute("role", "dialog");
-    box.innerHTML = '<div class="to"><span class="chips"></span><input aria-label="To recipients"></div>' +
-      '<input name="subjectbox" placeholder="Subject"><div aria-label="Message Body" role="textbox" contenteditable="true"></div>' +
-      '<div role="button" class="send" data-tooltip="Send ‪(Ctrl-Enter)‬" aria-label="Send ‪(Ctrl-Enter)‬">Send</div>' +
-      '<div role="button" aria-label="More send options">▾</div>';
+    box.innerHTML = html.createHTML('<div class="aoD hl" tabindex="1"><div class="oL aDm">Recipients</div></div>' +
+      '<div class="to"><span class="chips"></span><input peoplekit-id="BbVjBd" aria-label="' + L.to + '"></div>' +
+      '<input name="subjectbox" placeholder="Subject"><div class="Am aiL" aria-label="' + L.body + '" role="textbox"><br><div class="gmail_signature">-- <br>Jeffrey Smith</div></div>' +
+      '<div role="button" class="send aoO" data-tooltip="' + L.send + '" aria-label="' + L.send + '">Send</div>' +
+      '<div role="button" aria-label="More send options">▾</div>');
     document.body.appendChild(box);
-    const to = box.querySelector('input[aria-label="To recipients"]');
+    const row = box.querySelector(".aoD");
+    const toRow = box.querySelector(".to");
+    const editor = box.querySelector(".Am");
+    const editable = () => { editor.setAttribute("contenteditable", "true"); editor.setAttribute("g_editable", "true"); };
+    if (${folded}) {
+      toRow.style.display = "none";
+      row.addEventListener("mouseup", () => { row.style.display = "none"; toRow.style.display = ""; });
+      editor.addEventListener("mouseup", editable);
+    } else {
+      row.style.display = "none";
+      editable();
+    }
+    const to = box.querySelector("input[peoplekit-id]");
     const subject = box.querySelector('input[name="subjectbox"]');
     const chips = box.querySelector(".chips");
     const report = () => (window.__compose = {
@@ -104,18 +148,28 @@ const gmail = () => `<!doctype html><meta charset="utf-8"><title>Inbox - Gmail</
       typed: to.value,
       subject: subject.value
     });
-    to.addEventListener("blur", () => {
-      if (!to.value.trim()) return;
+    // Gmail's chip: on leaving the field, or on a comma or Enter in it.
+    const chipUp = () => {
+      const address = to.value.replace(/[,;]\\s*$/, "").trim();
+      if (!address) return;
       const chip = document.createElement("span");
-      chip.setAttribute("email", to.value.trim());
-      chip.textContent = to.value.trim();
+      chip.setAttribute("email", address);
+      chip.textContent = address;
       chips.appendChild(chip);
       to.value = "";
       report();
-    });
+    };
+    if (!${unfocused}) to.addEventListener("blur", chipUp);
+    to.addEventListener("input", () => { if (/[,;]\\s*$/.test(to.value)) chipUp(); });
+    to.addEventListener("keydown", (e) => { if (e.key === "Enter") chipUp(); });
     subject.addEventListener("input", report);
+    if (${autoCompose} && viewCm) {
+      to.value = params.get("to") || "";
+      chipUp();
+      subject.value = params.get("su") || "";
+    }
     report();
-    const body = box.querySelector('[aria-label="Message Body"]');
+    const body = editor;
     let down = false;
     const send = box.querySelector(".send");
     send.addEventListener("mousedown", () => (down = true));
@@ -126,16 +180,18 @@ const gmail = () => `<!doctype html><meta charset="utf-8"><title>Inbox - Gmail</
       const message = { ...window.__compose, body: body.innerText };
       await fetch("/__sent", { method: "POST", body: JSON.stringify(message) });
       box.remove();
+      if (${noConfirm}) return;
+      await new Promise((r) => setTimeout(r, 1200)); // "Sending…" first
       const toast = document.createElement("div");
       toast.setAttribute("role", "alert");
       toast.textContent = "Message sent";
       document.body.appendChild(toast);
     });
-  }, 2000);
+  }
 </script>`;
 
 // Starts the server. Every request is kept in `requests` as { host, path }.
-async function startFakeSites({ jobright = {}, dice = {} } = {}) {
+async function startFakeSites({ jobright = {}, dice = {}, gmail: gmailOptions = {} } = {}) {
   const requests = [];
   const sentMail = [];
   const diceOptions = { perPage: 3, pagesFor: () => 3, ...dice };
@@ -158,7 +214,7 @@ async function startFakeSites({ jobright = {}, dice = {} } = {}) {
         });
         return;
       }
-      if (host === "mail.google.com") return res.end(gmail());
+      if (host === "mail.google.com") return res.end(gmail(gmailOptions));
       if (host.endsWith("jobright.ai")) {
         if (url.pathname.startsWith("/jobs/info/")) return res.end(jobrightJob(url.pathname.split("/").pop()));
         return res.end(jobrightFeed({ total: 300, ...jobright }));

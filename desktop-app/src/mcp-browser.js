@@ -93,6 +93,11 @@ function hostOf(url) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const PROFILE_TAB_TIMEOUT_MS = 20000;
+// What the MCP server says when a script's page was closed under it, and how
+// long a tab is given to show up on its new page.
+const PAGE_GONE = /Target closed|No page found|Session closed|detached|Execution context was destroyed|No tab with id/i;
+const PAGE_SWAP_TIMEOUT_MS = 8000;
+const PAGE_SETTLE_GRACE_MS = 20000;
 // The key, in a job board's site storage, naming the profile a tab is in.
 const PROFILE_MARKER = "__bidbot_profile";
 
@@ -254,9 +259,27 @@ class McpBrowser extends EventEmitter {
   }
 
   // id is the tab's id; the call goes to whatever page is in that tab now.
+  // A page can be closed under a script running in it: Chrome swaps the page
+  // in a tab for a new one as a site moves itself on (Gmail does, opening a
+  // new message). The page list is read again until the tab has its new
+  // page, and the script is run once more there.
   async evaluate(id, fn, { format = "function" } = {}) {
-    const result = await this.call("evaluate_script", { pageId: this.pageOf(id), function: fn, format, waitForStableDom: false });
-    return parseEvaluate(result);
+    const run = () => this.call("evaluate_script", { pageId: this.pageOf(id), function: fn, format, waitForStableDom: false });
+    try {
+      return parseEvaluate(await run());
+    } catch (err) {
+      if (!PAGE_GONE.test(err?.message || "") || !this.tabs.has(Number(id))) throw err;
+      const gone = this.pageOf(id);
+      for (const until = Date.now() + PAGE_SWAP_TIMEOUT_MS; Date.now() < until; await sleep(400)) {
+        this.syncList(await this.call("list_pages", {}));
+        if (!this.tabs.has(Number(id))) break;
+        if (this.pageOf(id) !== gone) {
+          this.log(`[tabs] ${id}: page ${gone} closed under a script — running it again on page ${this.pageOf(id)}`);
+          return parseEvaluate(await run());
+        }
+      }
+      throw err;
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -277,6 +300,9 @@ class McpBrowser extends EventEmitter {
     if (known != null) return this.tabs.get(known);
     const id = pageId;
     const tab = { id, pageId, windowId: 1, index: this.tabs.size, url: "", title: "", status: "loading", active: false };
+    // When this page was first listed: a page seen only after one of the
+    // app's tabs went to its current page can be that tab's page, swapped.
+    Object.defineProperty(tab, "seenAt", { value: Date.now(), writable: true });
     this.log(`[tabs] + ${id}`);
     this.tabs.set(id, tab);
     this.byPage.set(pageId, id);
@@ -339,15 +365,40 @@ class McpBrowser extends EventEmitter {
     // The old page is usually gone by then, but Chrome can also keep the blank
     // start page alongside the new one: a tab still waiting on about:blank
     // follows the new page either way.
+    //
+    // Chrome can also list the old page and the new one together for a
+    // moment, so the new one was taken for a tab of the person's own by the
+    // time the old one goes. A page first seen after the app's tab went to
+    // its current page, on the same site, and not the app's, is that new
+    // page too — never an older tab of the person's.
     for (const tab of [...this.tabs.values()]) {
-      if (!this.ours.has(tab.id) || !tab.goingTo) continue;
+      if (!this.ours.has(tab.id)) continue;
+      const host = tab.goingTo || hostOf(tab.url);
+      if (!host) continue;
       const stillBlank = /^(about:blank)?$/.test(tab.url || "");
-      if (present.has(tab.pageId) && !stillBlank) continue;
-      const i = fresh.findIndex((p) => hostOf(p.url) === tab.goingTo);
-      if (i === -1) continue;
-      const [page] = fresh.splice(i, 1);
+      if (present.has(tab.pageId) && !(stillBlank && tab.goingTo)) continue;
+      let i = fresh.findIndex((p) => hostOf(p.url) === host);
+      let page = null;
+      if (i !== -1) {
+        [page] = fresh.splice(i, 1);
+      } else if (!present.has(tab.pageId)) {
+        const since = tab.pageSince ?? tab.seenAt ?? 0;
+        const taken = pages.find((p) => {
+          const other = this.tabs.get(this.byPage.get(p.id));
+          return other && !this.ours.has(other.id) && other.seenAt >= since && hostOf(p.url) === host;
+        });
+        if (taken) {
+          page = taken;
+          const otherId = this.byPage.get(taken.id);
+          this.tabs.delete(otherId);
+          this.docs.delete(otherId);
+          this.missing.delete(otherId);
+        }
+      }
+      if (!page) continue;
       this.byPage.delete(tab.pageId);
       tab.pageId = page.id;
+      tab.pageSince = Date.now();
       this.byPage.set(page.id, tab.id);
       this.docs.delete(tab.id);
       this.missing.delete(tab.id);
@@ -368,7 +419,10 @@ class McpBrowser extends EventEmitter {
         continue;
       }
       const times = (this.missing.get(tab.id) || 0) + 1;
-      if (times >= 2) {
+      // A tab the app opened a moment ago can be between pages for longer,
+      // as a site settles (Gmail goes through about:blank and an error page).
+      const settling = this.ours.has(tab.id) && Date.now() - (tab.pageSince ?? tab.seenAt ?? 0) < PAGE_SETTLE_GRACE_MS;
+      if (times >= 2 && !settling) {
         this.missing.delete(tab.id);
         this.dropTab(tab.id);
       } else {
