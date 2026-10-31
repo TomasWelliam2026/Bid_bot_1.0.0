@@ -1270,7 +1270,7 @@ const profileEmptyEl = $("profileEmpty");
 const reloadProfilesEl = $("reloadProfiles");
 const profilesStatusEl = $("profilesStatus");
 
-const OWN_FIELDS = ["prompt", "masterResume", "masterResumeMode", "resumeStyle"];
+const OWN_FIELDS = ["prompt", "masterResume", "masterResumeMode", "resumeStyle", "summary"];
 
 let profiles = []; // every dashboard tab, as last loaded
 const profileDrafts = new Map(); // profile id -> its unsaved own values
@@ -1293,7 +1293,8 @@ function savedOwn(profile) {
     prompt: String(own.prompt || "").trim() ? own.prompt : defaults.prompt,
     masterResume: own.masterResume || "",
     masterResumeMode: own.masterResumeMode === "none" ? "none" : "use",
-    resumeStyle: own.style || defaults.resumeStyle
+    resumeStyle: own.style || defaults.resumeStyle,
+    summary: own.summary || ""
   };
 }
 
@@ -1573,6 +1574,15 @@ function profileCard(profile, open) {
   };
   syncMaster();
 
+  // The body of the emails Recruiter Bid sends to recruiters for this profile.
+  const summaryLabel = el("label", "field-label", "Summary");
+  summaryLabel.htmlFor = idFor("summary");
+  const summaryText = el("textarea");
+  summaryText.id = idFor("summary");
+  summaryText.rows = 6;
+  summaryText.placeholder = "What every Recruiter Bid email to a recruiter says";
+  summaryText.value = values.summary;
+
   // --- resume style -------------------------------------------------------
 
   const styleSelectLabel = el("label", "field-label", "Resume style");
@@ -1671,7 +1681,8 @@ function profileCard(profile, open) {
     prompt: prompt.value,
     masterResume: master.value,
     masterResumeMode: use.checked ? "use" : "none",
-    resumeStyle: style.value
+    resumeStyle: style.value,
+    summary: summaryText.value
   });
   const onEdit = () => {
     const draft = read();
@@ -1682,6 +1693,7 @@ function profileCard(profile, open) {
   };
   prompt.addEventListener("input", onEdit);
   master.addEventListener("input", onEdit);
+  summaryText.addEventListener("input", onEdit);
   style.addEventListener("change", () => {
     syncRemove();
     onEdit();
@@ -1812,6 +1824,8 @@ function profileCard(profile, open) {
     el("p", "field-label", "Master resume"),
     switchRow,
     master,
+    summaryLabel,
+    summaryText,
     styleSelectLabel,
     style,
     actions,
@@ -2106,6 +2120,7 @@ const mainTabs = wireTabStrip($("mainTabs"), {
     $("pane-profile").hidden = true;
     $("openSettings").setAttribute("aria-expanded", "false");
     if (tab.id === "tab-bid") loadAfProfiles();
+    if (tab.id === "tab-recruiter") loadRecruiters();
   }
 });
 
@@ -2120,6 +2135,240 @@ wireTabStrip($("settingsTabs"), {
     loadProfiles();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Recruiter Bid
+//
+// Recruiters' emails, imported from a JSON file — an array of
+// { email_address, company_name, email_title, email_content, arrived_date },
+// or one such object. The worker keeps the list. Picking a recruiter has the
+// worker send them an email from Gmail in the browser: the subject, and as
+// the body the Summary of the profile picked under "Send as".
+// ---------------------------------------------------------------------------
+
+const rbListEl = $("rbList");
+const rbStatusEl = $("rbStatus");
+const rbFileEl = $("rbFile");
+
+function rbStatus(text, kind = "") {
+  rbStatusEl.hidden = !text;
+  rbStatusEl.textContent = text || "";
+  rbStatusEl.className = `rb-status ${kind}`;
+}
+
+const rbWhen = (iso) => {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? "" : d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+};
+
+// The list a page at a time, with the pager under it.
+const RB_PAGE_SIZE = 20;
+let rbAll = [];
+let rbPage = 0;
+
+// keepPage: stay on the page being looked at (the tab opened again), rather
+// than going back to the first (a new import, or Clear).
+function renderRecruiters(list, { keepPage = false } = {}) {
+  rbAll = list;
+  const pages = Math.max(1, Math.ceil(list.length / RB_PAGE_SIZE));
+  rbPage = keepPage ? Math.min(rbPage, pages - 1) : 0;
+  const from = rbPage * RB_PAGE_SIZE;
+  const shown = list.slice(from, from + RB_PAGE_SIZE);
+  rbListEl.replaceChildren(
+    ...shown.map((r) => {
+      const li = document.createElement("li");
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "rb-item";
+      b.title = `${r.email_title}${r.arrived_date ? `\n${rbWhen(r.arrived_date)}` : ""}\n\nSend ${r.email_address} an email`;
+      const state = tag(`rb-state${r.sentAt ? " done" : ""}`, r.sentAt ? `✓ Sent ${rbWhen(r.sentAt)}` : rbWhen(r.arrived_date));
+      b.append(tag("rb-company", r.company_name || r.email_address), state, tag("rb-email", r.email_address));
+      if (r.email_title) b.append(tag("rb-title", r.email_title));
+      b.addEventListener("click", () => sendTo(r, b, state));
+      li.appendChild(b);
+      return li;
+    })
+  );
+  rbListEl.scrollTop = 0;
+  $("rbCount").textContent = list.length ? `${list.length} recruiter${list.length === 1 ? "" : "s"}` : "";
+  $("rbClear").hidden = !list.length;
+  renderPager(pages, from, shown.length, list.length);
+}
+
+// The page numbers to offer: the first and last, and the ones either side
+// of the current page, with a gap ("…") wherever pages are left out.
+function pageNumbers(current, pages) {
+  const keep = new Set([0, pages - 1, current - 1, current, current + 1].filter((p) => p >= 0 && p < pages));
+  const out = [];
+  let last = -1;
+  for (const p of [...keep].sort((a, b) => a - b)) {
+    if (p - last > 1) out.push(null);
+    out.push(p);
+    last = p;
+  }
+  return out;
+}
+
+function renderPager(pages, from, count, total) {
+  const pager = $("rbPager");
+  pager.hidden = pages <= 1;
+  if (pager.hidden) return pager.replaceChildren();
+  const go = (page) => {
+    rbPage = page;
+    renderRecruiters(rbAll, { keepPage: true });
+  };
+  const arrow = (label, text, page, disabled) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "rb-page rb-arrow";
+    b.textContent = text;
+    b.setAttribute("aria-label", label);
+    b.title = label;
+    b.disabled = disabled;
+    b.addEventListener("click", () => go(page));
+    return b;
+  };
+  const numbers = pageNumbers(rbPage, pages).map((p) => {
+    if (p === null) return tag("rb-gap", "…");
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "rb-page";
+    b.textContent = String(p + 1);
+    b.setAttribute("aria-label", `Page ${p + 1}`);
+    if (p === rbPage) b.setAttribute("aria-current", "page");
+    b.addEventListener("click", () => go(p));
+    return b;
+  });
+  pager.replaceChildren(
+    tag("rb-range", `${from + 1}–${from + count} of ${total}`),
+    arrow("Previous page", "‹", rbPage - 1, rbPage === 0),
+    ...numbers,
+    arrow("Next page", "›", rbPage + 1, rbPage === pages - 1)
+  );
+}
+
+async function sendTo(r, button, state) {
+  const profileId = rbProfileEl.value;
+  if (!profileId) return rbStatus("Pick the profile to send as first.", "err");
+  button.disabled = true;
+  state.className = "rb-state";
+  state.textContent = "Sending…";
+  rbStatus(`Sending ${r.email_address} an email from Gmail…`);
+  const reply = await send({ type: "RECRUITER_SEND", email: r.email_address, profileId });
+  button.disabled = false;
+  if (reply.ok) {
+    r.sentAt = reply.sentAt; // so it still shows after a page turn
+    state.className = "rb-state done";
+    state.textContent = `✓ Sent ${rbWhen(reply.sentAt)}`;
+    rbStatus(`Sent to ${r.email_address} as ${reply.sentAs}.`);
+  } else {
+    state.className = "rb-state err";
+    state.textContent = "Not sent";
+    rbStatus(`Not sent: ${reply.error}`, "err");
+  }
+}
+
+// "Send as": the dashboard's profiles, the pick remembered in this panel's
+// own storage. Said beside it when the profile has no Summary to send yet.
+const rbProfileEl = $("rbProfile");
+const RB_PROFILE_KEY = "rbProfile";
+let rbProfiles = [];
+
+function syncRbProfileNote() {
+  const profile = rbProfiles.find((p) => String(p.id) === rbProfileEl.value);
+  const note = $("rbProfileNote");
+  const empty = profile && !String(profile.resume?.summary || "").trim();
+  note.textContent = !profile ? "" : empty ? "No Summary yet — add it in Settings → Profile" : "";
+  note.className = `rb-note${empty ? " warn" : ""}`;
+}
+
+async function loadRbProfiles() {
+  const reply = await send({ type: "GET_PROFILES" });
+  if (!reply.ok) {
+    rbProfileEl.replaceChildren(new Option("Profiles not loaded", ""));
+    $("rbProfileNote").textContent = "";
+    return;
+  }
+  rbProfiles = reply.profiles;
+  let saved = null;
+  try {
+    saved = localStorage.getItem(RB_PROFILE_KEY);
+  } catch {
+    // not remembered
+  }
+  rbProfileEl.replaceChildren(
+    new Option("Pick a profile…", ""),
+    ...rbProfiles.map((p) => new Option(p.sheet?.applicant ? `${p.name} · ${p.sheet.applicant}` : p.name, String(p.id)))
+  );
+  if (rbProfiles.some((p) => String(p.id) === saved)) rbProfileEl.value = saved;
+  syncRbProfileNote();
+}
+
+rbProfileEl.addEventListener("change", () => {
+  try {
+    localStorage.setItem(RB_PROFILE_KEY, rbProfileEl.value);
+  } catch {
+    // applies until the panel closes
+  }
+  syncRbProfileNote();
+});
+
+// The file as JSON: an array, one object, or a list of objects copied out
+// of one with a comma left at its end.
+function parseRecruiterFile(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return JSON.parse(`[${text.trim().replace(/,\s*$/, "")}]`);
+  }
+}
+
+$("rbImport").addEventListener("click", () => rbFileEl.click());
+rbFileEl.addEventListener("change", async () => {
+  const file = rbFileEl.files?.[0];
+  rbFileEl.value = "";
+  if (!file) return;
+  let entries;
+  try {
+    entries = parseRecruiterFile(await file.text());
+  } catch (err) {
+    rbStatus(`${file.name} is not valid JSON: ${err.message}`, "err");
+    return;
+  }
+  const reply = await send({ type: "RECRUITERS_IMPORT", entries });
+  if (!reply.ok) return rbStatus(`Error: ${reply.error}`, "err");
+  renderRecruiters(reply.recruiters);
+  rbStatus(
+    `Imported ${reply.recruiters.length} recruiter${reply.recruiters.length === 1 ? "" : "s"} from ${file.name}` +
+      (reply.skipped > 0 ? ` · ${reply.skipped} skipped (no email address, or a repeat)` : "")
+  );
+});
+
+// Two presses, as for the captured jobs.
+let rbClearArmed = null;
+$("rbClear").addEventListener("click", async () => {
+  const el = $("rbClear");
+  if (!rbClearArmed) {
+    el.textContent = "Press again to clear";
+    rbClearArmed = setTimeout(() => {
+      rbClearArmed = null;
+      el.textContent = "Clear";
+    }, 4000);
+    return;
+  }
+  clearTimeout(rbClearArmed);
+  rbClearArmed = null;
+  el.textContent = "Clear";
+  await send({ type: "RECRUITERS_CLEAR" });
+  renderRecruiters([]);
+  rbStatus("");
+});
+
+async function loadRecruiters() {
+  loadRbProfiles(); // a Summary just saved in Settings is picked up
+  const reply = await send({ type: "RECRUITERS_GET" });
+  if (reply.ok) renderRecruiters(reply.recruiters, { keepPage: true });
+}
 
 // ---------------------------------------------------------------------------
 // Settings

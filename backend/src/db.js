@@ -32,6 +32,9 @@ const USER_PATCH_FIELDS = {
   masterResume: 'master_resume',
   masterResumeMode: 'master_resume_mode',
   resumeStyle: 'resume_style',
+  // The profile's summary, which Recruiter Bid puts in the body of the email
+  // it sends to a recruiter.
+  summary: 'summary',
 };
 
 /** The `settings` keys `updateSheetSettings` will write, keyed by the
@@ -141,7 +144,8 @@ export class Store {
         gpt_prompt        TEXT NOT NULL DEFAULT '',
         master_resume     TEXT NOT NULL DEFAULT '',
         master_resume_mode TEXT NOT NULL DEFAULT 'use',
-        resume_style      TEXT NOT NULL DEFAULT ''
+        resume_style      TEXT NOT NULL DEFAULT '',
+        summary           TEXT NOT NULL DEFAULT ''
       );
 
       -- A record sent to the sheet by a tab other than the one it is filed
@@ -188,6 +192,10 @@ export class Store {
     this.addColumn('master_resume', "TEXT NOT NULL DEFAULT ''", 'users');
     this.addColumn('master_resume_mode', "TEXT NOT NULL DEFAULT 'use'", 'users');
     this.addColumn('resume_style', "TEXT NOT NULL DEFAULT ''", 'users');
+
+    // The summary a recruiter email carries -- set from the extension's
+    // Profile screen, blank until then.
+    this.addColumn('summary', "TEXT NOT NULL DEFAULT ''", 'users');
 
     // Every record before this column existed belonged to the one person who
     // used this archive before it had a multi-user concept at all. Give that

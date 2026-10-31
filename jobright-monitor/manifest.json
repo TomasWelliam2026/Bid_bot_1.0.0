@@ -16,7 +16,8 @@
     "https://*.indeed.com/*",
     "http://localhost/*",
     "http://127.0.0.1/*",
-    "https://api.openai.com/*"
+    "https://api.openai.com/*",
+    "https://mail.google.com/*"
   ],
   "optional_host_permissions": ["https://*/*", "http://*/*"],
 

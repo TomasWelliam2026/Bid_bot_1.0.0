@@ -3104,6 +3104,211 @@ async function readJobPage(job, signal, onStage) {
 }
 
 // ---------------------------------------------------------------------------
+// Recruiter Bid
+//
+// A list of recruiters' emails, imported from a JSON file in the panel: each
+// { email_address, company_name, email_title, email_content, arrived_date }.
+// Picking one sends them an email from Gmail: a new message, the recruiter as
+// the recipient, RECRUITER_SUBJECT as the subject, and the Summary of the
+// profile picked in the tab (Settings → Profile) as the body — then Send.
+//
+// The tab is opened and filled through chrome.tabs and chrome.scripting. In
+// the extension those are Chrome's own; in the desktop app they are the
+// Chrome DevTools MCP server's new_page and evaluate_script, in the browser
+// profile picked there.
+// ---------------------------------------------------------------------------
+
+const GMAIL_COMPOSE_URL = "https://mail.google.com/mail/u/0/#inbox?compose=new";
+const RECRUITER_SUBJECT = "I'm just looking for a fully Remote Position.";
+const MAX_RECRUITERS = 2000;
+const GMAIL_LOAD_TIMEOUT = 45000;
+const FILL_ATTEMPTS = 4;
+
+const isEmail = (s) => /^[^\s@<>()"',;]+@[^\s@<>()"',;]+\.[^\s@<>()"',;]+$/.test(s);
+const recruiterKey = (r) => `${r.email_address.toLowerCase()}|${r.email_title.toLowerCase()}`;
+
+// The imported entries as stored: those with a usable address, trimmed, one
+// per address and title.
+function recruitersOf(raw) {
+  const list = Array.isArray(raw) ? raw : raw && typeof raw === "object" ? [raw] : [];
+  const seen = new Set();
+  const out = [];
+  for (const e of list) {
+    if (!e || typeof e !== "object") continue;
+    const r = {
+      email_address: String(e.email_address || "").trim(),
+      company_name: String(e.company_name || "").trim(),
+      email_title: String(e.email_title || "").trim(),
+      email_content: String(e.email_content || ""),
+      arrived_date: String(e.arrived_date || "").trim()
+    };
+    if (!isEmail(r.email_address)) continue;
+    const key = recruiterKey(r);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(r);
+  }
+  return out.slice(0, MAX_RECRUITERS);
+}
+
+async function getRecruiters() {
+  const { recruiters = [] } = await chrome.storage.local.get("recruiters");
+  return recruiters;
+}
+
+// A new import replaces the list; an entry imported before keeps when it was
+// sent to.
+async function importRecruiters(raw) {
+  const fresh = recruitersOf(raw);
+  const before = new Map((await getRecruiters()).map((r) => [recruiterKey(r), r]));
+  const recruiters = fresh.map((r) => {
+    const old = before.get(recruiterKey(r));
+    return old?.sentAt ? { ...r, sentAt: old.sentAt, sentAs: old.sentAs } : r;
+  });
+  await chrome.storage.local.set({ recruiters });
+  return recruiters;
+}
+
+// Runs inside the Gmail tab, so it carries everything it needs. Waits for
+// the new-message window, fills it in the way a person would — focus, insert
+// the text (which runs Gmail's own input handling), move on, which turns the
+// typed address into a recipient — and, once the recipient, the subject and
+// the body are all in place, clicks Send and waits for Gmail to say it went.
+// Nothing is sent unless every part is in place.
+async function fillAndSendGmail(to, subject, body, waitMs) {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const shown = (el) => !!el && el.isConnected && el.getClientRects().length > 0;
+  const first = (selectors) => {
+    for (const s of selectors) {
+      const el = [...document.querySelectorAll(s)].find(shown);
+      if (el) return el;
+    }
+    return null;
+  };
+  const TO = ['input[aria-label="To recipients"]', 'input[aria-label="To"]', 'div[name="to"] input', 'textarea[name="to"]'];
+  const SUBJECT = ['input[name="subjectbox"]', 'input[aria-label="Subject"]'];
+  const BODY = ['div[aria-label="Message Body"][contenteditable="true"]', 'div[role="textbox"][aria-label^="Message Body"]', 'div[aria-label="Message Body"]'];
+  const SEND = ['div[role="button"][data-tooltip^="Send"]', 'div[role="button"][aria-label^="Send"]', 'button[aria-label^="Send"]'];
+
+  let toEl = null;
+  let subjectEl = null;
+  let bodyEl = null;
+  for (const until = Date.now() + waitMs; Date.now() < until; await sleep(250)) {
+    if (/accounts\.google\.com$/.test(location.hostname) || /ServiceLogin|signin/i.test(location.href)) {
+      return { ok: false, signedOut: true, error: "Gmail asks to sign in first — sign in, then pick the recruiter again" };
+    }
+    toEl = first(TO);
+    subjectEl = first(SUBJECT);
+    bodyEl = first(BODY);
+    if (toEl && subjectEl && bodyEl) break;
+  }
+  if (!toEl || !subjectEl || !bodyEl) return { ok: false, error: "the new-message window did not come up" };
+
+  const type = (el, text) => {
+    el.focus();
+    el.select?.();
+    if (!document.execCommand("insertText", false, text)) {
+      el.value = text;
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  };
+  const escape = (t) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+  type(toEl, to);
+  await sleep(300);
+  // Leaving the field is what makes Gmail take the address as a recipient.
+  type(subjectEl, subject);
+  toEl.dispatchEvent(new Event("blur"));
+  await sleep(300);
+
+  // The body keeps its line breaks.
+  bodyEl.focus();
+  const html = escape(body).replace(/\r?\n/g, "<br>");
+  if (!document.execCommand("insertHTML", false, html)) {
+    bodyEl.innerHTML = html;
+    bodyEl.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  await sleep(400);
+
+  const recipient = [...document.querySelectorAll("[email], [data-hovercard-id]")].some(
+    (el) => (el.getAttribute("email") || el.getAttribute("data-hovercard-id") || "").toLowerCase() === to.toLowerCase()
+  );
+  const flat = (t) => t.replace(/\s+/g, " ").trim();
+  const filled = {
+    to: recipient,
+    subject: subjectEl.value === subject,
+    body: flat(bodyEl.innerText).includes(flat(body).slice(0, 200))
+  };
+  const missing = Object.entries(filled).filter(([, ok]) => !ok).map(([part]) => part);
+  if (missing.length) return { ok: false, filled, error: `not sent — the ${missing.join(", ")} did not fill in` };
+
+  const send = first(SEND);
+  if (!send) return { ok: false, filled, error: "not sent — Gmail's Send button was not found" };
+  // Gmail's buttons act on the mouse going down and up, as a click does.
+  for (const type of ["mousedown", "mouseup", "click"]) {
+    send.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+  }
+
+  // Sent once the new-message window has gone, or Gmail says so.
+  for (const until = Date.now() + 15000; Date.now() < until; await sleep(250)) {
+    const said = /Message sent/i.test(document.querySelector('[role="alert"], [aria-live]')?.innerText || "");
+    if (!shown(subjectEl) || said) return { ok: true, sent: true, filled };
+  }
+  return { ok: false, filled, error: "Send was clicked, but Gmail did not confirm the message went — check the Gmail tab" };
+}
+
+// The summary of a dashboard profile, as Settings → Profile saved it.
+async function profileSummary(profileId) {
+  const list = await listProfiles();
+  if (!list.ok) return { ok: false, error: list.error };
+  const profile = list.profiles.find((p) => String(p.id) === String(profileId));
+  if (!profile) return { ok: false, error: "pick the profile whose Summary to send" };
+  const summary = String(profile.resume?.summary || "").trim();
+  if (!summary) return { ok: false, error: `${profile.name} has no Summary yet — add one in Settings → Profile` };
+  return { ok: true, profile, summary };
+}
+
+async function sendToRecruiter(email, profileId) {
+  if (!isEmail(String(email || ""))) return { ok: false, error: "not an email address" };
+  const from = await profileSummary(profileId);
+  if (!from.ok) return from;
+
+  const tab = await chrome.tabs.create({ url: GMAIL_COMPOSE_URL, active: true });
+  await waitForComplete(tab.id, GMAIL_LOAD_TIMEOUT).catch(() => {});
+
+  // Gmail draws the new-message window well after the page itself has
+  // loaded; the fill waits for it, and is tried again if the page was still
+  // being swapped for Gmail's own. A message filled but not sent is never
+  // retried, so nothing goes twice.
+  let last = null;
+  for (let attempt = 0; attempt < FILL_ATTEMPTS; attempt++) {
+    try {
+      const [result] = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: fillAndSendGmail,
+        args: [email, RECRUITER_SUBJECT, from.summary, 15000]
+      });
+      last = result?.result || null;
+      if (last?.ok || last?.signedOut || last?.filled) break;
+    } catch (err) {
+      last = { ok: false, error: err?.message || String(err) };
+    }
+    await sleep(1500);
+  }
+  if (!last?.ok) return { ok: false, tabId: tab.id, error: last?.error || "could not send the message" };
+
+  const sentAt = new Date().toISOString();
+  const recruiters = (await getRecruiters()).map((r) =>
+    r.email_address.toLowerCase() === email.toLowerCase() ? { ...r, sentAt, sentAs: from.profile.name } : r
+  );
+  await chrome.storage.local.set({ recruiters });
+  // Sent: the tab has nothing more to show.
+  await chrome.tabs.remove(tab.id).catch(() => {});
+  return { ok: true, sentAt, sentAs: from.profile.name };
+}
+
+// ---------------------------------------------------------------------------
 // Before a run: is everything a job catch needs in place?
 //
 // Asked by the panel when Start is pressed, before START itself. Each check
@@ -3409,6 +3614,21 @@ async function handle(msg) {
     // something to report against the job.
     case "GENERATE_MANUAL":
       return generateManual(msg.job);
+
+    case "RECRUITERS_GET":
+      return { ok: true, recruiters: await getRecruiters(), subject: RECRUITER_SUBJECT };
+
+    case "RECRUITERS_IMPORT": {
+      const recruiters = await importRecruiters(msg.entries);
+      return { ok: true, recruiters, skipped: (Array.isArray(msg.entries) ? msg.entries.length : 1) - recruiters.length };
+    }
+
+    case "RECRUITERS_CLEAR":
+      await chrome.storage.local.set({ recruiters: [] });
+      return { ok: true };
+
+    case "RECRUITER_SEND":
+      return sendToRecruiter(msg.email, msg.profileId);
 
     case "GET_CAPTURES": {
       const { captures = [] } = await chrome.storage.local.get("captures");

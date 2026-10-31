@@ -16,6 +16,10 @@
             aria-selected="false" aria-controls="pane-bid" tabindex="-1">
       Auto Fill
     </button>
+    <button id="tab-recruiter" class="tab" role="tab"
+            aria-selected="false" aria-controls="pane-recruiter" tabindex="-1">
+      Recruiter Bid
+    </button>
   </nav>
 
   <!-- Everything the extension does today lives in this pane. -->
@@ -414,6 +418,33 @@
 
       <p id="profileStatus" class="hint"></p>
     </div>
+  </section>
+
+  <!-- Recruiter Bid: recruiters' emails imported from a JSON file; picking
+       one sends them an email from Gmail — the subject, and the Summary of
+       the profile picked here as its body. -->
+  <section id="pane-recruiter" class="pane" role="tabpanel" aria-labelledby="tab-recruiter" hidden>
+    <div class="rb-bar">
+      <button id="rbImport" class="primary" type="button">
+        <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" focusable="false" fill="none"
+             stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/>
+        </svg>
+        Import JSON
+      </button>
+      <input id="rbFile" type="file" accept=".json,application/json" hidden>
+      <span id="rbCount" class="rb-count"></span>
+      <button id="rbClear" type="button" hidden>Clear</button>
+    </div>
+    <!-- Whose Summary the emails carry, from Settings → Profile. -->
+    <div class="rb-from">
+      <label class="field-label" for="rbProfile">Send as</label>
+      <select id="rbProfile"></select>
+      <span id="rbProfileNote" class="rb-note"></span>
+    </div>
+    <p id="rbStatus" class="rb-status" role="status" hidden></p>
+    <ul id="rbList" class="rb-list"></ul>
+    <nav id="rbPager" class="rb-pager" aria-label="Recruiter pages" hidden></nav>
   </section>
 
   <script src="sidepanel.js"></script>

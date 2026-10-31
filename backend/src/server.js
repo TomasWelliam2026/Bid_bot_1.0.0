@@ -375,6 +375,8 @@ const userJson = (user) => ({
     masterResume: user.master_resume,
     masterResumeMode: user.master_resume_mode === 'none' ? 'none' : 'use',
     style: user.resume_style,
+    // The body of the emails Recruiter Bid sends for this profile.
+    summary: user.summary || '',
   },
 });
 
@@ -429,6 +431,7 @@ app.patch('/api/users/:id', (req, res) => {
   if ('masterResume' in body) patch.masterResume = body.masterResume;
   if ('masterResumeMode' in body) patch.masterResumeMode = body.masterResumeMode === 'none' ? 'none' : 'use';
   if ('resumeStyle' in body) patch.resumeStyle = body.resumeStyle;
+  if ('summary' in body) patch.summary = String(body.summary ?? '');
 
   const user = store.updateUser(id, patch);
   pushUser(user);

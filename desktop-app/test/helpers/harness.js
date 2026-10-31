@@ -25,7 +25,12 @@ const RESUME_ANSWER =
   '{"company":"C","position":"DE","location":"R","duration":"2017 - 2019","content":["b"]}],' +
   '"education":[{"degree":"BS","school":"U","year":"2017"}]},"cover_letter":"hi"};';
 
-const PROFILE = { id: 7, name: "US (JYZ)", sheet: { country: "US", role: "Data Engineer", applicant: "JYZ" }, resume: {} };
+const PROFILE = {
+  id: 7,
+  name: "US (JYZ)",
+  sheet: { country: "US", role: "Data Engineer", applicant: "JYZ" },
+  resume: { summary: "Hi,\n\nI'm a senior data engineer (Snowflake, Spark, Airflow).\nOpen to fully remote roles only." }
+};
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -100,9 +105,11 @@ async function startHarness({ sites = {}, isNew = () => true, collectorUp = true
 
   return {
     send,
+    browser,
     events,
     calls,
     requests: fake.requests,
+    sentMail: fake.sentMail,
     // The collector going away, or coming back, mid-test.
     setCollectorUp: (up) => (state.collectorUp = up),
     // Messages of one type sent to the panel, in order.
