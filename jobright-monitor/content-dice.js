@@ -43,7 +43,7 @@ function main() {
 
   // Keep in step with MAX_ITEMS in content.js, sidepanel.js and MAX_STORED in
   // background.js — how many new jobs a run collects.
-  const MAX_ITEMS = 50;
+  const MAX_ITEMS = 30;
   const MAX_CANDIDATES = 400;
   const textOf = (el) => (el?.textContent || "").replace(/\s+/g, " ").trim();
 
@@ -293,7 +293,7 @@ function main() {
         return true;
 
       case "PING":
-        sendResponse({ ok: true, url: location.href, streaming, total: found.size });
+        sendResponse({ ok: true, url: location.href, streaming, total: found.size, keys: [...found.keys()] });
         return false;
 
       case "START_STREAM":

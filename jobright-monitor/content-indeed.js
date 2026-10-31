@@ -117,7 +117,7 @@ function main() {
 
   // Keep in step with MAX_ITEMS in content.js, sidepanel.js and MAX_STORED in
   // background.js — how many new jobs a run collects.
-  const MAX_ITEMS = 50;
+  const MAX_ITEMS = 30;
   const MAX_CANDIDATES = 400;
   const textOf = (el) => (el?.textContent || "").replace(/\s+/g, " ").trim();
   const pick = (root, selector, fallback) => root?.querySelector(selector) || root?.querySelector(fallback) || null;
@@ -551,7 +551,7 @@ function main() {
       // `blocked` is how the worker, waiting on a human check, learns that it
       // has been passed.
       case "PING":
-        sendResponse({ ok: true, url: location.href, streaming, total: found.size, blocked: isBlocked() });
+        sendResponse({ ok: true, url: location.href, streaming, total: found.size, keys: [...found.keys()], blocked: isBlocked() });
         return false;
 
       case "START_STREAM":

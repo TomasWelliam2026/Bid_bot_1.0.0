@@ -41,6 +41,8 @@
   --ok-soft:  #e2f7ee;
   --err:      #d6395a;
   --err-soft: #fbe7ec;
+  --warn:      #a15c07;
+  --warn-soft: #fdf1df;
 
   --radius:    8px;
   --radius-sm: 6px;
@@ -53,25 +55,29 @@
 :root[data-theme="dark"] {
   color-scheme: dark;
 
-  --bg:        #0f0f13;
-  --surface:   #191920;
-  --sunken:    #0a0a0e;
-  --line:      #2c2c37;
-  --line-soft: #202028;
+  /* A deep ocean navy, drawn from the logo's teal (#319bba): the surfaces
+     lean blue-green rather than neutral grey, so the logo sits in them. */
+  --bg:        #12232e;
+  --surface:   #192f3d;
+  --sunken:    #0e1c26;
+  --line:      #2a4859;
+  --line-soft: #213a49;
 
-  --fg:      #eeeef4;
-  --fg-soft: #b8b8c6;
-  --muted:   #8e8e9e;
+  --fg:      #e4f0f5;
+  --fg-soft: #b0c6d1;
+  --muted:   #7f9aa8;
 
   --accent:      #8b85f5;
   --accent-fg:   #16132a;
-  --accent-soft: #242040;
-  --accent-line: #3b3572;
+  --accent-soft: #262c5a;
+  --accent-line: #444a8c;
 
   --ok:       #34d399;
   --ok-soft:  #0e2a20;
   --err:      #fb7185;
   --err-soft: #2e1119;
+  --warn:      #f5b454;
+  --warn-soft: #2d2010;
 
   --lift: 0 1px 2px rgba(0, 0, 0, 0.5);
 }
@@ -207,38 +213,6 @@ header {
   margin-bottom: 11px;
 }
 
-.titlebar h1 {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  min-width: 0;
-  font-size: 13px;
-  letter-spacing: -0.01em;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.titlebar h1::before {
-  content: "";
-  flex: none;
-  width: 5px;
-  height: 14px;
-  border-radius: 2px;
-  background: var(--accent);
-}
-
-.count {
-  flex: none;
-  padding: 2px 8px;
-  font-size: 11px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  color: var(--accent);
-  background: var(--accent-soft);
-  border-radius: var(--pill);
-}
-
 /* ==========================================================================
    Buttons
    ========================================================================== */
@@ -282,19 +256,29 @@ header {
    ========================================================================== */
 
 .mode-switch {
+  flex: none;
   display: flex;
-  gap: 3px;
-  margin-bottom: 10px;
-  padding: 3px;
+  gap: 2px;
+  margin-left: auto;
+  padding: 2px;
   background: var(--sunken);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
 }
 .mode {
-  flex: 1 1 0;
+  /* Both the same width, an icon before each label. */
+  flex: none;
+  width: 74px;
   min-width: 0;
-  padding: 5px 8px;
-  font-size: 11.5px;
+  min-height: 0;
+  height: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 2px 6px;
+  font-size: 11px;
+  line-height: 1.5;
   font-weight: 600;
   color: var(--muted);
   background: transparent;
@@ -362,6 +346,25 @@ header {
 .search-form legend + .field-label { margin-top: 0; }
 .search-form .field-row { gap: 8px; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); }
 .search-form .switch-row { margin: 10px 0 6px; font-size: 12px; }
+.search-form .search-hint { margin: 3px 0 0; font-size: 11px; }
+#searchCountryField[hidden] { display: none; }
+
+/* The captured jobs: a count and the export buttons, one strip. */
+.captures {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  margin: 0 0 8px;
+  padding: 7px 10px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+.captures[hidden] { display: none; }
+.capture-count { font-size: 12px; color: var(--fg-soft); }
 
 /* Both mode bodies are columns so the feed list inside one of them can still
    take the leftover height; like .pane, the hidden one needs saying. */
@@ -472,6 +475,45 @@ button:disabled:hover { border-color: var(--line); }
 }
 #queue[hidden] { display: none; }
 
+/* What Start checked before the run. One line when all is well; open, with
+   the failing items marked, when something needs doing. */
+.preflight {
+  flex: none;
+  padding: 6px 12px;
+  font-size: 12px;
+  background: var(--sunken);
+  border-bottom: 1px solid var(--line-soft);
+}
+.preflight[hidden] { display: none; }
+.preflight > summary {
+  color: var(--ok);
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+}
+.preflight > summary::-webkit-details-marker { display: none; }
+.preflight.warn > summary { color: var(--warn); }
+.preflight.fail > summary { color: var(--err); }
+.preflight ul {
+  display: grid;
+  gap: 3px;
+  margin: 6px 0 2px;
+  padding: 0;
+  list-style: none;
+}
+.preflight .check {
+  display: grid;
+  grid-template-columns: 14px minmax(70px, max-content) 1fr;
+  gap: 6px;
+  align-items: baseline;
+}
+.preflight .check-mark { font-weight: 700; text-align: center; }
+.preflight .check.ok .check-mark { color: var(--ok); }
+.preflight .check.warn .check-mark { color: var(--warn); }
+.preflight .check.fail .check-mark { color: var(--err); }
+.preflight .check-label { font-weight: 600; color: var(--fg-soft); }
+.preflight .check-detail { color: var(--muted); overflow-wrap: anywhere; }
+.preflight .check.fail .check-detail { color: var(--err); }
 /* Auto Fill: what was filled on the page, as pills — green for filled, quiet
    for a field that already held something and was left. */
 .autofill-intro { margin: 0 0 12px; }
@@ -915,17 +957,6 @@ a.job-title:hover { color: var(--accent); text-decoration: underline; }
 .hint.dirty { color: var(--accent); }
 .hint.dirty::before { content: "● "; }
 
-.empty {
-  flex: none;
-  padding: 16px 14px;
-  font-size: 12px;
-  line-height: 1.55;
-  color: var(--muted);
-  background: var(--bg);
-  border-top: 1px solid var(--line-soft);
-}
-.empty strong { color: var(--fg-soft); font-weight: 600; }
-.empty[hidden] { display: none; }
 
 /* ==========================================================================
    Motion preferences
@@ -940,6 +971,12 @@ a.job-title:hover { color: var(--accent); text-decoration: underline; }
 }
 
 .style-actions { margin-top: 6px; }
+
+/* The Template prompt's text, open and selectable when the clipboard write
+   it tries first does not go through. */
+.style-prompt-peek { margin-top: 8px; font-size: 12px; }
+.style-prompt-peek summary { cursor: pointer; color: var(--fg-soft); }
+.style-prompt-peek textarea { margin-top: 6px; }
 
 /* Profile: one card per profile the picked Country and Role select, each
    holding that profile's own prompt, master resume and resume style. A card is

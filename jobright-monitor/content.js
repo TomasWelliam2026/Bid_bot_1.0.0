@@ -68,13 +68,20 @@ function main() {
   //
   // Keep in step with MAX_ITEMS in sidepanel.js and MAX_STORED in
   // background.js — they are separate contexts with no shared module.
-  const MAX_ITEMS = 50;
+  const MAX_ITEMS = 30;
 
   // A safety bound on candidates, since the accepted count may never reach
-  // MAX_ITEMS on a feed the collector already holds in full.
-  const MAX_CANDIDATES = 400;
+  // MAX_ITEMS on a feed the collector already holds in full. Generous: a
+  // batch keeps scrolling until it has MAX_ITEMS new jobs, however many of
+  // the cards on the way the collector already has.
+  const MAX_CANDIDATES = 1500;
 
   const CARD = "[data-index]";
+
+  // Dry rounds at the bottom before the list is taken to have ended: a feed
+  // that loads more on reaching its end takes a moment to, so ~2s at the
+  // default pause.
+  const BOTTOM_ROUNDS = 6;
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -147,6 +154,7 @@ function main() {
   // last harvest had scrolled to, so the next one carries on from there.
   let batchBase = 0;
   let lastTop = null;
+  let lastEndReason = null;
 
   // Fire-and-forget. chrome.runtime.sendMessage rejects when no extension page
   // is listening, which is the normal state whenever the panel is closed, so
@@ -231,7 +239,7 @@ function main() {
     let node = document.querySelector(CARD);
     while (node && node !== document.body) {
       const style = getComputedStyle(node);
-      if (/auto|scroll/.test(style.overflowY) && node.scrollHeight > node.clientHeight + 50) {
+      if (/auto|scroll/.test(style.overflowY) && node.scrollHeight > node.clientHeight + 1) {
         return node;
       }
       node = node.parentElement;
@@ -239,59 +247,98 @@ function main() {
     return document.scrollingElement || document.documentElement;
   }
 
+  // One turn of the mouse wheel over the list: a wheel event where the
+  // pointer would be, which the page's own list code hears as a person
+  // scrolling, then the scroll itself — unless the page took the wheel and
+  // scrolled itself, as a list that handles its own wheel does.
   function scrollStep(el) {
     const before = el.scrollTop;
-    el.scrollTop = before + Math.max(200, el.clientHeight * 0.8);
-    return el.scrollTop === before; // unchanged => bottom reached
+    const dy = Math.max(200, el.clientHeight * 0.8);
+    const page = el === document.scrollingElement || el === document.documentElement;
+    const box = page
+      ? { left: 0, top: 0, width: innerWidth, height: innerHeight }
+      : el.getBoundingClientRect();
+    const x = box.left + box.width / 2;
+    const y = box.top + Math.min(box.height, innerHeight) / 2;
+    const target = (!page && document.elementFromPoint(x, y)) || el;
+    const wheel = new WheelEvent("wheel", {
+      deltaY: dy, deltaMode: 0, clientX: x, clientY: y, bubbles: true, cancelable: true, composed: true
+    });
+    const cards = document.querySelectorAll(CARD);
+    const last = cards[cards.length - 1];
+    const lastTop = last?.getBoundingClientRect().top;
+    if (target.dispatchEvent(wheel)) el.scrollBy({ top: dy, behavior: "instant" });
+    // That box did not move — the list scrolls in some other one, or was not
+    // scrollable yet when it was looked for. The last card is brought up to
+    // the top of view instead: the browser scrolls whichever boxes hold it,
+    // and the list loads what comes after it.
+    if (el.scrollTop === before && last) last.scrollIntoView({ block: "start" });
+    const moved = el.scrollTop !== before || (last?.isConnected && last.getBoundingClientRect().top !== lastTop);
+    return !moved; // nothing moved => bottom reached
   }
 
   // `resume` carries on from where the last harvest had scrolled to, rather
   // than from wherever the list is showing — a new batch's cards are further
   // down, past every card the last batch already saw.
-  async function harvest({ maxScrolls = 60, pauseMs = 350, resume = false } = {}) {
+  async function harvest({ maxScrolls = 500, pauseMs = 350, resume = false } = {}) {
     if (harvesting) return;
     harvesting = true;
     status();
 
     try {
       const scroller = findScroller();
-      const startTop = scroller.scrollTop;
-      if (resume && lastTop !== null) {
+      if (resume && lastTop !== null && scroller.scrollTop < lastTop) {
         scroller.scrollTop = lastTop;
         await sleep(pauseMs);
         scan();
       }
       let idleRounds = 0;
+      // Why this pass ended — told to the worker, which scrolls on for more
+      // once the jobs caught so far are done, unless the list itself has ended.
+      let endReason = "budget";
 
       // Scrolls on while fewer than MAX_ITEMS have been accepted, and stops the
       // moment enough have. Because duplicates never count, a feed the
       // collector mostly holds is scrolled further rather than yielding a
       // short list. The other exits are the list genuinely ending, the
       // candidate bound, and the scroll budget — so this always terminates.
-      for (
-        let i = 0;
-        i < maxScrolls && streaming && accepted < MAX_ITEMS && found.size - batchBase < MAX_CANDIDATES;
-        i++
-      ) {
+      for (let i = 0; i < maxScrolls; i++) {
+        if (!streaming) {
+          endReason = "stopped";
+          break;
+        }
+        if (accepted >= MAX_ITEMS) {
+          endReason = "limit";
+          break;
+        }
+        if (found.size - batchBase >= MAX_CANDIDATES) {
+          endReason = "candidates";
+          break;
+        }
         const before = found.size;
         const atBottom = scrollStep(scroller);
         await sleep(pauseMs);
         scan();
 
         if (found.size === before) {
-          // Two dry rounds at the bottom, rather than one, so a slow render
-          // does not end the harvest early.
-          if (atBottom && ++idleRounds >= 2) break;
+          // Several dry rounds at the bottom, rather than one, so a slow
+          // render does not end the harvest early.
+          if (atBottom && ++idleRounds >= BOTTOM_ROUNDS) {
+            endReason = "bottom";
+            break;
+          }
         } else {
           idleRounds = 0;
         }
       }
 
-      lastTop = scroller.scrollTop; // where the next batch carries on from
-      scroller.scrollTop = startTop; // leave the page as we found it
+      // The job board stays scrolled down where this pass stopped, and the
+      // next batch carries on further down from there.
+      lastTop = scroller.scrollTop;
+      lastEndReason = endReason;
     } finally {
       harvesting = false;
-      status({ harvestComplete: true });
+      status({ harvestComplete: true, endReason: lastEndReason });
     }
   }
 
@@ -348,6 +395,20 @@ function main() {
     accepted = 0;
     batchBase = found.size;
     status({ nextBatch: true });
+    harvest({ resume: true });
+    return { ok: true, harvesting: true, total: found.size };
+  }
+
+  // More of the same batch: the jobs caught so far are all done, but the
+  // last pass stopped short of the list's end (its scroll budget, or the
+  // bound on cards seen). The list scrolls on from where it stopped; the
+  // count of new jobs carries on, and the bound on cards seen starts again
+  // from here.
+  function scrollMore() {
+    if (!streaming) return { ok: false, harvesting: false, total: found.size };
+    if (harvesting) return { ok: true, harvesting: true, total: found.size };
+    batchBase = found.size;
+    status({ scrollMore: true });
     harvest({ resume: true });
     return { ok: true, harvesting: true, total: found.size };
   }
@@ -529,6 +590,10 @@ function main() {
 
       case "NEXT_BATCH":
         sendResponse(nextBatch());
+        return false;
+
+      case "SCROLL_MORE":
+        sendResponse(scrollMore());
         return false;
 
       case "FORGET":

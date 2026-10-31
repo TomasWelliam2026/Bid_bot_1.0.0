@@ -9,14 +9,12 @@ const $ = (id) => document.getElementById(id);
 
 const listEl = $("list");
 const statusEl = $("status");
-const countEl = $("count");
-const emptyEl = $("empty");
 const startEl = $("start");
 const stopEl = $("stop");
 const queueEl = $("queue");
 
 // Keep in step with MAX_ITEMS in content.js and MAX_STORED in background.js.
-const MAX_ITEMS = 50;
+const MAX_ITEMS = 30;
 
 const rendered = new Map(); // key -> the <li>, so details can be filled in later
 let sawStaleClass = false;
@@ -39,6 +37,8 @@ function syncButtons() {
   // So is what it was asked to search for.
   $("jobSource").disabled = active;
   $("indeedSearch").disabled = active;
+  const captureOnly = $("captureOnly"); // not in the desktop app
+  if (captureOnly) captureOnly.disabled = active;
 }
 
 // ---------------------------------------------------------------------------
@@ -60,6 +60,8 @@ const SOURCE_NAMES = {
   ziprecruiter: "ZipRecruiter"
 };
 const SUPPORTED_SOURCES = new Set(["jobright", "dice", "glassdoor", "indeed", "ziprecruiter"]);
+// Boards the search form applies to. Jobright's feed is its own recommendations.
+const SEARCHABLE_SOURCES = new Set(["dice", "glassdoor", "indeed", "ziprecruiter"]);
 // What the status line says while a run opens that board's page.
 const SOURCE_OPENING = {
   jobright: "Opening jobright.ai/jobs/recommend…",
@@ -114,6 +116,7 @@ function addJob(job, { animate = true } = {}) {
 
   const li = document.createElement("li");
   if (animate) li.className = "fresh";
+  li.dataset.source = job.source || "";
   rendered.set(job.key, li);
 
   // Title — a link when the card had one, plain text otherwise.
@@ -154,7 +157,6 @@ function addJob(job, { animate = true } = {}) {
   if (job.detail) addDetail(job.key, job.detail);
 
   if (job.staleTitleClass || job.staleCompanyClass) sawStaleClass = true;
-  updateCount();
 }
 
 // ---------------------------------------------------------------------------
@@ -225,6 +227,26 @@ function addDetail(key, detail) {
   li.dataset.detailed = "1";
   if (stageEl?.parentNode === li) clearStage();
 
+  // ZipRecruiter's card carries no permalink of its own — the job's real
+  // link is the address the browser is actually left on once the card is
+  // clicked and its description comes up, known only now that it has been
+  // read. The title becomes (or stays) a link to exactly that.
+  if (li.dataset.source === "ziprecruiter" && detail?.url) {
+    let title = li.querySelector(".job-title");
+    if (title && title.tagName !== "A") {
+      const a = document.createElement("a");
+      a.className = title.className;
+      a.textContent = title.textContent;
+      title.replaceWith(a);
+      title = a;
+    }
+    if (title) {
+      title.href = detail.url;
+      title.target = "_blank";
+      title.rel = "noreferrer";
+    }
+  }
+
   if (!detail?.ok) {
     li.classList.add("failed");
     li.appendChild(tag("job-note warn", `Could not read: ${detail?.error || "unknown"}`));
@@ -234,9 +256,11 @@ function addDetail(key, detail) {
   // The whole point of the pass: a LinkedIn origin ends it here.
   if (detail.isLinkedIn) {
     li.classList.add("dropped");
-    li.appendChild(tag("job-note", "LinkedIn posting · tab closed, skipped"));
+    li.appendChild(tag("job-note", detail.captured ? "LinkedIn posting · captured without its description" : "LinkedIn posting · tab closed, skipped"));
     return;
   }
+
+  if (detail.captured) li.appendChild(tag("job-note", "Captured · company, title, link and description kept"));
 
   // The POST outcomes are the thing you actually need to see at a glance, so
   // they sit on the row rather than inside the collapsed block — one set per
@@ -270,7 +294,9 @@ function addDetail(key, detail) {
   box.className = "detail";
 
   const summary = document.createElement("summary");
-  summary.textContent = answersSummary(results) || (detail.descriptionFound ? "Read, but no answer" : "No description found");
+  summary.textContent =
+    answersSummary(results) ||
+    (detail.captured ? "Job description" : detail.descriptionFound ? "Read, but no answer" : "No description found");
   box.appendChild(summary);
 
   if (detail.originText || detail.originHref) {
@@ -386,11 +412,6 @@ function field(label, text) {
   return wrap;
 }
 
-function updateCount() {
-  countEl.textContent = String(rendered.size);
-  emptyEl.hidden = rendered.size > 0;
-}
-
 function setRunning(next) {
   feedRunning = next;
   syncButtons();
@@ -419,18 +440,59 @@ chrome.runtime.onMessage.addListener((msg) => {
     return false;
   }
 
-  // A full Jobright list, every job in it done: the worker has cleared it and
-  // is scrolling the feed for the next batch. Only the rows go — the queue
-  // strip's tally is the whole run's, so it stays.
+  // A full list, every job in it done: the worker has cleared it and is
+  // fetching the next batch — Jobright scrolls on, the other boards turn the
+  // page or load more. Only the rows go — the queue strip's tally is the
+  // whole run's, so it stays.
   if (msg?.type === "BATCH_CLEARED") {
     clearStage();
     listEl.replaceChildren();
     rendered.clear();
-    updateCount();
     setStatus(
-      `Batch ${msg.batch} done · ${msg.size} jobs written and sent · list cleared, scrolling Jobright for the next ${msg.size}…`,
+      `Batch ${msg.batch} done · ${msg.done ?? msg.size} job${(msg.done ?? msg.size) === 1 ? "" : "s"} ${captureRun ? "captured" : "written and sent"} · list cleared, ${msg.board || "Jobright"} ${msg.next || "scrolling for more"}…`,
       "live"
     );
+    return false;
+  }
+
+  // Every job caught so far is done, the list is not full yet, and the feed
+  // has more below: it scrolls on for them.
+  if (msg?.type === "SCROLLING_MORE") {
+    setStatus(`All caught jobs done · ${msg.accepted} of ${msg.size} · scrolling Jobright for more…`, "live");
+    return false;
+  }
+
+  // Several search terms: the last one's jobs are all read, and the same tab
+  // has gone on to search for the next, from an empty list.
+  if (msg?.type === "TERM_STARTED") {
+    clearStage();
+    listEl.replaceChildren();
+    rendered.clear();
+    setStatus(`Search ${msg.index + 1} of ${msg.total}: “${msg.term}”…`, "live");
+    return false;
+  }
+
+  if (msg?.type === "TERMS_DONE") {
+    setStatus(`All ${msg.total} search terms done.`);
+    return false;
+  }
+
+  if (msg?.type === "CAPTURE_ADDED") {
+    showCaptureCount(msg.count);
+    return false;
+  }
+
+  // The search for this batch is over; the resumes are built now.
+  if (msg?.type === "BUILD_STARTED") {
+    setStatus(
+      `Search done · ${msg.count} job${msg.count === 1 ? "" : "s"} caught — ${captureRun ? "reading each one" : "building the resumes"}…`,
+      "live"
+    );
+    return false;
+  }
+
+  if (msg?.type === "FEED_DONE") {
+    setStatus(`Every caught job is done · Jobright has ${msg.reason}.`);
     return false;
   }
 
@@ -440,11 +502,15 @@ chrome.runtime.onMessage.addListener((msg) => {
     syncButtons();
     showStage(s.active);
     queueEl.hidden = !s.draining && !s.pending;
-    const tally = `${s.visited} read · ${s.generated} written · ${s.saved} saved · ${s.skipped} filtered out`;
+    const tally = captureRun
+      ? `${s.visited} read and captured`
+      : `${s.visited} read · ${s.generated} written · ${s.saved} saved · ${s.skipped} filtered out`;
     const doing = s.active ? ` · ${s.active.title} — ${stageText(s.active)}` : "";
     queueEl.textContent = s.draining
       ? `Reading · ${s.pending} queued · ${tally}${doing}`
-      : tally;
+      : s.pending
+        ? `${s.pending} caught · searching for more before building · ${tally}`
+        : tally;
     return false;
   }
 
@@ -474,12 +540,8 @@ chrome.runtime.onMessage.addListener((msg) => {
     } else if (s.streaming && !s.onRecommendPage) {
       setStatus("That tab left the job list.", "err");
     } else if (s.atLimit) {
-      // Jobright goes on in batches; the other boards stop at a full list.
-      setStatus(
-        jobSource === "jobright"
-          ? `${s.accepted} new · list full — once every resume is done, the list is cleared and Jobright scrolled for more`
-          : `${s.accepted} new · limit reached, no more scrolling`
-      );
+      // Every board goes on in batches of MAX_ITEMS.
+      setStatus(`${s.accepted} new · list full — once every job is done, the list is cleared and more are caught`);
     } else if (s.paging) {
       setStatus(`This page is done · clicking Next for more jobs… ${s.accepted} new so far`, "live");
     } else if (s.lastPage) {
@@ -502,26 +564,97 @@ chrome.runtime.onMessage.addListener((msg) => {
 // Controls
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Before a run
+//
+// Start first asks the worker whether everything a job catch needs is in
+// place — the board, the collector, the profiles, ChatGPT, each profile's
+// resume style — and shows the answer as a list. Anything marked ✕ would stop
+// the run from getting anywhere, so the run is not started; ! is a warning,
+// and the run goes ahead. Run in the desktop app, the list also says whether
+// the browser is connected, or can be.
+// ---------------------------------------------------------------------------
+
+const preflightEl = $("preflight");
+const preflightSummaryEl = $("preflightSummary");
+const preflightListEl = $("preflightList");
+const CHECK_MARK = { ok: "✓", warn: "!", fail: "✕" };
+
+function showPreflight(checks) {
+  const failed = checks.filter((c) => c.state === "fail");
+  const warned = checks.filter((c) => c.state === "warn");
+  preflightListEl.replaceChildren(
+    ...checks.map((c) => {
+      const li = document.createElement("li");
+      li.className = `check ${c.state}`;
+      const mark = document.createElement("span");
+      mark.className = "check-mark";
+      mark.setAttribute("aria-label", c.state === "ok" ? "OK" : c.state === "warn" ? "Warning" : "Problem");
+      mark.textContent = CHECK_MARK[c.state];
+      const label = document.createElement("span");
+      label.className = "check-label";
+      label.textContent = c.label;
+      const detail = document.createElement("span");
+      detail.className = "check-detail";
+      detail.textContent = c.detail || "";
+      li.append(mark, label, detail);
+      return li;
+    })
+  );
+  preflightSummaryEl.textContent = failed.length
+    ? `✕ ${failed.length} of ${checks.length} checks failed — not started`
+    : warned.length
+      ? `! All ${checks.length} checks passed · ${warned.length} warning${warned.length === 1 ? "" : "s"}`
+      : `✓ All ${checks.length} checks passed`;
+  preflightEl.className = `preflight ${failed.length ? "fail" : warned.length ? "warn" : "ok"}`;
+  // Open when something needs doing; folded to its one line when all is well.
+  preflightEl.open = failed.length > 0 || warned.length > 0;
+  preflightEl.hidden = false;
+}
+
+async function runPreflight(options) {
+  const reply = await send({ type: "PREFLIGHT", options });
+  const checks = reply.ok ? reply.checks : [{ key: "worker", label: "Bid Bot", state: "fail", detail: reply.error }];
+  // The desktop app adds the one thing only it knows: the browser.
+  if (window.bidbotDesktop?.checkBrowser) {
+    try {
+      checks.unshift(await window.bidbotDesktop.checkBrowser());
+    } catch (err) {
+      checks.unshift({ key: "browser", label: "Browser", state: "fail", detail: err?.message || String(err) });
+    }
+  }
+  showPreflight(checks);
+  return !checks.some((c) => c.state === "fail");
+}
+
 startEl.addEventListener("click", async () => {
   if (feedRunning || queueRunning) return;
 
-  // Indeed has no page of its own to open — only a search, which needs
-  // something to search for.
-  const search = jobSource === "indeed" ? readSearch() : undefined;
-  if (search && !search.role) {
-    setStatus("Type a role to search Indeed for.", "err");
-    $("searchRole").focus();
+  // The search terms, on every board but Jobright. Indeed has no page of its
+  // own to open — only a search, which needs something to search for.
+  const search = SEARCHABLE_SOURCES.has(jobSource) ? readSearch() : undefined;
+  const capture = captureOnlyEl.checked;
+
+  startEl.disabled = true;
+  setStatus("Checking everything a run needs…", "live");
+  const ready = await runPreflight({ source: jobSource, search, capture });
+  syncButtons();
+  if (!ready) {
+    setStatus("Not started — fix the items marked ✕, then press Start again.", "err");
+    if (search && !search.role) $("searchRole").focus();
     return;
   }
 
   setStatus(SOURCE_OPENING[jobSource] || "Opening the job board…", "live");
   setRunning(true);
+  captureRun = capture;
 
   // A run always does the whole job: scroll for every card, open each one,
-  // and send what it builds to the collector.
+  // and send what it builds to the collector — or, capturing, keep what it
+  // read of each job instead.
   const reply = await send({
     type: "START",
-    options: { source: jobSource, search, autoScroll: true, visitJobs: true, saveJobs: true }
+    options: { source: jobSource, search, capture, autoScroll: true, visitJobs: true, saveJobs: !capture }
   });
 
   if (!reply.ok) {
@@ -584,7 +717,6 @@ async function clearList() {
   rendered.clear();
   sawStaleClass = false;
   queueEl.hidden = true;
-  updateCount();
   await send({ type: "CLEAR" });
 }
 
@@ -708,7 +840,9 @@ for (const el of Object.values(SEARCH_FIELDS)) {
 function selectSource(source) {
   jobSource = source;
   jobSourceEl.value = source;
-  searchEl.hidden = source !== "indeed";
+  searchEl.hidden = !SEARCHABLE_SOURCES.has(source);
+  $("searchLegend").textContent = `${SOURCE_NAMES[source]} search`;
+  $("searchCountryField").hidden = source !== "indeed";
   const supported = SUPPORTED_SOURCES.has(source);
   sourceNoteEl.hidden = supported;
   sourceNoteEl.textContent = supported
@@ -730,6 +864,96 @@ jobSourceEl.addEventListener("change", () => {
 });
 
 selectSource(jobSource);
+
+// ---------------------------------------------------------------------------
+// Capture only
+//
+// With the switch on, a run reads each job and keeps its company, title,
+// link and description — no resume, nothing sent to the collector. What is
+// captured builds up across runs, in the worker, until Clear under it; the
+// strip above the list says how many and exports them as CSV or JSON.
+// ---------------------------------------------------------------------------
+
+const CAPTURE_KEY = "captureOnly";
+const captureOnlyEl = $("captureOnly");
+let captureRun = false;
+
+// The desktop app has no capture-only runs: the switch and the captured
+// list are the extension's alone, and every app run writes resumes.
+const CAPTURE_OFFERED = !window.bidbotDesktop;
+if (!CAPTURE_OFFERED) captureOnlyEl.closest(".switch-row").remove();
+
+try {
+  captureOnlyEl.checked = CAPTURE_OFFERED && localStorage.getItem(CAPTURE_KEY) === "1";
+} catch {
+  // not remembered: off
+}
+captureOnlyEl.addEventListener("change", () => {
+  try {
+    localStorage.setItem(CAPTURE_KEY, captureOnlyEl.checked ? "1" : "0");
+  } catch {
+    // applies until the panel closes
+  }
+});
+
+function showCaptureCount(count) {
+  $("captures").hidden = !count || !CAPTURE_OFFERED;
+  $("captureCount").textContent = `${count} job${count === 1 ? "" : "s"} captured`;
+}
+
+const CAPTURE_COLUMNS = ["term", "board", "company", "title", "url", "location", "description", "note", "capturedAt"];
+
+const csvCell = (value) => {
+  const text = String(value ?? "");
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+};
+
+// A file handed to the browser's own download, named for today.
+function download(name, type, text) {
+  const url = URL.createObjectURL(new Blob([text], { type }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+async function exportCaptures(format) {
+  const reply = await send({ type: "GET_CAPTURES" });
+  if (!reply.ok) return setStatus(`Error: ${reply.error}`, "err");
+  const stamp = new Date().toISOString().slice(0, 10);
+  if (format === "json") {
+    download(`jobs-${stamp}.json`, "application/json", JSON.stringify(reply.captures, null, 2));
+  } else {
+    const rows = [CAPTURE_COLUMNS, ...reply.captures.map((c) => CAPTURE_COLUMNS.map((k) => c[k]))];
+    // The byte order mark is what makes Excel read the file as UTF-8.
+    download(`jobs-${stamp}.csv`, "text/csv", "\ufeff" + rows.map((r) => r.map(csvCell).join(",")).join("\r\n"));
+  }
+  setStatus(`Exported ${reply.captures.length} job${reply.captures.length === 1 ? "" : "s"} as ${format.toUpperCase()}.`);
+}
+
+$("exportCsv").addEventListener("click", () => exportCaptures("csv"));
+$("exportJson").addEventListener("click", () => exportCaptures("json"));
+// Two presses, so one stray click cannot throw a whole capture away.
+const clearCapturesEl = $("clearCaptures");
+let clearArmed = null;
+clearCapturesEl.addEventListener("click", async () => {
+  if (!clearArmed) {
+    clearCapturesEl.textContent = "Press again to clear";
+    clearArmed = setTimeout(() => {
+      clearArmed = null;
+      clearCapturesEl.textContent = "Clear";
+    }, 4000);
+    return;
+  }
+  clearTimeout(clearArmed);
+  clearArmed = null;
+  clearCapturesEl.textContent = "Clear";
+  await send({ type: "CLEAR_CAPTURES" });
+  showCaptureCount(0);
+});
 
 const manualGenerateEl = $("manualGenerate");
 const manualStatusEl = $("manualStatus");
@@ -1140,8 +1364,9 @@ function renderCards() {
 
   // A preview open in a card goes with it, rather than being taken along.
   if (profileListEl.contains(stylePreviewEl)) closePreview();
-  // One card is opened for you; with several, the ones you opened stay open.
-  profileListEl.replaceChildren(...shown.map((p) => profileCard(p, shown.length === 1 || openCards.has(p.id))));
+  // Every card starts folded; only the ones you opened since picking the
+  // Profile tab are drawn open again.
+  profileListEl.replaceChildren(...shown.map((p) => profileCard(p, openCards.has(p.id))));
 
   profileEmptyEl.hidden = shown.length > 0;
   profileEmptyEl.textContent =
@@ -1195,6 +1420,103 @@ function fillStyleOptions(select, profileId, selected) {
 // one, and every edit updates the draft — or drops it, once the fields are
 // back to what is saved.
 //
+// Handed to Claude (or another model) alongside a resume screenshot, so a
+// human can get a working Template HTML style in one pass instead of the
+// back-and-forth it otherwise takes: every structural hole the builder
+// needs, the DE-1 html/body baseline verbatim (not sampled from the image),
+// precisely-measured colors/spacing/line-height, and a live-preview script
+// + data.js so the result can be checked by just opening the file, before
+// it's ever pasted in here. Kept as one block so "Template prompt" below can
+// hand it over unedited — if the rules in it ever drift from what the
+// builder actually requires (missingHoles, buildResumeHtml, the DE-1
+// template), fix it here too.
+const TEMPLATE_STYLE_PROMPT = `I'm attaching a screenshot of a resume. Recreate its visual design — layout, spacing, fonts/weights, colors, section order, dividers/rules, how headings and dates are styled — as closely as you can in one self-contained HTML file.
+
+This isn't just a visual copy, though: the output has to be a TEMPLATE for a Chrome extension that builds resumes by string-replacing specific elements. It will be rejected if it doesn't follow these exact structural rules, so treat them as hard constraints, not suggestions — match the image's look, but keep this structure underneath it.
+
+REQUIRED (the extension refuses the template if any is missing):
+1. \`<p id="summary">...</p>\` — the summary/profile paragraph, wherever the image has one (or near the top if it doesn't).
+2. \`<div id="skills">...</div>\` — the skills section.
+3. At least one \`<div class="job"> ... <ul data-exp="0"> ... </ul> ... </div>\` block — the pattern the builder clones once per job, so match the image's FIRST (or most typical) job entry exactly. Fill it with realistic placeholder content matching the image's own content, since this block also doubles as the template's own preview.
+
+Inside that job block, include:
+- one element with class="company", one with class="role"
+- EITHER class="location" and class="dates" as separate elements (optionally joined by \`<span class="sep">...</span>\` using whatever separator character/style the image uses, e.g. "|" or "•"), OR — if the image shows location and dates as one combined line — a single element with class="meta" instead.
+- \`<ul data-exp="0">\` holding a few \`<li>\` bullets matching the image's bullet style.
+
+OPTIONAL but include if the image has them (filled automatically if present, otherwise just left as placeholder, so give each real sample content):
+- \`<h1 class="name">\`, a \`<title>\` tag, class="title" for the headline under the name, and \`<p class="contact">\` with the contact items the image shows, separated by \`<span class="sep">...</span>\`. If the image puts links (LinkedIn/portfolio/GitHub) on their own separate line from the rest of the contact info, put those specifically in a second \`<p class="contact links">\`.
+- A repeatable \`<div class="edu-item">\` per school, with class="school", class="year", and a repeatable class="degree" line inside each (for multiple degrees at one school).
+- A repeatable \`<div class="cert-item">\` (wrap the whole section in something with class="cert-section" if the image has a distinct certifications block), with class="cert-name" inside each one.
+
+Go through the visual match like a design review, measuring, not guessing:
+
+1. COLORS — look at the actual pixels in the image. Pick out the exact text color, heading color, any accent/rule color, and background, as hex values. Don't guess a "close enough" color (e.g. a generic navy when the image uses a specific teal/slate) — sample it as precisely as you can.
+
+2. SPACING — measure, relative to the page: the margin around the whole page, the gap between sections (name → contact → summary → experience → education, etc.), the gap between a job's heading and its bullets, and the gap between bullets themselves.
+
+3. LINE SPACING — measure this precisely, don't eyeball it:
+   - Find a bullet or paragraph in the image that wraps onto at least two lines. Measure the pixel distance from the top of the text on the first wrapped line to the top of the text on the second wrapped line (baseline to baseline, or cap-height to cap-height — pick one and be consistent).
+   - Divide that distance by the font size you sampled for that same text. That ratio IS the line-height — state it explicitly before writing any code (e.g. "bullets: ~15px line pitch at 9.8pt font ≈ 1.42 unitless ratio").
+   - Do this separately for each block of wrapping text that looks visually different in the image (summary paragraph vs. bullets vs. any dense multi-line block) — they are not always the same ratio, even within one resume.
+   - This is strictly about spacing BETWEEN WRAPPED LINES OF THE SAME bullet/paragraph — never confuse it with the gap between one bullet and the next, or between a bullet list and the heading above/below it; those are margins from item 2.
+   - Write the result as a bare unitless number (e.g. \`1.45\`), never a px or % value — this project's PDF builder only reliably reads the unitless form.
+
+4. LIVE PREVIEW — the template also needs to be able to render itself when opened directly in a browser, so I can actually see it filled in rather than a blank/placeholder page. Add:
+   - \`<script src="./data.js"></script>\` near the top.
+   - A \`<script type="module">\` at the end of the body that reads the global \`resume\` object \`data.js\` defines and fills the page from it:
+     - \`#summary\` ← \`resume.SUMMARY\`
+     - \`#skills\` ← one \`<p>\` per \`resume.SKILLS\` line, splitting on the first \`:\` into a \`.label\` span + \`.colon\` span + the rest
+     - \`h1.name\` / \`.title\` / \`.contact\` ← \`resume.CONTACT\` as \`[name, title, ...contactItems]\`, each extra item joined with a \`.sep\` span between them, any \`https://\` item turned into an \`<a>\` (LinkedIn links shown as the text "LinkedIn")
+     - the FIRST \`.job\` block is the pattern: clone it once per \`resume.EXPERIENCE\` entry (\`[company, role, location, dates, ...bullets]\`), fill \`.company\`/\`.role\`/\`.location\`/\`.dates\` (or \`.meta\`), set \`data-exp\` on its \`<ul>\` to the entry's index, fill \`<li>\`s from the bullets, then remove the original pattern block(s)
+     - same clone-fill-remove pattern for \`.edu-item\` from \`resume.EDUCATION\` (\`[school, [[degree, field], ...], year]\`) and \`.cert-item\` from \`resume.CERTIFICATIONS\` (plain strings) — if there are no certifications, remove \`.cert-section\` entirely instead
+   - Also give me a separate \`data.js\` file with realistic sample content matching what's actually in the screenshot, in exactly this shape:
+     \`\`\`
+     const resume = {
+       CONTACT: ["Name", "Title", "location", "phone", "email", "https://linkedin.com/in/..."],
+       SUMMARY: "...",
+       SKILLS: ["Label: item, item, item"],
+       EXPERIENCE: [["Company", "Role", "Location", "Dates", "bullet", "bullet"]],
+       CERTIFICATIONS: [],
+       EDUCATION: [["School", [["Degree", "Field"]], "Year"]]
+     };
+     \`\`\`
+   This script is for LOCAL PREVIEW ONLY — when this template is actually used, every \`<script>\` in it is stripped and the same content gets baked in by directly string-replacing the elements by their id/class, not by running this JS. So the structural ids/classes themselves must be correct and complete on their own, with or without the script running.
+
+5. PAGE MARGINS (PDF vs. browser preview) — this project's PDF builder adds its own fixed 15mm margin on every side of the page automatically, and reads \`@media print\` rules, overriding the normal ones for the same element. So:
+   - \`body\`'s plain \`padding\` controls how it looks when opened directly in a browser (for live preview) — keep whatever padding matches the image there.
+   - Never put page-margin spacing in a CSS \`margin\` on \`body\` — only \`padding\` is read for this. A \`margin\` on \`body\` is fine ONLY if it's purely for centering the page in a browser (e.g. \`margin: 0 auto;\`), never as a stand-in for the page margin itself.
+
+6. BODY & HTML — this project's other templates (Sisu_DE_1 above all) use one exact, unstyled \`html\`/\`body\` baseline, and it must be copied verbatim here, not reinvented or sampled from the image:
+   - Do not style \`html\` at all — no background, no box-shadow, nothing.
+   - \`body\` gets exactly this, character for character, with only the \`color\` value's variable name possibly differing to match this template's own theme variable names:
+     \`\`\`css
+     body {
+       margin: 0 auto;
+       padding: 32px 40px 48px;
+       max-width: 8.5in;
+       font-family: "Segoe UI", Calibri, "Helvetica Neue", Arial, sans-serif;
+       font-size: 13.5px;
+       line-height: 1.45;
+       color: var(--body);
+       background: #fff;
+     }
+     \`\`\`
+   - No \`box-shadow\`, no \`min-height\`, no fixed \`width\`, no \`-webkit-font-smoothing\`, no \`font-family\` other than the one above — the page's own paper-like look (the shadow framing it, the gray page background behind it) is already drawn by this project's own Preview panel around every template; the template's own \`body\`/\`html\` must not try to reproduce it.
+   - \`@media print { body { padding: 0; font-size: 11pt; } }\` stays exactly this, matching DE-1's own print rule — nothing more under it.
+   - Everything else — colors, fonts inside the content, headings, spacing between sections, the specific layout (centered vs. left-aligned, etc.) — stays free to match the image. Only \`html\`/\`body\` themselves are locked to this exact shared baseline.
+
+HARD RULES — do not break these even if it means deviating slightly from the image:
+- Any \`<script>\` is stripped when the extension builds a real resume, so the layout can never depend on JS running at build time. A script is only allowed as the self-contained live-preview helper above — never for anything structural or visual.
+- One self-contained HTML file: inline/embedded \`<style>\`, no external fonts or assets I'd have to host separately. Use system/web-safe fonts closest to what's in the image.
+- Every class/id name above must appear verbatim — the extension matches on these exact strings, not on meaning.
+
+Give me:
+- A short list of what you measured and picked (colors as hex, the line-height ratios with your math, the margin/gap values) before the code, so I can tell you if something's misread.
+- The corrected, complete HTML file, plus the data.js file.
+
+Output just those two files.`;
+
 // Its resume style is its own as well: picked from the built-in styles and
 // the ones added under this card, which no other profile is offered. The
 // Add a style editor keeps what is typed in it per profile, so a card drawn
@@ -1295,10 +1617,24 @@ function profileCard(profile, open) {
   html.placeholder = "Paste or type the template's HTML";
   html.value = editor.html;
   const draftPreview = button("Preview");
+  const templatePrompt = button("Template prompt");
   const add = button("Add new");
   const adderActions = el("div", "controls style-actions");
-  adderActions.append(draftPreview, add);
-  adder.append(el("summary", "", "Add a style"), nameLabel, name, htmlLabel, html, adderActions);
+  adderActions.append(draftPreview, templatePrompt, add);
+
+  // For a human with no screenshot-to-HTML model of their own handy, or
+  // whose clipboard write is blocked (no permission prompt, no https, …):
+  // the same prompt, open and selectable, instead of lost to a silent
+  // failure.
+  const promptPeek = el("details", "style-prompt-peek");
+  const promptBox = el("textarea", "code");
+  promptBox.readOnly = true;
+  promptBox.rows = 8;
+  promptBox.value = TEMPLATE_STYLE_PROMPT;
+  promptBox.addEventListener("focus", () => promptBox.select());
+  promptPeek.append(el("summary", "", "Prompt"), promptBox);
+
+  adder.append(el("summary", "", "Add a style"), nameLabel, name, htmlLabel, html, adderActions, promptPeek);
 
   const status = el("p", "hint");
   const showStatus = (text, kind = "") => {
@@ -1308,6 +1644,21 @@ function profileCard(profile, open) {
     status.textContent = text;
   };
   showStatus(editor.status?.text ?? "", editor.status?.kind);
+
+  // Handed to a model alongside a resume screenshot — no page here can
+  // script that model itself, same reasoning as Sheet sync's own Generate
+  // script. Copies silently when it can; the Prompt details below holds the
+  // same text, open and selectable, for when it can't.
+  templatePrompt.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(TEMPLATE_STYLE_PROMPT);
+      showStatus("Prompt copied — paste it into Claude (or another model) along with a resume screenshot.", "saved");
+    } catch {
+      promptPeek.open = true;
+      promptBox.focus();
+      showStatus("Could not copy — selected below, so you can copy it by hand.", "warn");
+    }
+  });
 
   // Said on the button before it is pressed, not after: a name this profile
   // has already added replaces that style.
@@ -1760,9 +2111,13 @@ const mainTabs = wireTabStrip($("mainTabs"), {
 
 wireTabStrip($("settingsTabs"), {
   // Fresh each time, so a profile just added or changed on the dashboard is
-  // listed as it is now.
+  // listed as it is now — and folded, so the list reads as a list of names.
+  // Unsaved edits are kept; only which cards were open is forgotten.
   onSelect: (tab) => {
-    if (tab.id === "subtab-profile") loadProfiles();
+    if (tab.id !== "subtab-profile") return;
+    openCards.clear();
+    for (const card of profileListEl.querySelectorAll("details.profile-card")) card.open = false;
+    loadProfiles();
   }
 });
 
@@ -2572,9 +2927,10 @@ async function init() {
   }
 
   for (const job of state.jobs) addJob(job, { animate: false });
+  const captured = await send({ type: "GET_CAPTURES" });
+  if (captured.ok) showCaptureCount(captured.captures.length);
   await loadSettings();
   loadProfiles(); // reports its own failure beside the list; nothing waits on it
-  updateCount();
 
   if (rendered.size) setStatus(`${rendered.size} from the last run · press Start to resume`);
   else setStatus("Idle.");

@@ -37,19 +37,28 @@ const SOURCES = {
     url: DICE_SEARCH_URL,
     patterns: ["https://www.dice.com/jobs*"],
     script: "content-dice.js",
+    searchUrl: (search) => diceSearchUrl(search),
     nextPage: true
   },
   glassdoor: {
     name: "Glassdoor",
     url: GLASSDOOR_SEARCH_URL,
     patterns: ["https://www.glassdoor.com/Job/*"],
-    script: "content-glassdoor.js"
+    script: "content-glassdoor.js",
+    searchUrl: (search) => glassdoorSearchUrl(search)
   },
   ziprecruiter: {
     name: "ZipRecruiter",
     url: ZIPRECRUITER_SEARCH_URL,
     patterns: ["https://www.ziprecruiter.com/jobs-search*"],
-    script: "content-ziprecruiter.js"
+    script: "content-ziprecruiter.js",
+    searchUrl: (search) => zipRecruiterSearchUrl(search),
+    // Two-pane layout: clicking a card updates the right-hand pane in place
+    // rather than navigating, so the job is read there — no tab of its own.
+    readsInPane: true,
+    // Each page's cards are finished before [aria-label="Next page"] is
+    // clicked for the next one — see nextPageWhenDone.
+    nextPage: true
   },
   // No fixed page: the search opened is the one the panel's search form asks
   // for, on that country's Indeed site — see indeedSearchUrl.
@@ -58,6 +67,7 @@ const SOURCES = {
     searched: true,
     patterns: ["https://*.indeed.com/jobs*"],
     script: "content-indeed.js",
+    searchUrl: (search) => indeedSearchUrl(search),
     nextPage: true,
     // Each job is read on the search page, by clicking its card; no tab is
     // ever opened for one — see readInPane.
@@ -75,7 +85,7 @@ const feedTabIds = async () =>
   (await chrome.tabs.query({ url: FEED_PATTERNS })).map((t) => t.id).filter((id) => typeof id === "number");
 // A run collects at most this many, so the store holds the most recent run.
 // Keep in step with MAX_ITEMS in content.js and sidepanel.js.
-const MAX_STORED = 50;
+const MAX_STORED = 30;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -613,6 +623,12 @@ const SAVE_TIMEOUT_MS = 10000;
 const queue = [];
 const queued = new Set(); // keys ever enqueued, so a re-scan cannot double-visit
 let draining = false;
+// Search first, build after: the jobs caught wait in `queue` while the board
+// is searched, and only once the search for this batch is over — the list is
+// full, or the board has nothing more — are their resumes built, one after
+// the other (see buildNow). Then the list is cleared and the next search
+// begins.
+let building = false;
 let visitEnabled = true;
 let saveEnabled = true;
 let visitedCount = 0;
@@ -705,15 +721,11 @@ async function drainChecks() {
       const signal = runSignal();
       if (signal?.aborted) break;
 
-      // The list is full. On a board that goes on in batches the candidates
+      // The list is full. Every board goes on in batches: the candidates
       // still waiting are held for the next batch, which checks them first —
       // they are marked seen already, so dropping them would lose them for
-      // good. Anywhere else the run ends here, and they are not worth asking
-      // about.
-      if (acceptedCount >= MAX_STORED) {
-        if (!SOURCES[runSource]?.scrollBatches) checkQueue.length = 0;
-        break;
-      }
+      // good.
+      if (acceptedCount >= MAX_STORED) break; // searched enough: built below
 
       const job = checkQueue.shift();
 
@@ -722,8 +734,10 @@ async function drainChecks() {
       // off the collector holds nothing, so every candidate is new. Profiles
       // that cannot be read are no reason to drop a job — it goes ahead, and
       // the queue reports the same failure on its row.
-      const selection = await selectedProfiles();
-      const check = !selection.ok
+      const selection = captureMode ? { ok: true, profiles: [] } : await selectedProfiles();
+      const check = captureMode
+        ? { ok: true, pending: null, existing: [] }
+        : !selection.ok
         ? { ok: false, pending: null, existing: [], error: selection.error }
         : saveEnabled
           ? await checkExisting(job, signal, selection.profiles)
@@ -757,11 +771,13 @@ async function drainChecks() {
     }
   } finally {
     checking = false;
+    if (acceptedCount >= MAX_STORED) buildNow();
     queueStatus();
     // A page whose cards were all already in the collector queues nothing,
     // so drain() never runs for it — this is where that page is finished.
     nextPageWhenDone();
     nextBatchWhenDone();
+    nextTermWhenDone();
   }
 }
 
@@ -778,7 +794,7 @@ async function drainChecks() {
 // at once, so a lull between two checks does not turn the page early.
 // ---------------------------------------------------------------------------
 
-const MAX_PAGES = 30;
+const MAX_PAGES = 100;
 // Cards can still be arriving from the page when the queues first empty; this
 // gives them a moment to land before the page is called finished.
 const PAGE_SETTLE_MS = 1500;
@@ -789,26 +805,51 @@ let pagesTurned = 0;
 let paging = false;
 
 const pipelineIdle = () => !checking && !checkQueue.length && !draining && !queue.length;
+// The search has nothing in hand: every card found so far has been checked,
+// and no build is on. The jobs caught may still be waiting for theirs.
+const searchIdle = () => !checking && !checkQueue.length && !draining && !building;
+
+// The search for this batch is over: the jobs it caught are built now, one
+// after the other. More caught meanwhile (the last checks) join the build.
+function buildNow() {
+  if (building || !visitEnabled || !queue.length) return;
+  building = true;
+  broadcast({ type: "BUILD_STARTED", count: queue.length });
+  drain();
+}
 
 async function nextPageWhenDone() {
   // A run paused on a human check moves on once it is passed, not before.
-  if (!SOURCES[runSource]?.nextPage || paging || verifyPause || !pipelineIdle()) return;
+  // Not while the tab is being sent to the next term's search: the page it
+  // is leaving is not the one to judge.
+  if (!SOURCES[runSource]?.nextPage || paging || switchingTerm || verifyPause || !searchIdle()) return;
   paging = true;
 
   let turned = false;
   try {
     await sleep(PAGE_SETTLE_MS);
     const signal = runSignal();
-    // Stopped, still busy after all, full, or out of pages: not this time.
-    // A job still in flight calls back here when it finishes.
-    if (!signal || signal.aborted || !visitEnabled || !pipelineIdle()) return;
-    if (acceptedCount >= MAX_STORED || pagesTurned >= MAX_PAGES) return;
-    if (feedTabId === null) return;
+    // Stopped, still busy after all, or full: not this time. A job still in
+    // flight calls back here when it finishes; a full list is built and then
+    // the batch step's to clear (nextBatchWhenDone).
+    if (!signal || signal.aborted || !visitEnabled || switchingTerm || !searchIdle()) return;
+    if (feedTabId === null || acceptedCount >= MAX_STORED) return;
+    // A board that reads each job beside its list (Indeed, ZipRecruiter) can
+    // only read it while its page is showing: that page's jobs are built
+    // before the next page is searched.
+    // Every card the page has found must have reached the worker first: a
+    // card's JOB_FOUND can trail the page's own replies (the desktop app
+    // relays them by polling). Cards still arriving are checked, and their
+    // checks call back here.
+    await pageCardsArrived(signal);
+    if (signal.aborted || !searchIdle()) return;
+    if (SOURCES[runSource].readsInPane && queue.length) return buildNow();
+    if (pagesTurned >= MAX_PAGES) return endTerm();
 
     const reply = await chrome.tabs
       .sendMessage(feedTabId, { type: "NEXT_PAGE" })
       .catch(() => null);
-    if (!reply?.clicked) return; // the last page, or the tab is gone
+    if (!reply?.clicked) return endTerm(); // the last page, or the tab is gone
 
     pagesTurned++;
     await waitForPageChange(feedTabId, reply.url, signal);
@@ -833,6 +874,28 @@ async function nextPageWhenDone() {
   // move the run on from it. A page with work in it is simply still busy then,
   // and its own queues call back here when they empty.
   if (turned) nextPageWhenDone();
+}
+
+// Waits, up to PAGE_ARRIVAL_MS, until every card the list page says it has
+// found has been handed to the duplicate check.
+const PAGE_ARRIVAL_MS = 10000;
+async function pageCardsArrived(signal) {
+  const deadline = Date.now() + PAGE_ARRIVAL_MS;
+  while (Date.now() < deadline && !signal?.aborted) {
+    const ping = await chrome.tabs.sendMessage(feedTabId, { type: "PING" }).catch(() => null);
+    if (!Array.isArray(ping?.keys) || ping.keys.every((key) => checked.has(key))) return true;
+    await sleep(300);
+  }
+  return false;
+}
+
+// This term's search has no more to give: what it caught is built, and the
+// next term is looked at after — nextTermWhenDone waits a moment first.
+function endTerm() {
+  if (termOver === "reported") return; // the run's last term, already over
+  termOver = true;
+  if (queue.length) buildNow();
+  else nextTermWhenDone();
 }
 
 // Resolves once the click has taken the tab somewhere and the page is loaded:
@@ -875,26 +938,76 @@ let batching = false;
 // pipelineIdle, candidates held over for the next batch do not count.
 const batchDone = () => !checking && !draining && !queue.length;
 
-async function nextBatchWhenDone() {
-  if (!SOURCES[runSource]?.scrollBatches || batching || acceptedCount < MAX_STORED || !batchDone()) return;
-  batching = true;
+// What the feed tab last said about its scrolling: whether it is scrolling
+// now, why its last pass ended, and how many cards it had seen by then.
+// Kept from its FEED_STATUS messages.
+let feedScroll = { harvesting: false, endReason: null, total: 0 };
+// Scroll-ons in a row that turned up no card the feed had not seen.
+let dryScrolls = 0;
+let lastScrollTotal = -1;
+const MAX_DRY_SCROLLS = 2;
 
+function resetFeedScroll() {
+  feedScroll = { harvesting: false, endReason: null, total: 0 };
+  dryScrolls = 0;
+  lastScrollTotal = -1;
+}
+
+function noteFeedStatus(status, tabId) {
+  if (tabId !== feedTabId || !status) return;
+  feedScroll = {
+    harvesting: !!status.harvesting,
+    endReason: status.harvestComplete ? status.endReason || feedScroll.endReason : feedScroll.endReason,
+    total: typeof status.total === "number" ? status.total : feedScroll.total
+  };
+  // A pass that ends while everything caught is already done is the moment
+  // to look again; one that ends with work still going is looked at when the
+  // work is done.
+  if (status.harvestComplete) nextBatchWhenDone();
+  // Jobright's feed has run out: the search is over, and what it caught is built.
+  if (status.harvestComplete && status.endReason === "bottom") buildNow();
+  const source = SOURCES[runSource];
+  // Glassdoor's list is read to its end unless it stopped at a full list,
+  // which the batch step goes on from.
+  if (status.harvestComplete && !status.atLimit && source && !source.nextPage && !source.scrollBatches && !termOver) {
+    endTerm();
+  }
+}
+
+// What a board does for more once its full list has been cleared.
+const NEXT_STEP = { scroll: "scrolling for more", page: "on to the next page", more: "loading more" };
+
+async function nextBatchWhenDone() {
+  const source = SOURCES[runSource];
+  if (!source || batching) return;
+  // Not full yet: Jobright's search scrolls on for more before anything is built.
+  if (acceptedCount < MAX_STORED) return source.scrollBatches && searchIdle() ? scrollMoreWhenDone() : undefined;
+  if (!batchDone()) return;
+  batching = true;
   try {
     // A job still arriving, or a queue about to pick one up, is not done.
     await sleep(PAGE_SETTLE_MS);
     const signal = runSignal();
-    if (!signal || signal.aborted || acceptedCount < MAX_STORED || !batchDone()) return;
+    if (!signal || signal.aborted || !visitEnabled || acceptedCount < MAX_STORED || !batchDone()) return;
     if (feedTabId === null) return;
 
     batchesDone++;
     acceptedCount = 0;
     await clearJobs();
-    broadcast({ type: "BATCH_CLEARED", batch: batchesDone, size: MAX_STORED });
+    const next = source.scrollBatches ? "scroll" : source.nextPage ? "page" : "more";
+    broadcast({
+      type: "BATCH_CLEARED", batch: batchesDone, done: MAX_STORED, size: MAX_STORED,
+      board: source.name, next: NEXT_STEP[next]
+    });
 
-    // The held-over candidates first, then the feed scrolls on for more.
+    // The held-over candidates first, then more from the board: Jobright
+    // scrolls on, a paged board turns its page once this one's cards are all
+    // through (nextPageWhenDone, called as the checks finish), and Glassdoor
+    // loads more.
     tellFeed({ type: "ACCEPTED", count: 0 });
     drainChecks();
-    await tell(feedTabId, { type: "NEXT_BATCH" }, SOURCES[runSource].script);
+    if (next === "scroll") await tell(feedTabId, { type: "NEXT_BATCH" }, source.script);
+    else if (next === "more") await streamFeed(feedTabId, source, runOptions, signal);
   } catch (err) {
     console.warn("[jobright] could not start the next batch:", err?.message || err);
     reportFeedError(err);
@@ -903,6 +1016,60 @@ async function nextBatchWhenDone() {
   }
 }
 
+// The list is not full, but every job caught so far has been checked and has
+// had its resume built and sent — and the feed's last scroll pass stopped
+// short of the list's end (its scroll budget, or the bound on cards seen
+// per pass). Those jobs are finished, so the list is cleared of them — in
+// storage, the badge and the panel, as a full batch is — and the feed
+// scrolls on from where it stopped to catch more. A pass that caught nothing
+// has nothing to clear and just scrolls on. This goes on until the feed
+// genuinely ends (the last list is kept then, to be looked at), or
+// MAX_DRY_SCROLLS passes in a row turn up nothing new.
+async function scrollMoreWhenDone() {
+  const reason = feedScroll.endReason;
+  // "bottom" is looked past too: a feed that loads more at its end can seem
+  // to have ended. MAX_DRY_SCROLLS passes in a row with nothing new end it.
+  if (feedScroll.harvesting || !reason || reason === "stopped") return;
+  if (checkQueue.length || feedTabId === null) return;
+  batching = true;
+  try {
+    await sleep(PAGE_SETTLE_MS);
+    const signal = runSignal();
+    if (!signal || signal.aborted || !searchIdle() || feedScroll.harvesting) return;
+    if (acceptedCount >= MAX_STORED) return; // filled meanwhile: the batch step's turn
+
+    dryScrolls = feedScroll.total === lastScrollTotal ? dryScrolls + 1 : 0;
+    lastScrollTotal = feedScroll.total;
+    if (dryScrolls >= MAX_DRY_SCROLLS) {
+      broadcast({ type: "FEED_DONE", reason: "no more new cards below" });
+      buildNow(); // the search is over: what it caught is built
+      return;
+    }
+
+    feedScroll = { ...feedScroll, harvesting: true, endReason: null };
+    let reply;
+    // Jobs caught and still waiting to be built: the search goes on, and the
+    // list keeps them. Jobs built already: the list is cleared of them first.
+    if (acceptedCount > 0 && !queue.length) {
+      const done = acceptedCount;
+      batchesDone++;
+      acceptedCount = 0;
+      await clearJobs();
+      broadcast({ type: "BATCH_CLEARED", batch: batchesDone, done, size: MAX_STORED });
+      tellFeed({ type: "ACCEPTED", count: 0 });
+      // NEXT_BATCH: the feed's own count starts again too, and it scrolls on.
+      reply = await tell(feedTabId, { type: "NEXT_BATCH" }, SOURCES[runSource].script);
+    } else {
+      broadcast({ type: "SCROLLING_MORE", accepted: 0, size: MAX_STORED });
+      reply = await tell(feedTabId, { type: "SCROLL_MORE" }, SOURCES[runSource].script);
+    }
+    if (!reply?.ok && !reply?.harvesting) feedScroll = { ...feedScroll, harvesting: false, endReason: "stopped" };
+  } catch (err) {
+    console.warn("[jobright] could not scroll on for more:", err?.message || err);
+  } finally {
+    batching = false;
+  }
+}
 // ---------------------------------------------------------------------------
 // Indeed: the search a run opens
 //
@@ -956,6 +1123,200 @@ function indeedSearchUrl(search) {
   return url.href;
 }
 
+// ---------------------------------------------------------------------------
+// Search terms, on every board that can be searched
+//
+// The panel's search form goes to Dice, Glassdoor and ZipRecruiter as well as
+// Indeed. Its search box can hold several terms, separated by ";" or new
+// lines: a run searches for each in turn, one after the other, on the same
+// tab (see nextTermWhenDone). Indeed needs at least one term; on the other
+// boards an empty box opens the board's fixed search, as before.
+// ---------------------------------------------------------------------------
+
+const MAX_TERMS = 20;
+
+function searchTerms(search) {
+  const seen = new Set();
+  return String(search?.role || "")
+    .split(/[;\n]+/)
+    .map((t) => t.trim().slice(0, 200))
+    .filter((t) => t && !seen.has(t.toLowerCase()) && seen.add(t.toLowerCase()))
+    .slice(0, MAX_TERMS);
+}
+
+// Dice's own search page, as its search box and filters write it.
+const DICE_JOB_TYPES = { fulltime: "FULLTIME", parttime: "PARTTIME", contract: "CONTRACTS" };
+const DICE_POSTED = { 1: "ONE", 3: "THREE", 7: "SEVEN" };
+function diceSearchUrl(search) {
+  const url = new URL("https://www.dice.com/jobs");
+  url.searchParams.set("q", search.role);
+  url.searchParams.set("countryCode", "US");
+  url.searchParams.set("location", search.location || "United States");
+  if (DICE_JOB_TYPES[search.jobType]) url.searchParams.set("filters.employmentType", DICE_JOB_TYPES[search.jobType]);
+  const posted = DICE_POSTED[search.postedDays] || (search.postedDays ? "SEVEN" : "");
+  if (posted) url.searchParams.set("filters.postedDate", posted);
+  if (search.remote) url.searchParams.set("filters.workplaceTypes", "Remote");
+  return url.href;
+}
+
+// ZipRecruiter's search page, as its search box and refine filters write it.
+const ZIP_JOB_TYPES = { fulltime: "full_time", parttime: "part_time", contract: "contract", internship: "internship" };
+function zipRecruiterSearchUrl(search) {
+  const url = new URL("https://www.ziprecruiter.com/jobs-search");
+  url.searchParams.set("search", search.role);
+  url.searchParams.set("location", search.location || "United States");
+  if (search.postedDays) url.searchParams.set("days", String(search.postedDays));
+  if (ZIP_JOB_TYPES[search.jobType]) url.searchParams.set("refine_by_employment", `employment_type:${ZIP_JOB_TYPES[search.jobType]}`);
+  if (search.remote) url.searchParams.set("refine_by_location_type", "only_remote");
+  return url.href;
+}
+
+// Glassdoor's keyword search; it forwards to its own /Job/…SRCH… address.
+function glassdoorSearchUrl(search) {
+  const url = new URL("https://www.glassdoor.com/Job/jobs.htm");
+  url.searchParams.set("sc.keyword", search.role);
+  if (search.location) url.searchParams.set("locKeyword", search.location);
+  if (search.postedDays) url.searchParams.set("fromAge", String(search.postedDays));
+  if (search.remote) url.searchParams.set("remoteWorkType", "1");
+  return url.href;
+}
+
+// The page a run opens for one term — the board's fixed page when there is
+// no term and the board has one.
+function searchPageUrl(source, search, term) {
+  if (term && source.searchUrl) return source.searchUrl({ ...search, role: term });
+  return source.url;
+}
+
+// The run's search terms, in order, and which one it is on.
+let runSearch = null;
+let runTerms = [];
+let termIndex = 0;
+// The current term's results are all in: its last page is done (a paged
+// board), or its list has been read to the end (Glassdoor). "reported" once
+// the panel has been told the last term is finished.
+let termOver = false;
+let switchingTerm = false;
+
+function resetTerms(search = null, terms = []) {
+  runSearch = search;
+  runTerms = terms;
+  termIndex = 0;
+  termOver = false;
+}
+
+// Once a term's results are finished, every job caught for it checked and
+// read, the same tab goes on to the next term's search, from an empty list.
+// The last term's list is kept, to be looked at.
+async function nextTermWhenDone() {
+  if (!termOver || termOver === "reported" || switchingTerm || verifyPause || !pipelineIdle()) return;
+  if (termIndex + 1 >= runTerms.length) {
+    if (runTerms.length > 1) {
+      termOver = "reported";
+      broadcast({ type: "TERMS_DONE", total: runTerms.length });
+    }
+    return;
+  }
+  switchingTerm = true;
+  try {
+    await sleep(PAGE_SETTLE_MS);
+    const signal = runSignal();
+    if (!signal || signal.aborted || !visitEnabled || !pipelineIdle() || feedTabId === null) return;
+    const source = SOURCES[runSource];
+    const tab = await chrome.tabs.get(feedTabId).catch(() => null);
+    if (!tab) return;
+
+    termIndex++;
+    termOver = false;
+    acceptedCount = 0;
+    pagesTurned = 0;
+    await clearJobs();
+    const term = runTerms[termIndex];
+    broadcast({ type: "TERM_STARTED", term, index: termIndex, total: runTerms.length });
+
+    await chrome.tabs.update(feedTabId, { url: searchPageUrl(source, runSearch, term) });
+    await waitForPageChange(feedTabId, tab.url, signal);
+    if (signal.aborted) return;
+    await streamFeed(feedTabId, source, runOptions, signal);
+  } catch (err) {
+    if (!wasStopped(err)) {
+      console.warn("[jobright] could not search for the next term:", err?.message || err);
+      reportFeedError(err);
+    }
+  } finally {
+    switchingTerm = false;
+  }
+  // A first page whose cards were all seen before queues nothing.
+  nextPageWhenDone();
+  nextTermWhenDone();
+}
+
+// ---------------------------------------------------------------------------
+// Capture only
+//
+// A run with options.capture set reads each job's information and keeps it,
+// and nothing else: no collector check, no ChatGPT, no resume, no save.
+// Every card found is caught; each is opened (or read in the pane) for its
+// description; and { term, board, company, title, url, location, description }
+// goes into the "captures" list, which outlives Clear and the list clears
+// between batches and terms, and is exported from the panel as CSV or JSON.
+// ---------------------------------------------------------------------------
+
+let captureMode = false;
+let runOptions = {};
+const MAX_CAPTURES = 5000;
+
+const HTML_ENTITIES = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
+
+// The description as plain text: each block and break on a line of its own,
+// list items as bullets, every other tag gone.
+function htmlToText(html) {
+  return String(html || "")
+    .replace(/<(script|style|noscript)[\s\S]*?<\/\1>/gi, "")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<li[^>]*>/gi, "\n• ")
+    .replace(/<\/(p|div|li|ul|ol|h[1-6]|section|tr|table)>/gi, "\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (m, e) => {
+      const name = e.toLowerCase();
+      if (Object.hasOwn(HTML_ENTITIES, name)) return HTML_ENTITIES[name];
+      if (name[0] !== "#") return m;
+      const code = name[1] === "x" ? parseInt(name.slice(2), 16) : parseInt(name.slice(1), 10);
+      return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : m;
+    })
+    .replace(/[ \t ]+/g, " ")
+    .replace(/ *\n */g, "\n")
+    .replace(/\n{2,}/g, "\n") // one block, one line
+    .trim();
+}
+
+async function addCapture(job, detail) {
+  const record = {
+    term: runTerms[termIndex] || "",
+    board: SOURCES[job.source]?.name || SOURCES[runSource]?.name || job.source || "",
+    company: job.company || detail?.company || "",
+    title: job.title || detail?.title || "",
+    // ZipRecruiter's card link does not reliably open the job; the address it
+    // was read at does — the same choice saveJob makes.
+    url: (job.source === "ziprecruiter" && detail?.url) || job.href || detail?.url || "",
+    location: job.location || detail?.location || "",
+    description: htmlToText(detail?.descriptionHtml) || detail?.descriptionText || "",
+    note: detail?.ok
+      ? detail.isLinkedIn ? "posted on LinkedIn — description not read" : ""
+      : detail?.error || "not read",
+    capturedAt: new Date().toISOString()
+  };
+  return serialize(async () => {
+    const { captures = [] } = await chrome.storage.local.get("captures");
+    if (record.url && captures.some((c) => c.url === record.url)) return captures.length;
+    captures.push(record);
+    const kept = captures.slice(-MAX_CAPTURES);
+    await chrome.storage.local.set({ captures: kept });
+    broadcast({ type: "CAPTURE_ADDED", count: kept.length, record });
+    return kept.length;
+  });
+}
+
 // Tells the feed tab how many candidates have survived the filter, so it knows
 // whether it still needs to scroll for more.
 async function tellFeed(message) {
@@ -967,7 +1328,7 @@ function enqueue(job) {
   if (!visitEnabled || !job?.href || queued.has(job.key)) return;
   queued.add(job.key);
   queue.push(job);
-  drain();
+  if (building) drain(); // otherwise it waits for the search to finish
 }
 
 function broadcast(message) {
@@ -1077,6 +1438,11 @@ async function drain() {
         break;
       }
 
+      if (captureMode) {
+        await addCapture(job, detail);
+        detail.captured = true;
+      }
+
       visitedCount++;
       active = null; // its row now shows the outcome instead
       await updateJob(job.key, { detail });
@@ -1089,10 +1455,12 @@ async function drain() {
   } finally {
     draining = false;
     active = null;
+    if (!queue.length) building = false; // built: the next search can begin
     releaseAwake();
     queueStatus({ drained: true });
     nextPageWhenDone();
     nextBatchWhenDone();
+    nextTermWhenDone();
   }
 }
 
@@ -2480,7 +2848,14 @@ const wrapCoverLetter = (text) =>
 // resume and cover letter, filed under that profile's tab (`user`).
 async function saveJob(job, detail, resume, signal, user) {
   const payload = {
-    job_url: job.href,
+    // The card's own href, normally — except on ZipRecruiter, where the
+    // card's own link does not reliably resolve as the job's own page on a
+    // fresh visit. There, the job's real link is only known once it has
+    // actually been read: the address the browser is left on once the card
+    // is clicked and its description comes up (detail.url) — see readInPane
+    // in content-ziprecruiter.js, and the matching line in sidepanel.js's
+    // addDetail.
+    job_url: job.source === "ziprecruiter" ? detail?.url || job.href : job.href,
     job_des: detail.descriptionHtml,
     resume: resume?.html ?? null,
     coverletter: wrapCoverLetter(resume?.coverletter),
@@ -2490,10 +2865,13 @@ async function saveJob(job, detail, resume, signal, user) {
   };
 
   try {
-    const { res } = await postJson(SAVE_ENDPOINT, payload, signal);
-    return res.ok
-      ? { ok: true, status: res.status }
-      : { ok: false, status: res.status, error: `HTTP ${res.status} ${res.statusText}` };
+    const { res, data } = await postJson(SAVE_ENDPOINT, payload, signal);
+    if (res.ok) return { ok: true, status: res.status };
+    // The collector's own error body, when it sends one — a bare status code
+    // on a 500 says nothing about which part of the payload it choked on.
+    const detailMsg = data?.error?.message || data?.error || data?.message || data?.detail;
+    const error = detailMsg ? `HTTP ${res.status} — ${detailMsg}` : `HTTP ${res.status} ${res.statusText}`;
+    return { ok: false, status: res.status, error };
   } catch (err) {
     if (signal?.aborted) return { ok: false, stopped: true, error: STOPPED };
     return { ok: false, error: describeFetchError(err, SAVE_ENDPOINT) };
@@ -2622,25 +3000,33 @@ function stoppable(promise, signal) {
   ]);
 }
 
-// Indeed: the job is read on the search page the run is on. The card is
-// clicked in the list tab and the description tag it fills read (READ_PANE
-// in content-indeed.js); no tab is opened for the job, ever. A description
-// that could not be read for it is a reading that failed, said on the job's
-// row like any other.
+// Indeed and ZipRecruiter: the job is read on the search page the run is on.
+// The card is clicked in the list tab and the description it brings up read
+// from the right-hand pane (READ_PANE in content-indeed.js / content-
+// ziprecruiter.js); no tab is opened for the job, ever. A description that
+// could not be read for it is a reading that failed, said on the job's row
+// like any other.
 //
 // The click itself cannot open a tab — the content script cancels the
-// browser's own action once Indeed's handler has had the click — but
-// Indeed's own script could still open one from its handler. So while the
+// browser's own action once the site's own handler has had the click — but
+// the site's own script could still open one from its handler. So while the
 // card is being read, a tab the search tab opens is closed again at once,
 // and the search tab put back in front.
 async function readInPane(job, signal, onStage) {
   const script = sourceOf(job).script;
   const listTab = feedTabId;
-  if (listTab === null) return { ok: false, error: "the Indeed search tab is gone — press Start again" };
-  const jk = job.jk || new URL(job.href).searchParams.get("jk");
+  if (listTab === null) return { ok: false, error: "the search tab is gone — press Start again" };
+  // Indeed's own key, when there is one; ZipRecruiter's content script finds
+  // its card by its own key instead (job.key), since a ZipRecruiter job
+  // carries no href at all — its card's own link does not resolve as a
+  // standalone page, so none is shown or saved for it.
+  const jk = job.jk || (job.href ? new URL(job.href).searchParams.get("jk") : null);
   const ask = async () => {
     await ensureContentScript(listTab, { signal, script });
-    return stoppable(chrome.tabs.sendMessage(listTab, { type: "READ_PANE", jk, title: job.title }), signal);
+    return stoppable(
+      chrome.tabs.sendMessage(listTab, { type: "READ_PANE", jk, href: job.href, key: job.key, title: job.title }),
+      signal
+    );
   };
 
   const closeStray = (tab) => {
@@ -2661,11 +3047,11 @@ async function readInPane(job, signal, onStage) {
       detail = await ask();
     }
     if (signal?.aborted) throw new Error(STOPPED);
-    if (!detail || typeof detail !== "object") throw new Error("no reading came back from the Indeed search tab");
+    if (!detail || typeof detail !== "object") throw new Error("no reading came back from the search tab");
     return detail;
   } catch (err) {
     if (wasStopped(err) || signal?.aborted) throw new Error(STOPPED);
-    return { ok: false, error: `the Indeed search tab did not answer (${err?.message || err})` };
+    return { ok: false, error: `the search tab did not answer (${err?.message || err})` };
   } finally {
     chrome.tabs.onCreated.removeListener(closeStray);
   }
@@ -2718,6 +3104,99 @@ async function readJobPage(job, signal, onStage) {
 }
 
 // ---------------------------------------------------------------------------
+// Before a run: is everything a job catch needs in place?
+//
+// Asked by the panel when Start is pressed, before START itself. Each check
+// is { key, label, state, detail }: "ok", "warn" (the run goes ahead, but
+// something will be missing from what it makes) or "fail" (the run would
+// not get anywhere, so it is not started). The panel shows them as a list.
+// START keeps its own checks; this is the same ground, said up front and all
+// at once rather than one error at a time.
+// ---------------------------------------------------------------------------
+
+async function preflight(options = {}) {
+  const checks = [];
+  const add = (key, label, state, detail) => checks.push({ key, label, state, detail });
+
+  // The job board.
+  const sourceKey = options.source || "jobright";
+  const source = SOURCES[sourceKey];
+  if (!source) {
+    add("board", "Job board", "fail", `${sourceKey} has no fetcher yet — pick Jobright, Dice, Glassdoor, Indeed or ZipRecruiter`);
+  } else if (source.searched && !searchTerms(options.search).length) {
+    add("board", "Job board", "fail", `${source.name}: type a search term`);
+  } else {
+    const terms = source.searchUrl ? searchTerms(options.search) : [];
+    add(
+      "board",
+      "Job board",
+      "ok",
+      terms.length ? `${source.name} · ${terms.map((t) => `“${t}”`).join(", ")}` : source.name
+    );
+  }
+
+  // Capture only needs the board: nothing is checked, written or sent.
+  if (options.capture) {
+    add("capture", "Capture only", "ok", "company, title, link and description of each job — no resumes, nothing sent");
+    return { ready: !checks.some((c) => c.state === "fail"), checks };
+  }
+
+  await migrateLegacySettings();
+  const settings = await getSettings();
+
+  // The collector, and the profiles it holds.
+  const list = await listProfiles();
+  if (!list.ok) {
+    add("collector", "Collector (localhost:4500)", "fail", `not reachable — ${list.error}`);
+  } else {
+    add("collector", "Collector (localhost:4500)", "ok", `${list.profiles.length} dashboard profile${list.profiles.length === 1 ? "" : "s"}`);
+  }
+
+  let profiles = [];
+  if (!settings.country || !settings.role) {
+    add("profiles", "Profiles", "fail", "no Country and Role picked — choose them in Settings → Profile");
+  } else if (list.ok) {
+    profiles = matchingProfiles(list.profiles, settings);
+    add(
+      "profiles",
+      "Profiles",
+      profiles.length ? "ok" : "fail",
+      profiles.length
+        ? `${settings.country} / ${settings.role}: ${profiles.map((p) => p.name).join(", ")}`
+        : `no dashboard profile has Country “${settings.country}” and Role “${settings.role}”`
+    );
+  } else {
+    add("profiles", "Profiles", "warn", `${settings.country} / ${settings.role} — not checked, the collector did not answer`);
+  }
+
+  // ChatGPT.
+  add(
+    "chatgpt",
+    "ChatGPT",
+    settings.apiKey ? "ok" : "fail",
+    settings.apiKey ? `API key set · ${settings.model}` : "no API key — add it in Settings → ChatGPT setting; without it no resume is written"
+  );
+
+  // Each profile's resume: its style loads, and it has a master resume to work from.
+  for (const profile of profiles) {
+    const writer = writerFor(settings, profile);
+    try {
+      await loadTemplate(writer.resumeStyle, profile.id);
+      const noMaster = writer.masterResumeMode !== "none" && !String(writer.masterResume || "").trim();
+      add(
+        `resume:${profile.id}`,
+        `Resume · ${profile.name}`,
+        noMaster ? "warn" : "ok",
+        noMaster ? `style ${writer.resumeStyle} · no master resume set — the job description goes out on its own` : `style ${writer.resumeStyle}`
+      );
+    } catch (err) {
+      add(`resume:${profile.id}`, `Resume · ${profile.name}`, "fail", err?.message || String(err));
+    }
+  }
+
+  return { ready: !checks.some((c) => c.state === "fail"), checks };
+}
+// ---------------------------------------------------------------------------
 // Panel API
 // ---------------------------------------------------------------------------
 
@@ -2735,6 +3214,9 @@ async function handle(msg) {
       if (verifyPause) await focusTab(verifyPause.tabId);
       return { ok: true, pause: verifyPause };
 
+    case "PREFLIGHT":
+      return { ok: true, ...(await preflight(msg.options)) };
+
     // Opening the URL and starting the stream are one action, so the panel
     // only has to say "start".
     case "START": {
@@ -2747,28 +3229,35 @@ async function handle(msg) {
         return { ok: false, error: `${sourceKey} is not supported yet — only Jobright, Dice, Glassdoor, Indeed and ZipRecruiter` };
       }
 
-      // Indeed opens the search the panel asked for rather than a fixed page,
-      // and a search needs something to search for.
-      const search = source.searched ? indeedSearchOf(msg.options?.search) : null;
-      if (search && !search.role) return { ok: false, error: "type a role to search Indeed for" };
+      // The panel's search terms, searched one after the other. Indeed opens
+      // only a search, so it needs one; the other boards fall back on their
+      // fixed page without.
+      const search = source.searchUrl ? indeedSearchOf(msg.options?.search) : null;
+      const terms = search ? searchTerms(msg.options?.search) : [];
+      if (source.searched && !terms.length) return { ok: false, error: `type a search term to search ${source.name} for` };
+
+      captureMode = !!msg.options?.capture;
 
       // A run that saves builds resumes for the profiles picked in Settings,
       // and with none to build for it would only open pages to read them —
       // said before a tab is opened rather than against every job.
-      if (msg.options?.saveJobs !== false) {
+      if (!captureMode && msg.options?.saveJobs !== false) {
         await migrateLegacySettings();
         const selection = await selectedProfiles();
         if (!selection.ok) return { ok: false, error: selection.error };
       }
 
-      visitEnabled = msg.options?.visitJobs !== false;
-      saveEnabled = msg.options?.saveJobs !== false;
+      visitEnabled = captureMode || msg.options?.visitJobs !== false;
+      saveEnabled = !captureMode && msg.options?.saveJobs !== false;
       runSource = sourceKey;
+      runOptions = msg.options || {};
+      resetTerms(search, terms);
       pagesTurned = 0;
       batchesDone = 0;
+      resetFeedScroll();
       beginRun();
 
-      const tabId = await openFeedTab(source, search ? indeedSearchUrl(search) : source.url);
+      const tabId = await openFeedTab(source, searchPageUrl(source, search, terms[0]));
       const reply = await tell(tabId, { type: "START_STREAM", options: msg.options }, source.script);
 
       // A human check in front of the list is waited out on its own, not
@@ -2785,9 +3274,12 @@ async function handle(msg) {
       // Anything left over from a previous Stop resumes now.
       tellFeed({ type: "ACCEPTED", count: acceptedCount });
       drainChecks();
-      if (visitEnabled) drain();
+      // Jobs a Stop left unbuilt are built first; the search goes on after.
+      if (visitEnabled) buildNow();
 
-      return { ok: true, tabId, visitEnabled, saveEnabled, endpoint: SAVE_ENDPOINT, ...reply };
+      return {
+        ok: true, tabId, visitEnabled, saveEnabled, captureMode, terms, endpoint: SAVE_ENDPOINT, ...reply
+      };
     }
 
     // Everything in flight, at once: the feed tab's observer and scroll
@@ -2796,6 +3288,7 @@ async function handle(msg) {
     // away, so a later Start carries on from where this left off.
     case "STOP": {
       visitEnabled = false;
+      building = false;
       abortRun();
 
       // Every board's list tab, in case more than one is open.
@@ -2917,8 +3410,19 @@ async function handle(msg) {
     case "GENERATE_MANUAL":
       return generateManual(msg.job);
 
+    case "GET_CAPTURES": {
+      const { captures = [] } = await chrome.storage.local.get("captures");
+      return { ok: true, captures };
+    }
+
+    case "CLEAR_CAPTURES":
+      await serialize(() => chrome.storage.local.set({ captures: [] }));
+      return { ok: true };
+
     case "CLEAR": {
       batchesDone = 0;
+      building = false;
+      resetFeedScroll();
       queue.length = 0;
       queued.clear();
       checkQueue.length = 0;
@@ -2953,7 +3457,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (sender.tab) enqueueCheck(msg.job);
     return false;
   }
-  if (msg?.type === "FEED_STATUS") return false;
+  if (msg?.type === "FEED_STATUS") {
+    noteFeedStatus(msg.status, sender.tab?.id);
+    return false;
+  }
   // Auto Fill's messages to the sample form page; the page answers them.
   if (msg?.type === "AUTOFILL_RUN" || msg?.type === "AUTOFILL_CATCH") return false;
 

@@ -42,7 +42,7 @@ function main() {
 
   // Keep in step with MAX_ITEMS in content.js, sidepanel.js and MAX_STORED in
   // background.js — how many new jobs a run collects.
-  const MAX_ITEMS = 50;
+  const MAX_ITEMS = 30;
   const MAX_CANDIDATES = 400;
   const MAX_LOAD_MORE = 15;
   const LOAD_WAIT_MS = 6000;
