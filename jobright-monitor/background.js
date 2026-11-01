@@ -247,7 +247,7 @@ async function removeCustomStyle(profileId, name) {
 }
 
 // ---------------------------------------------------------------------------
-// Settings — the OpenAI key and model set under ChatGPT setting, and the
+// Settings — the OpenAI key and model set under ChatGPT Settings, and the
 // country and role picked under Profile.
 //
 // The prompt, master resume and resume style are not here: each profile has
@@ -278,9 +278,9 @@ const DEFAULT_PROMPT = [
     "Use only experience found in the master resume — never invent employers,",
     "titles, dates or achievements.",
     "",
-    "Return ONLY JavaScript source, no prose and no code fence, in exactly this form:",
+    "Return ONLY this JSON object, no prose and no code fence, in exactly this form:",
     "",
-    "const resume = {",
+    "{",
     '  "name": "Full name",',
     '  "title": "Headline title",',
     '  "contact": {',
@@ -305,8 +305,9 @@ const DEFAULT_PROMPT = [
     '      { "degree": "Degree in field of study", "school": "School", "year": "Year" }',
     "    ]",
     "  },",
-    '  "cover_letter": "the cover letter for this job, plain text"',
-    "};",
+    '  "cover_letter": "the cover letter for this job, plain text",',
+    '  "ATS_score": "how well this resume matches the job description, as a score out of 100"',
+    "}",
     "",
     "experience holds one object per role, most recent first, 3 to 7 roles.",
     "education holds one object per degree. Add \"certifications\": [\"Certification name\"]",
@@ -1610,19 +1611,34 @@ function matchingProfiles(profiles, settings) {
   return profiles.filter((p) => matchKey(p.sheet?.country) === country && matchKey(p.sheet?.role) === role);
 }
 
+// The bid profile linked to the browser profile being worked in, if any. The
+// desktop app keeps it in storage as the browser profile changes (Browser
+// Profile button); the extension never sets it. { id } alone is a link whose
+// bid profile is no longer on the dashboard.
+async function linkedProfile(profiles) {
+  const { linkedBidProfile: id = null } = await chrome.storage.local.get("linkedBidProfile");
+  if (id === null) return null;
+  return { id, profile: profiles.find((p) => String(p.id) === String(id)) || null };
+}
+
+const LINK_GONE = "the bid profile linked to this browser profile is no longer on the dashboard — link another under Browser Profile";
+
 // The profiles a job is built for, read fresh each time, so one edited
-// mid-run is written with what was saved last.
+// mid-run is written with what was saved last. A linked bid profile is the
+// only one; otherwise Settings' country and role pick them.
 async function selectedProfiles() {
   const settings = await getSettings();
   const list = await listProfiles();
   if (!list.ok) return { ok: false, error: `could not load the profiles — ${list.error}` };
+  const linked = await linkedProfile(list.profiles);
+  if (linked) return linked.profile ? { ok: true, settings, profiles: [linked.profile] } : { ok: false, error: LINK_GONE };
   const profiles = matchingProfiles(list.profiles, settings);
   if (!profiles.length) {
     return {
       ok: false,
       error:
         !settings.country || !settings.role
-          ? "no country and role picked — choose them in Settings → Profile"
+          ? "no country and role picked — choose them in User Settings"
           : `no profile on the dashboard has Country "${settings.country}" and Role "${settings.role}"`
     };
   }
@@ -2327,7 +2343,10 @@ function fromProfileShape(d) {
     // the degree slot and leaves the field empty.
     EDUCATION: list(r.education).map((e) => [str(e.school), [[str(e.degree), str(e.field)]], str(e.year ?? e.duration)]),
     // cover_letter beside "resume", where the prompt asks for it — or inside it.
-    coverletter: coverLetterOf(d) ?? coverLetterOf(r)
+    coverletter: coverLetterOf(d) ?? coverLetterOf(r),
+    // How well the resume fits the job, as the model scores it: shown on the
+    // job's row, not put on the resume.
+    atsScore: d.ATS_score ?? d.ats_score ?? r.ATS_score ?? r.ats_score
   };
 }
 
@@ -2459,7 +2478,8 @@ function parseModelAnswer(raw) {
     EXPERIENCE,
     EDUCATION,
     CERTIFICATIONS: strings(data.CERTIFICATIONS),
-    coverletter
+    coverletter,
+    atsScore: data.atsScore == null ? "" : String(data.atsScore).trim()
   };
 }
 
@@ -2563,7 +2583,7 @@ const GENERATE_TIMEOUT_MS = 120000;
 // wait the panel shows against the job.
 async function generateResume(writer, detail, signal, onStage = () => {}) {
   if (!writer.apiKey) {
-    return { ok: false, skipped: true, error: "no API key set — open ChatGPT setting on the Generate tab" };
+    return { ok: false, skipped: true, error: "no API key set — add it under ChatGPT Settings (the GPT button)" };
   }
   // The model is given the readable text, not the markup: the HTML is chrome
   // it would have to pay tokens to ignore. The markup still goes to job_des.
@@ -2595,7 +2615,7 @@ async function generateResume(writer, detail, signal, onStage = () => {}) {
   if (!useMaster) {
     console.log(`[jobright] ${writer.name}: master resume switched off — sending the job description only`);
   } else if (!masterResume) {
-    console.warn(`[jobright] ${writer.name}: no master resume set in Settings → Profile — sending the job description only`);
+    console.warn(`[jobright] ${writer.name}: no master resume set in User Settings — sending the job description only`);
   }
 
   const messages = [
@@ -2767,7 +2787,7 @@ async function testConnection(apiKey, model) {
 // ---------------------------------------------------------------------------
 // The models the API key can use
 //
-// What the Model list under ChatGPT setting offers: OpenAI's own answer to
+// What the Model list under ChatGPT Settings offers: OpenAI's own answer to
 // "which models can this key use" (GET /v1/models), cut down to the ones that
 // can write a resume here — text models that answer Chat Completions. Newest
 // first, and the dated snapshots (gpt-4o-2024-08-06) apart from the names
@@ -3110,7 +3130,7 @@ async function readJobPage(job, signal, onStage) {
 // { email_address, company_name, email_title, email_content, arrived_date }.
 // Picking one sends them an email from Gmail: a new message, the recruiter as
 // the recipient, RECRUITER_SUBJECT as the subject, and the Summary of the
-// profile picked in the tab (Settings → Profile) as the body — then Send.
+// profile picked in the tab (User Settings) as the body — then Send.
 //
 // The tab is opened and filled through chrome.tabs and chrome.scripting. In
 // the extension those are Chrome's own; in the desktop app they are the
@@ -3131,12 +3151,13 @@ const MAX_RECRUITERS = 2000;
 const GMAIL_LOAD_TIMEOUT = 45000;
 const FILL_ATTEMPTS = 4;
 const SEND_CONFIRM_TIMEOUT = 30000;
+const RECRUITER_SENDS_ENDPOINT = `${API_BASE}/api/recruiter-sends`;
 
 const isEmail = (s) => /^[^\s@<>()"',;]+@[^\s@<>()"',;]+\.[^\s@<>()"',;]+$/.test(s);
-const recruiterKey = (r) => `${r.email_address.toLowerCase()}|${r.email_title.toLowerCase()}`;
+const addressKey = (address) => String(address || "").trim().toLowerCase();
 
 // The imported entries as stored: those with a usable address, trimmed, one
-// per address and title.
+// per address.
 function recruitersOf(raw) {
   const list = Array.isArray(raw) ? raw : raw && typeof raw === "object" ? [raw] : [];
   const seen = new Set();
@@ -3151,7 +3172,7 @@ function recruitersOf(raw) {
       arrived_date: String(e.arrived_date || "").trim()
     };
     if (!isEmail(r.email_address)) continue;
-    const key = recruiterKey(r);
+    const key = addressKey(r.email_address);
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(r);
@@ -3164,17 +3185,137 @@ async function getRecruiters() {
   return recruiters;
 }
 
-// A new import replaces the list; an entry imported before keeps when it was
-// sent to.
-async function importRecruiters(raw) {
+// Whose list it is. A recruiter belongs to the bid profile it was imported
+// under (entry.owner), and is seen and used by that profile and any other
+// with the same country and role; no other sees it. An entry from before
+// lists had owners is everyone's.
+const bidGroup = (profile) => {
+  const country = matchKey(profile?.sheet?.country ?? profile?.country);
+  const role = matchKey(profile?.sheet?.role ?? profile?.role);
+  return country && role ? `${country}|${role}` : null;
+};
+
+function sharesList(a, b) {
+  if (String(a?.id) === String(b?.id)) return true;
+  const group = bidGroup(a);
+  return group !== null && group === bidGroup(b);
+}
+
+function visibleTo(entry, profile, profiles) {
+  if (!entry.owner) return true;
+  // The owner as it is now, if still on the dashboard.
+  const owner = profiles.find((p) => String(p.id) === String(entry.owner.id)) || entry.owner;
+  return sharesList(owner, profile);
+}
+
+// The bid profile a list is being looked at as: the one asked for, or the
+// one linked to the browser profile connected.
+async function recruiterScope(profileId) {
+  const list = await listProfiles();
+  if (!list.ok) return { ok: false, error: `could not load the profiles — ${list.error}` };
+  let id = profileId;
+  if (id === undefined || id === null || id === "") {
+    ({ linkedBidProfile: id = null } = await chrome.storage.local.get("linkedBidProfile"));
+  }
+  const profile = id === null ? null : list.profiles.find((p) => String(p.id) === String(id));
+  if (!profile) return { ok: false, noProfile: true, error: "no bid profile — link this browser profile to one under Browser Profile" };
+  return { ok: true, profile, profiles: list.profiles };
+}
+
+async function recruitersFor(profileId) {
+  const scope = await recruiterScope(profileId);
+  if (!scope.ok) return scope;
+  const recruiters = (await getRecruiters()).filter((r) => visibleTo(r, scope.profile, scope.profiles));
+  return { ok: true, recruiters, profile: scope.profile.name };
+}
+
+// An import adds to the list, under the bid profile. An address already in
+// its list is skipped, and so is one the database says was sent to from this
+// list's profiles, whichever import it came from. With that out of reach only
+// the list itself can be checked, and the reply says so.
+async function importRecruiters(raw, profileId) {
+  const scope = await recruiterScope(profileId);
+  if (!scope.ok) return scope;
+  const { profile, profiles } = scope;
+  const owner = { id: profile.id, country: profile.sheet?.country ?? "", role: profile.sheet?.role ?? "" };
+
+  const total = Array.isArray(raw) ? raw.length : 1;
   const fresh = recruitersOf(raw);
-  const before = new Map((await getRecruiters()).map((r) => [recruiterKey(r), r]));
-  const recruiters = fresh.map((r) => {
-    const old = before.get(recruiterKey(r));
-    return old?.sentAt ? { ...r, sentAt: old.sentAt, sentAs: old.sentAs } : r;
-  });
-  await chrome.storage.local.set({ recruiters });
-  return recruiters;
+  const all = await getRecruiters();
+  const inList = new Set(all.filter((r) => visibleTo(r, profile, profiles)).map((r) => addressKey(r.email_address)));
+  const sent = await sentAddresses(profiles.filter((p) => sharesList(p, profile)));
+
+  const added = [];
+  let existing = total - fresh.length; // repeats and unusable entries, split below
+  const invalid = (Array.isArray(raw) ? raw : [raw]).filter((e) => !isEmail(String(e?.email_address || "").trim())).length;
+  existing -= invalid;
+  let alreadySent = 0;
+  for (const r of fresh) {
+    const key = addressKey(r.email_address);
+    if (inList.has(key)) existing++;
+    else if (sent.ok && sent.addresses.has(key)) alreadySent++;
+    else added.push({ ...r, owner });
+  }
+
+  const stored = [...all, ...added].slice(0, MAX_RECRUITERS);
+  await chrome.storage.local.set({ recruiters: stored });
+  return {
+    ok: true,
+    recruiters: stored.filter((r) => visibleTo(r, profile, profiles)),
+    profile: profile.name,
+    added: added.length,
+    skipped: { existing, sent: alreadySent, invalid },
+    ...(sent.ok ? {} : { databaseError: sent.error })
+  };
+}
+
+// Clear empties this profile's list; other profiles' are left.
+async function clearRecruiters(profileId) {
+  const scope = await recruiterScope(profileId);
+  if (!scope.ok) return scope;
+  const left = (await getRecruiters()).filter((r) => !visibleTo(r, scope.profile, scope.profiles));
+  await chrome.storage.local.set({ recruiters: left });
+  return { ok: true };
+}
+
+// The addresses the database holds a sent email for, from these profiles.
+async function sentAddresses(profiles) {
+  try {
+    const res = await fetch(RECRUITER_SENDS_ENDPOINT, { signal: AbortSignal.timeout(SAVE_TIMEOUT_MS) });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !Array.isArray(data?.sends)) return { ok: false, error: `HTTP ${res.status} ${res.statusText}` };
+    const ids = new Set(profiles.map((p) => String(p.id)));
+    const mine = data.sends.filter((s) => s.profile_id == null || ids.has(String(s.profile_id)));
+    return { ok: true, addresses: new Set(mine.map((s) => addressKey(s.email_address))) };
+  } catch (err) {
+    return { ok: false, error: describeFetchError(err, RECRUITER_SENDS_ENDPOINT) };
+  }
+}
+
+// Saves a sent email to the database, with any that could not be saved
+// before: they wait in storage, so the collector being down loses nothing.
+async function saveRecruiterSend(send) {
+  const { recruiterSendsUnsaved = [] } = await chrome.storage.local.get("recruiterSendsUnsaved");
+  const waiting = [...recruiterSendsUnsaved, send];
+  const left = [];
+  let error = null;
+  for (const record of waiting) {
+    try {
+      if (error) throw new Error(error);
+      const res = await fetch(RECRUITER_SENDS_ENDPOINT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(record),
+        signal: AbortSignal.timeout(SAVE_TIMEOUT_MS)
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+    } catch (err) {
+      error = error || describeFetchError(err, RECRUITER_SENDS_ENDPOINT);
+      left.push(record);
+    }
+  }
+  await chrome.storage.local.set({ recruiterSendsUnsaved: left });
+  return { saved: !left.length, ...(error ? { saveError: error } : {}) };
 }
 
 // Runs inside the Gmail tab, so it carries everything it needs. Waits for
@@ -3401,15 +3542,22 @@ function gmailSendResult() {
   };
 }
 
-// The summary of a dashboard profile, as Settings → Profile saved it.
+// The summary of a dashboard profile, as User Settings saved it.
+// With no profile asked for (the desktop app), the one linked to the browser
+// profile connected.
 async function profileSummary(profileId) {
   const list = await listProfiles();
   if (!list.ok) return { ok: false, error: list.error };
-  const profile = list.profiles.find((p) => String(p.id) === String(profileId));
+  let id = profileId;
+  if (id === undefined || id === null || id === "") {
+    ({ linkedBidProfile: id = null } = await chrome.storage.local.get("linkedBidProfile"));
+    if (id === null) return { ok: false, error: "this browser profile has no bid profile — link one under Browser Profile" };
+  }
+  const profile = list.profiles.find((p) => String(p.id) === String(id));
   if (!profile) return { ok: false, error: "pick the profile whose Summary to send" };
   const summary = String(profile.resume?.summary || "").trim();
-  if (!summary) return { ok: false, error: `${profile.name} has no Summary yet — add one in Settings → Profile` };
-  return { ok: true, profile, summary };
+  if (!summary) return { ok: false, error: `${profile.name} has no Summary yet — add one in User Settings` };
+  return { ok: true, profile, summary, profiles: list.profiles };
 }
 
 // Gmail's discard button on the new message, for a check that sent nothing.
@@ -3429,6 +3577,8 @@ async function sendToRecruiter(email, profileId, { dryRun = false } = {}) {
   if (!isEmail(String(email || ""))) return { ok: false, error: "not an email address" };
   const from = await profileSummary(profileId);
   if (!from.ok) return from;
+  const mine = (r) => addressKey(r.email_address) === addressKey(email) && visibleTo(r, from.profile, from.profiles);
+  if (!(await getRecruiters()).some(mine)) return { ok: false, error: `${email} is not in ${from.profile.name}'s list` };
 
   const tab = await chrome.tabs.create({ url: gmailComposeUrl(email, RECRUITER_SUBJECT), active: true });
   await waitForComplete(tab.id, GMAIL_LOAD_TIMEOUT).catch(() => {});
@@ -3497,13 +3647,25 @@ async function sendToRecruiter(email, profileId, { dryRun = false } = {}) {
   }
 
   const sentAt = new Date().toISOString();
-  const recruiters = (await getRecruiters()).map((r) =>
-    r.email_address.toLowerCase() === email.toLowerCase() ? { ...r, sentAt, sentAs: from.profile.name } : r
-  );
+  const list = await getRecruiters();
+  const entry = list.find(mine);
+  const recruiters = list.map((r) => (r === entry ? { ...r, sentAt, sentAs: from.profile.name } : r));
   await chrome.storage.local.set({ recruiters });
+  const stored = await saveRecruiterSend({
+    email_address: email,
+    company_name: entry?.company_name || "",
+    email_title: entry?.email_title || "",
+    email_content: entry?.email_content || "",
+    arrived_date: entry?.arrived_date || "",
+    subject: RECRUITER_SUBJECT,
+    body: from.summary,
+    profile_id: from.profile.id,
+    profile_name: from.profile.name,
+    sent_at: sentAt
+  });
   // Gmail has said so: the tab has nothing more to show.
   await chrome.tabs.remove(tab.id).catch(() => {});
-  return { ok: true, sentAt, sentAs: from.profile.name };
+  return { ok: true, sentAt, sentAs: from.profile.name, ...stored };
 }
 
 // ---------------------------------------------------------------------------
@@ -3556,8 +3718,14 @@ async function preflight(options = {}) {
   }
 
   let profiles = [];
-  if (!settings.country || !settings.role) {
-    add("profiles", "Profiles", "fail", "no Country and Role picked — choose them in Settings → Profile");
+  const linked = list.ok ? await linkedProfile(list.profiles) : null;
+  if (linked?.profile) {
+    profiles = [linked.profile];
+    add("profiles", "Profiles", "ok", `linked to this browser profile: ${linked.profile.name}`);
+  } else if (linked) {
+    add("profiles", "Profiles", "fail", LINK_GONE);
+  } else if (!settings.country || !settings.role) {
+    add("profiles", "Profiles", "fail", "no Country and Role picked — choose them in User Settings");
   } else if (list.ok) {
     profiles = matchingProfiles(list.profiles, settings);
     add(
@@ -3577,7 +3745,7 @@ async function preflight(options = {}) {
     "chatgpt",
     "ChatGPT",
     settings.apiKey ? "ok" : "fail",
-    settings.apiKey ? `API key set · ${settings.model}` : "no API key — add it in Settings → ChatGPT setting; without it no resume is written"
+    settings.apiKey ? `API key set · ${settings.model}` : "no API key — add it under ChatGPT Settings (the GPT button); without it no resume is written"
   );
 
   // Each profile's resume: its style loads, and it has a master resume to work from.
@@ -3813,17 +3981,20 @@ async function handle(msg) {
     case "GENERATE_MANUAL":
       return generateManual(msg.job);
 
+    case "GET_LINKED_PROFILE": {
+      const { linkedBidProfile: id = null } = await chrome.storage.local.get("linkedBidProfile");
+      return { ok: true, id };
+    }
+
     case "RECRUITERS_GET":
-      return { ok: true, recruiters: await getRecruiters(), subject: RECRUITER_SUBJECT };
+      return recruitersFor(msg.profileId);
 
     case "RECRUITERS_IMPORT": {
-      const recruiters = await importRecruiters(msg.entries);
-      return { ok: true, recruiters, skipped: (Array.isArray(msg.entries) ? msg.entries.length : 1) - recruiters.length };
+      return importRecruiters(msg.entries, msg.profileId);
     }
 
     case "RECRUITERS_CLEAR":
-      await chrome.storage.local.set({ recruiters: [] });
-      return { ok: true };
+      return clearRecruiters(msg.profileId);
 
     case "RECRUITER_SEND":
       return sendToRecruiter(msg.email, msg.profileId, { dryRun: !!msg.dryRun });

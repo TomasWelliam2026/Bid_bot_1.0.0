@@ -10,7 +10,7 @@
 const path = require("node:path");
 const fs = require("node:fs");
 const { pathToFileURL } = require("node:url");
-const { app, BrowserWindow, ipcMain, protocol, net, dialog, shell } = require("electron");
+const { app, BrowserWindow, ipcMain, protocol, net, shell } = require("electron");
 const { findChromes } = require("./chrome-finder");
 const { findRunningBrowsers, openDebugSetting, profileArgs } = require("./running-browsers");
 const { importFromExtension: importExt } = require("./extension-import");
@@ -306,9 +306,19 @@ app.whenReady().then(async () => {
   async function connectChosen() {
     if (currentChoice().mode === "attach") await scanRunning();
     const choice = currentChoice();
+    await syncLinkedProfile();
     const status = await engine.browser.connect(connectOptions(choice));
     if (choice.mode === "attach") await importFromExtension(choice).catch((err) => console.warn("[import]", err?.message || err));
     return status;
+  }
+
+  // The bid profile linked to the browser profile being worked in, told to
+  // the extension's code, which then uses it alone for the whole run.
+  // settings.profileLinks: "<browser id>\u0001<profile folder>" -> bid profile id.
+  async function syncLinkedProfile() {
+    const c = currentChoice();
+    const key = c?.mode === "attach" && c.profile ? `${c.id}\u0001${c.profile.dir}` : null;
+    await api.chrome.storage.local.set({ linkedBidProfile: (key && settings.profileLinks?.[key]) ?? null });
   }
 
   // What the app needs before a run can write anything. With these in its
@@ -380,6 +390,7 @@ app.whenReady().then(async () => {
   // --- the browser bar ------------------------------------------------------
   ipcMain.handle("app:state", async () => {
     await scanRunning();
+    await syncLinkedProfile();
     return {
       note: importNote,
       choices: browserChoices(),
@@ -423,29 +434,27 @@ app.whenReady().then(async () => {
     return { ok: true, browser: choice.browser };
   });
 
-  ipcMain.handle("app:choose", (_e, id) => {
+  ipcMain.handle("app:links", () => settings.profileLinks || {});
+  ipcMain.handle("app:saveLinks", async (_e, links) => {
+    saveSettings({ profileLinks: links || {} });
+    await syncLinkedProfile();
+    return settings.profileLinks;
+  });
+
+  ipcMain.handle("app:choose", async (_e, id) => {
     saveSettings({ browserId: id });
+    await syncLinkedProfile();
     pushStatus();
     return currentChoice();
   });
 
   // One profile of a running browser — the only one the app will work in.
   // Not while connected: the run's tabs are already in the one picked.
-  ipcMain.handle("app:chooseProfile", (_e, id, dir) => {
+  ipcMain.handle("app:chooseProfile", async (_e, id, dir) => {
     if (browser.state !== "disconnected") return { ok: false, error: "disconnect first to work in another profile" };
     saveSettings({ browserId: id, profiles: { ...(settings.profiles || {}), [id]: dir } });
+    await syncLinkedProfile();
     return { ok: true, choices: browserChoices(), choice: currentChoice().id };
-  });
-
-  ipcMain.handle("app:browse", async () => {
-    const picked = await dialog.showOpenDialog(win, {
-      title: "Pick chrome.exe",
-      properties: ["openFile"],
-      filters: [{ name: "Chrome", extensions: ["exe"] }]
-    });
-    if (picked.canceled || !picked.filePaths[0]) return null;
-    saveSettings({ customExe: picked.filePaths[0], browserId: CUSTOM_ID });
-    return { choices: browserChoices(), choice: CUSTOM_ID };
   });
 
   ipcMain.handle("app:connect", async () => {
@@ -458,6 +467,7 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle("app:disconnect", async () => {
+    clearInterval(debugWatch); // Stop, while waiting for debugging to be turned on
     // Whatever a run had in flight stops first, so it does not reconnect.
     await api.fromPanel({ type: "STOP" }).catch(() => {});
     await browser.disconnect();

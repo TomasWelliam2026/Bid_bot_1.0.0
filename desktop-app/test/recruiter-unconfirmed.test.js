@@ -8,6 +8,7 @@ const { startHarness } = require("./helpers/harness");
 test("Recruiter Bid: no result message from Gmail, so the tab stays and it says to check", { timeout: 120000 }, async (t) => {
   const h = await startHarness({ sites: { gmail: { noConfirm: true } } });
   t.after(() => h.close());
+  await h.setStorage({ linkedBidProfile: 7 }); // the list belongs to a bid profile
 
   await h.send({
     type: "RECRUITERS_IMPORT",

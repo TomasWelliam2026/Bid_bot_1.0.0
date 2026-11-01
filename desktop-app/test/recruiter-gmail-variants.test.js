@@ -13,6 +13,7 @@ const { startHarness } = require("./helpers/harness");
 test("Recruiter Bid: a Gmail in another language, with no new message opened by the address", { timeout: 150000 }, async (t) => {
   const h = await startHarness({ sites: { gmail: { autoCompose: false, lang: "es", folded: true, unfocused: true } } });
   t.after(() => h.close());
+  await h.setStorage({ linkedBidProfile: 7 }); // the list belongs to a bid profile
 
   await h.send({
     type: "RECRUITERS_IMPORT",

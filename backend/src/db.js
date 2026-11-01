@@ -160,6 +160,23 @@ export class Store {
 
       -- A record a tab it is shared into has deleted from its own list. The
       -- record stays everywhere else. Removed with the record, and with the tab.
+      -- An email Recruiter Bid sent: one row per send. A recruiter's address
+      -- here is what keeps them from being imported and emailed again.
+      CREATE TABLE IF NOT EXISTS recruiter_sends (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        email_address TEXT NOT NULL COLLATE NOCASE,
+        company_name  TEXT NOT NULL DEFAULT '',
+        email_title   TEXT NOT NULL DEFAULT '',
+        email_content TEXT NOT NULL DEFAULT '',
+        arrived_date  TEXT NOT NULL DEFAULT '',
+        subject       TEXT NOT NULL DEFAULT '',
+        body          TEXT NOT NULL DEFAULT '',
+        profile_id    INTEGER,
+        profile_name  TEXT NOT NULL DEFAULT '',
+        sent_at       TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS recruiter_sends_email ON recruiter_sends (email_address);
+
       CREATE TABLE IF NOT EXISTS hidden_rows (
         record_id INTEGER NOT NULL,
         user_id   INTEGER NOT NULL,
@@ -629,6 +646,36 @@ export class Store {
   /** Applies whichever of `patch`'s keys are real user fields; anything else
    *  in `patch` is ignored rather than erroring, so a caller can pass a whole
    *  request body through without pre-filtering it. */
+  /** One email Recruiter Bid sent. Returns the stored row. */
+  addRecruiterSend(send) {
+    const text = (value) => String(value ?? '');
+    const { lastInsertRowid } = this.db
+      .prepare(
+        `INSERT INTO recruiter_sends
+           (email_address, company_name, email_title, email_content, arrived_date,
+            subject, body, profile_id, profile_name, sent_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        text(send.email_address),
+        text(send.company_name),
+        text(send.email_title),
+        text(send.email_content),
+        text(send.arrived_date),
+        text(send.subject),
+        text(send.body),
+        Number.isInteger(send.profile_id) ? send.profile_id : null,
+        text(send.profile_name),
+        text(send.sent_at) || new Date().toISOString()
+      );
+    return this.db.prepare('SELECT * FROM recruiter_sends WHERE id = ?').get(lastInsertRowid);
+  }
+
+  /** Every email Recruiter Bid sent, newest first. */
+  listRecruiterSends() {
+    return this.db.prepare('SELECT * FROM recruiter_sends ORDER BY sent_at DESC, id DESC').all();
+  }
+
   updateUser(id, patch) {
     const sets = [];
     const values = [];

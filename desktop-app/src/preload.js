@@ -98,6 +98,7 @@ window.chrome = {
 // What only the app knows, for the panel's checks before a run: whether the
 // browser is connected, or can be when the run starts.
 window.bidbotDesktop = {
+  connected: false, // to a browser: the Recruiter Bid list shows only then
   checkBrowser: () => ipcRenderer.invoke("app:checkBrowser")
 };
 
@@ -181,6 +182,36 @@ const BAR_CSS = `
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
+}
+/* The panel's ChatGPT Settings, under the browser bar: the GPT button there
+   replaces the one beside its gear. */
+#openChatgpt,
+#openUserSettings { display: none; }
+/* Browser Profile: each browser profile in use, and the bid profile it is
+   linked to. */
+#linkPanel .lp-head,
+#linkPanel .lp-row {
+  display: grid;
+  grid-template-columns: 1fr 1.3fr;
+  gap: 10px;
+  align-items: center;
+}
+#linkPanel .lp-head { margin-bottom: 6px; }
+#linkPanel .lp-head .field-label { margin: 0; }
+#linkPanel .lp-row { padding: 5px 0; border-top: 1px solid var(--line-soft, #e6e6ee); }
+#linkPanel .lp-name { min-width: 0; font-size: 12.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#linkPanel .lp-browser { display: block; font-size: 11px; font-weight: 400; color: var(--muted, #767685); }
+#linkPanel select { width: 100%; min-width: 0; }
+#linkPanel .form-actions { margin-top: 10px; }
+body > .gpt-panel {
+  flex: none;
+  max-height: 70vh;
+  overflow-y: auto;
+  margin: 0;
+  padding: 12px;
+  border: 0;
+  border-bottom: 1px solid var(--panel-line);
+  border-radius: 0;
 }
 #bidbot-titlebar .bt-buttons {
   flex: none;
@@ -312,6 +343,11 @@ const BAR_CSS = `
   cursor: pointer;
 }
 #bidbot-bar button:hover:not(:disabled) { border-color: var(--accent, #6a5fdb); }
+#bidbot-bar button.bb-stop {
+  color: #fff;
+  background: var(--err, #d6395a);
+  border-color: var(--err, #d6395a);
+}
 #bidbot-bar button:disabled { opacity: 0.55; cursor: default; }
 #bidbot-bar button.bb-primary {
   color: var(--accent-fg, #fff);
@@ -319,9 +355,21 @@ const BAR_CSS = `
   border-color: var(--accent, #6a5fdb);
 }
 #bidbot-bar .bb-rescan,
-#bidbot-bar .bb-browse,
+#bidbot-bar .bb-user,
+#bidbot-bar .bb-gpt,
+#bidbot-bar .bb-link,
 #bidbot-bar .bb-pin { width: 28px; min-width: 0; padding: 0; font-size: 14px; }
-#bidbot-bar .bb-pin svg { display: block; margin: auto; }
+#bidbot-bar .bb-pin svg,
+#bidbot-bar .bb-user svg,
+#bidbot-bar .bb-gpt svg,
+#bidbot-bar .bb-link svg { display: block; margin: auto; }
+#bidbot-bar button.bb-user[aria-expanded="true"],
+#bidbot-bar button.bb-link[aria-expanded="true"],
+#bidbot-bar button.bb-gpt[aria-expanded="true"] {
+  color: var(--accent, #6a5fdb);
+  background: var(--accent-soft, #ece9fb);
+  border-color: var(--accent-line, #c7bff3);
+}
 #bidbot-bar button.bb-pin[aria-pressed="true"] {
   color: var(--accent, #6a5fdb);
   background: var(--accent-soft, #ece9fb);
@@ -389,7 +437,24 @@ function buildBar() {
     <div class="bb-browsers" role="radiogroup" aria-label="Browser profile to work in"></div>
     <span class="bb-browser-name"></span>
     <button type="button" class="bb-rescan" title="Look for running browsers again" aria-label="Look for running browsers again">↻</button>
-    <button type="button" class="bb-browse" title="Browse for chrome.exe…" aria-label="Browse for chrome.exe">…</button>
+    <button type="button" class="bb-user" title="User Settings" aria-label="User Settings" aria-expanded="false" aria-controls="userPanel">
+      <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false" fill="none"
+           stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="9" cy="7" r="4"/><path d="M2 21v-1a6 6 0 0 1 6-6h3"/><circle cx="18" cy="17" r="2.5"/><path d="M18 12.5v2M18 19.5v2M13.5 17h2M20.5 17h2M14.8 13.8l1.4 1.4M19.8 18.8l1.4 1.4M14.8 20.2l1.4-1.4M19.8 15.2l1.4-1.4"/>
+      </svg>
+    </button>
+    <button type="button" class="bb-gpt" title="ChatGPT Settings" aria-label="ChatGPT Settings" aria-expanded="false" aria-controls="gptPanel">
+      <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false" fill="currentColor">
+        <path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z"/>
+      </svg>
+    </button>
+    <button type="button" class="bb-link" title="Browser Profile" aria-label="Browser Profile" aria-expanded="false" aria-controls="linkPanel">
+      <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false" fill="none"
+           stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/>
+        <path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/>
+      </svg>
+    </button>
     <button type="button" class="bb-connect bb-primary">Connect</button>
     <button type="button" class="bb-pin" aria-pressed="true" title="Keep this window above other windows" aria-label="Pin on top">
       <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false" fill="none"
@@ -401,11 +466,25 @@ function buildBar() {
     <div class="bb-status" role="status">Looking for running browsers…</div>`;
   document.body.prepend(bar);
   document.body.prepend(titlebar);
+  // User Settings and ChatGPT Settings: the panel's own forms, moved beneath
+  // this bar, whose buttons stand in for the ones the panel has.
+  let after = bar;
+  for (const [selector, panelId, panelButton] of [[".bb-user", "userPanel", "openUserSettings"], [".bb-gpt", "gptPanel", "openChatgpt"]]) {
+    const button = bar.querySelector(selector);
+    button.addEventListener("click", () => document.getElementById(panelButton)?.click());
+    const panel = document.getElementById(panelId);
+    if (!panel) continue;
+    after.after(panel);
+    after = panel;
+    new MutationObserver(() => {
+      button.setAttribute("aria-expanded", String(!panel.hidden));
+      if (!panel.hidden) showLinkPanel(false); // one panel at a time
+    }).observe(panel, { attributes: true, attributeFilter: ["hidden"] });
+  }
 
   const browsersEl = bar.querySelector(".bb-browsers");
   const browserNameEl = bar.querySelector(".bb-browser-name");
   const rescanEl = bar.querySelector(".bb-rescan");
-  const browseEl = bar.querySelector(".bb-browse");
   const tipEl = document.createElement("div");
   tipEl.id = "bidbot-tip";
   tipEl.setAttribute("role", "tooltip");
@@ -414,7 +493,6 @@ function buildBar() {
   const connectEl = bar.querySelector(".bb-connect");
   const pinEl = bar.querySelector(".bb-pin");
   const statusEl = bar.querySelector(".bb-status");
-  const BROWSE = "__browse__";
 
   let choices = [];
   let chosen = null;
@@ -435,7 +513,14 @@ function buildBar() {
   // A circle's key is its browser's id and the profile's folder.
   const SEP = "\u0001";
   const keyOf = (id, dir = "") => `${id}${SEP}${dir}`;
-  function profileItems(list) {
+  // Browser profile -> bid profile, by circle key. With any link saved, only
+  // linked profiles get a circle.
+  let links = {};
+  const profileItems = (list) => {
+    const items = allProfileItems(list);
+    return Object.keys(links).length ? items.filter((item) => links[item.key] != null) : items;
+  };
+  function allProfileItems(list) {
     const items = [];
     for (const c of list.filter((x) => x.group === "running")) {
       for (const p of (c.profiles || []).filter((x) => x.open)) {
@@ -515,8 +600,6 @@ function buildBar() {
     tipEl.hidden = true;
   }
 
-  browseEl.addEventListener("click", () => pick(BROWSE));
-
   browsersEl.addEventListener("keydown", (e) => {
     const step = e.key === "ArrowRight" || e.key === "ArrowDown" ? 1 : e.key === "ArrowLeft" || e.key === "ArrowUp" ? -1 : 0;
     if (!step) return;
@@ -531,6 +614,11 @@ function buildBar() {
 
   function render(s) {
     last = s;
+    const connected = s.state === "connected";
+    if (connected !== window.bidbotDesktop.connected) {
+      window.bidbotDesktop.connected = connected;
+      profileChanged();
+    }
     const c = choice();
     const attach = c?.mode === "attach";
     const needsDebug = attach && !c.debug;
@@ -540,19 +628,20 @@ function buildBar() {
     bar.dataset.state = state;
     bar.dataset.error = s.error && s.state === "disconnected" && state !== "waiting" ? "1" : "0";
     for (const b of browsersEl.children) b.disabled = s.state !== "disconnected";
-    browseEl.disabled = s.state !== "disconnected";
     // Only the profile's name: which browser it is in is the circle's business.
     browserNameEl.textContent = !c ? "" : attach ? c.profile?.name || "" : "New window";
     browserNameEl.title = c?.detail || "";
     rescanEl.disabled = s.state !== "disconnected";
-    connectEl.disabled = s.state === "connecting" || state === "waiting" || (s.state === "disconnected" && needsProfile);
+    // While a connection is being made, or waited for, it can be stopped.
+    const stoppable = s.state === "connecting" || state === "waiting";
+    connectEl.disabled = s.state === "disconnected" && !stoppable && needsProfile;
     connectEl.textContent =
       s.state === "connected" ? "Disconnect"
-        : s.state === "connecting" ? "Connecting…"
-          : state === "waiting" ? "Waiting…"
-            : needsDebug ? "Turn on debugging"
-              : "Connect";
-    connectEl.classList.toggle("bb-primary", s.state !== "connected");
+        : stoppable ? "Stop"
+          : needsDebug ? "Turn on debugging"
+            : "Connect";
+    connectEl.classList.toggle("bb-primary", s.state !== "connected" && !stoppable);
+    connectEl.classList.toggle("bb-stop", stoppable);
     if (typeof s.alwaysOnTop === "boolean") pinEl.setAttribute("aria-pressed", String(s.alwaysOnTop));
 
     const name = c?.browser || c?.label || "the browser";
@@ -575,10 +664,128 @@ function buildBar() {
                   : attach
                   ? `Ready to work in ${c.profile.name}. Click Connect, or just press Start.`
                   : !choices.length
-                    ? "No Google Chrome found on this PC. Install it from google.com/chrome, or pick its chrome.exe with “Browse for chrome.exe…”."
+                    ? "No Google Chrome found on this PC. Install it from google.com/chrome."
                     : "Not connected. Pick a profile and click Connect, or just press Start.";
     statusEl.hidden = !statusEl.textContent;
   }
+
+  // -------------------------------------------------------------------------
+  // Browser Profile: which bid profile each browser profile in use works as.
+  // Saved links narrow the circles to those profiles, and the app's main side
+  // tells the run which bid profile to use.
+  // -------------------------------------------------------------------------
+
+  const linkButton = bar.querySelector(".bb-link");
+  const linkPanel = document.createElement("div");
+  linkPanel.id = "linkPanel";
+  linkPanel.className = "form gpt-panel";
+  linkPanel.hidden = true;
+  (document.getElementById("gptPanel") || bar).after(linkPanel);
+
+  // Bid profiles grouped by country, as a dropdown's options.
+  function bidOptions(select, bidProfiles, current) {
+    select.append(new Option("— Not linked —", ""));
+    const byCountry = new Map();
+    for (const p of bidProfiles) {
+      const country = String(p.sheet?.country || "").trim() || "No country";
+      if (!byCountry.has(country)) byCountry.set(country, []);
+      byCountry.get(country).push(p);
+    }
+    for (const country of [...byCountry.keys()].sort()) {
+      const group = document.createElement("optgroup");
+      group.label = country;
+      for (const p of byCountry.get(country)) {
+        group.append(new Option(p.sheet?.role ? `${p.name} · ${p.sheet.role}` : p.name, String(p.id)));
+      }
+      select.append(group);
+    }
+    if (current != null) select.value = String(current);
+  }
+
+  function linkMessage(text) {
+    const p = document.createElement("p");
+    p.className = "hint warn";
+    p.textContent = text;
+    return p;
+  }
+
+  async function fillLinkPanel() {
+    linkPanel.replaceChildren();
+    const rows = allProfileItems(choices).filter((item) => item.c.mode === "attach");
+    const reply = await ipcRenderer.invoke("rt:send", { type: "GET_PROFILES" }).catch((err) => ({ ok: false, error: err.message }));
+    if (!reply?.ok) return linkPanel.append(linkMessage(`Could not load the bid profiles: ${reply?.error || "no answer"}`));
+    if (!rows.length) return linkPanel.append(linkMessage("No browser profile is open."));
+
+    const head = document.createElement("div");
+    head.className = "lp-head";
+    for (const text of ["Browser profile", "Bid profile"]) {
+      const label = document.createElement("span");
+      label.className = "field-label";
+      label.textContent = text;
+      head.append(label);
+    }
+    linkPanel.append(head);
+
+    const selects = new Map();
+    for (const item of rows) {
+      const row = document.createElement("div");
+      row.className = "lp-row";
+      const name = document.createElement("span");
+      name.className = "lp-name";
+      name.textContent = item.name;
+      name.title = item.name;
+      const browserName = document.createElement("span");
+      browserName.className = "lp-browser";
+      browserName.textContent = fullName(item.c);
+      name.append(browserName);
+      const select = document.createElement("select");
+      select.setAttribute("aria-label", `Bid profile for ${item.name}`);
+      bidOptions(select, reply.profiles, links[item.key]);
+      selects.set(item.key, select);
+      row.append(name, select);
+      linkPanel.append(row);
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "controls form-actions";
+    const save = document.createElement("button");
+    save.type = "button";
+    save.className = "primary";
+    save.textContent = "Save";
+    save.addEventListener("click", async () => {
+      // Links of profiles not open now are kept.
+      const next = { ...links };
+      for (const [key, select] of selects) {
+        if (select.value) next[key] = Number(select.value);
+        else delete next[key];
+      }
+      links = await ipcRenderer.invoke("app:saveLinks", next);
+      profileChanged();
+      showLinkPanel(false);
+      fillChoices(choices, chosen);
+      // The profile being worked in may no longer have a circle.
+      const first = profileItems(choices)[0];
+      if (first && !profileItems(choices).some((item) => item.key === pickedKey())) pick(first.key);
+    });
+    actions.append(save);
+    linkPanel.append(actions);
+  }
+
+  function showLinkPanel(open) {
+    linkPanel.hidden = !open;
+    linkButton.setAttribute("aria-expanded", String(open));
+    if (!open) return;
+    for (const [panelId, panelButton] of [["gptPanel", "openChatgpt"], ["userPanel", "openUserSettings"]]) {
+      const panel = document.getElementById(panelId);
+      if (panel && !panel.hidden) document.getElementById(panelButton)?.click();
+    }
+    fillLinkPanel();
+  }
+
+  linkButton.addEventListener("click", () => showLinkPanel(linkPanel.hidden));
+
+  // The panel's Recruiter Bid list follows the bid profile.
+  const profileChanged = () => window.dispatchEvent(new Event("bidbot-profile-changed"));
 
   let pickedByHand = false; // a pick made before the first scan has answered
   // A circle picks its browser and, in a running one, the profile to work in.
@@ -586,11 +793,6 @@ function buildBar() {
     if (last.state !== "disconnected") return;
     pickedByHand = true;
     waitingFor = null;
-    if (key === BROWSE) {
-      const picked = await ipcRenderer.invoke("app:browse");
-      if (picked) fillChoices(picked.choices, picked.choice);
-      return;
-    }
     if (key === pickedKey()) return;
     const [id, dir] = key.split(SEP);
     const c = choices.find((x) => x.id === id);
@@ -603,11 +805,13 @@ function buildBar() {
       const reply = await ipcRenderer.invoke("app:chooseProfile", id, dir);
       if (reply.ok) fillChoices(reply.choices, reply.choice);
       else render({ ...last, error: reply.error });
+      profileChanged();
       return;
     }
     fillChoices(choices, id);
     render({ ...last, error: null });
     await ipcRenderer.invoke("app:choose", id);
+    profileChanged();
   }
 
   rescanEl.addEventListener("click", async () => {
@@ -617,11 +821,15 @@ function buildBar() {
     fillChoices(s.choices, s.choice);
   });
 
+  let stopping = false; // Stop pressed: the connect it ended is no error
   connectEl.addEventListener("click", async () => {
-    if (last.state === "connected") {
+    if (last.state !== "disconnected" || waitingFor) {
+      stopping = last.state === "connecting";
+      waitingFor = null;
       render(await ipcRenderer.invoke("app:disconnect"));
       return;
     }
+    stopping = false;
     const c = choice();
     if (c?.mode === "attach" && !c.debug) {
       const reply = await ipcRenderer.invoke("app:enableDebug");
@@ -634,7 +842,7 @@ function buildBar() {
     }
     render({ state: "connecting" });
     const reply = await ipcRenderer.invoke("app:connect");
-    if (!reply.ok) render({ state: "disconnected", error: reply.error });
+    if (!reply.ok && !stopping) render({ state: "disconnected", error: reply.error });
   });
 
   pinEl.addEventListener("click", async () => {
@@ -658,6 +866,7 @@ function buildBar() {
   // picked; the scan only fills in the list around it.
   ipcRenderer.invoke("app:state").then(async (s) => {
     last = s;
+    links = (await ipcRenderer.invoke("app:links")) || {};
     if (pickedByHand && chosen && s.choices.some((c) => c.id === chosen)) {
       await ipcRenderer.invoke("app:choose", chosen);
       fillChoices(s.choices, chosen);

@@ -382,6 +382,23 @@ const userJson = (user) => ({
 
 const pushUser = (user) => broadcast('user', { user: userJson(user) });
 
+/**
+ * The emails Recruiter Bid has sent. The extension saves each one here once
+ * Gmail has confirmed it, and reads the addresses back to skip those
+ * recruiters on the next import.
+ */
+app.get('/api/recruiter-sends', (_req, res) => {
+  res.json({ ok: true, sends: store.listRecruiterSends() });
+});
+
+app.post('/api/recruiter-sends', (req, res) => {
+  const body = req.body || {};
+  if (!String(body.email_address || '').trim()) {
+    return res.status(400).json({ ok: false, error: 'email_address is required' });
+  }
+  res.status(201).json({ ok: true, send: store.addRecruiterSend(body) });
+});
+
 app.get('/api/users', (_req, res) => {
   res.json({ users: store.listUsers().map(userJson) });
 });

@@ -37,13 +37,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // sites: options for startFakeSites. isNew(job_title) says which jobs the
 // collector does not have yet (default: all of them). collectorUp: false makes
 // every collector call fail as a dead port would.
-async function startHarness({ sites = {}, isNew = () => true, collectorUp = true, connect = true } = {}) {
+async function startHarness({ sites = {}, isNew = () => true, collectorUp = true, connect = true, users = [PROFILE], answer = RESUME_ANSWER } = {}) {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "bidbot-test-"));
   const fake = await startFakeSites(sites);
   const events = [];
-  const calls = { check: [], save: [], openai: 0, users: 0 };
+  const calls = { check: [], save: [], openai: 0, users: 0, recruiterSends: [] };
   const listeners = new Set();
-  const state = { collectorUp };
+  const state = { collectorUp, sendsUp: true };
 
   const { browser, api } = await startEngine({
     extensionDir: EXTENSION_DIR,
@@ -64,7 +64,13 @@ async function startHarness({ sites = {}, isNew = () => true, collectorUp = true
       if (!state.collectorUp) throw new TypeError("fetch failed");
       if (s.includes("/api/users")) {
         calls.users++;
-        return Response.json({ users: [PROFILE] });
+        return Response.json({ users });
+      }
+      if (s.includes("/api/recruiter-sends")) {
+        if (!state.sendsUp) throw new TypeError("fetch failed");
+        if ((opts.method || "GET") === "GET") return Response.json({ ok: true, sends: calls.recruiterSends });
+        calls.recruiterSends.push(JSON.parse(opts.body));
+        return Response.json({ ok: true }, { status: 201 });
       }
       const body = JSON.parse(opts.body || "{}");
       if (s.includes("/get-item")) {
@@ -78,7 +84,7 @@ async function startHarness({ sites = {}, isNew = () => true, collectorUp = true
     }
     if (s.includes("api.openai.com")) {
       calls.openai++;
-      return Response.json({ choices: [{ message: { content: RESUME_ANSWER } }] });
+      return Response.json({ choices: [{ message: { content: answer } }] });
     }
     return realFetch(url, opts);
   };
@@ -112,9 +118,12 @@ async function startHarness({ sites = {}, isNew = () => true, collectorUp = true
     sentMail: fake.sentMail,
     // The collector going away, or coming back, mid-test.
     setCollectorUp: (up) => (state.collectorUp = up),
+    // Only the sent-emails table going away, or coming back.
+    setRecruiterSendsUp: (up) => (state.sendsUp = up),
     // Messages of one type sent to the panel, in order.
     of: (type) => events.filter((e) => e.type === type),
     storage: (key) => api.chrome.storage.local.get(key).then((r) => r[key]),
+    setStorage: (values) => api.chrome.storage.local.set(values),
     // Resolves with the first panel message matching `test`, sent from now
     // on or already sent; rejects after `timeout` ms.
     waitFor(test, timeout = 120000, what = "the expected message") {

@@ -172,6 +172,7 @@ class McpBrowser extends EventEmitter {
     this.byPage.clear();
     this.markerChecked.clear();
     this.profileScope = browser.mode === "attach" && browser.profile ? browser.profile : null;
+    this.stopRequested = false;
     this.setState("connecting");
 
     const server = require.resolve("chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js");
@@ -208,6 +209,7 @@ class McpBrowser extends EventEmitter {
 
     try {
       await this.client.connect(this.transport);
+      if (this.stopRequested) throw new Error("stopped");
       // The first call is what actually starts (or reaches) Chrome.
       const listed = await this.call("list_pages", {});
       const { ids } = parsePageIds(listed);
@@ -220,13 +222,18 @@ class McpBrowser extends EventEmitter {
       return this.status();
     } catch (err) {
       const message = err?.message || String(err);
+      // Stopped by hand is not a failure to report.
+      const stopped = this.stopRequested;
       await this.disconnect();
-      this.setState("disconnected", message);
-      throw new Error(message);
+      this.setState("disconnected", stopped ? null : message);
+      throw new Error(stopped ? "stopped" : message);
     }
   }
 
   async disconnect() {
+    // Also how a connection still being made is stopped: closing its client
+    // ends the wait, in doConnect.
+    if (this.state === "connecting") this.stopRequested = true;
     clearInterval(this.pollTimer);
     this.missing.clear();
     this.pollTimer = null;
