@@ -110,20 +110,35 @@ const resume = {
     EDUCATION: [
         [
             "Georgia Institute of Technology",
-            "Master of Science",
+            [
+                [
+                    "Master of Science",
+                    "Computer Science",
+                ],
+            ],
             "2016"
         ],
         [
             "University of Missouri Columbia",
-            "Master of Science",
+            [
+                [
+                    "Master of Science",
+                    "Computer Science",
+                ],
+            ],
             "2015"
         ],
         [
             "East China University of Science and Technology",
-            "Bachelor of Engineering",
+            [
+                [
+                    "Bachelor of Engineering",
+                    "Computer Science",
+                ],
+            ],
             "2013"
-        ]
-    ]
+        ],
+    ],
 };
 
 const resume1 = {

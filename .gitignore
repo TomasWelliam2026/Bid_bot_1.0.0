@@ -1,6 +1,9 @@
 # Dependencies
 backend/node_modules/
 frontend/node_modules/
+desktop-app/node_modules/
+desktop-app/dist/
 
 # Database
 backend/database/
+desktop-app/build/

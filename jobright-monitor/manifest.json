@@ -10,10 +10,17 @@
   "host_permissions": [
     "https://jobright.ai/*",
     "https://*.jobright.ai/*",
+    "https://www.dice.com/*",
+    "https://www.glassdoor.com/*",
+    "https://www.ziprecruiter.com/*",
+    "https://*.indeed.com/*",
+    "https://himalayas.app/*",
     "http://localhost/*",
     "http://127.0.0.1/*",
-    "https://api.openai.com/*"
+    "https://api.openai.com/*",
+    "https://mail.google.com/*"
   ],
+  "optional_host_permissions": ["https://*/*", "http://*/*"],
 
   "background": {
     "service_worker": "background.js",
@@ -27,6 +34,26 @@
         "https://*.jobright.ai/*"
       ],
       "js": ["content.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://www.dice.com/*"],
+      "js": ["content-dice.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://www.glassdoor.com/*"],
+      "js": ["content-glassdoor.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://www.ziprecruiter.com/*"],
+      "js": ["content-ziprecruiter.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://*.indeed.com/*"],
+      "js": ["content-indeed.js"],
       "run_at": "document_idle"
     }
   ],

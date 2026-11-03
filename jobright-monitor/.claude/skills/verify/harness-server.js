@@ -75,6 +75,13 @@ const path = require("path");
 const ROOT = path.resolve(__dirname, "..", "..", "..");
 const PORT = 5759;
 
+// The extension talks to the collector at http://localhost:4500 — on this
+// machine, that is the real archive. Set HARNESS_COLLECTOR to a scratch
+// backend (e.g. http://localhost:4599, started with its own DB_FILE and
+// DATA_ROOT) and every collector call the extension makes goes there instead,
+// so a test run never files, edits or deletes anything real.
+const COLLECTOR = process.env.HARNESS_COLLECTOR || "";
+
 const TYPES = {
   ".html": "text/html",
   ".css": "text/css",
@@ -92,6 +99,10 @@ window.chrome = {
     onInstalled: { addListener() {} },
     onStartup: { addListener() {} },
     onMessage: { addListener(fn) { window.__bgListeners.push(fn); } },
+    // Extension files are served from this harness's root, as the real
+    // getURL resolves them against the extension's — so the built-in resume
+    // templates under resume_temples/ load for real.
+    getURL(p) { return "/" + String(p).replace(/^\\//, ""); },
     // See gotcha #3 above: only sendResponse(...) ever resolves this — a
     // listener's return value is never treated as the reply.
     sendMessage(msg) {
@@ -116,17 +127,38 @@ window.chrome = {
       set(obj) {
         Object.assign(window.__storage, obj);
         return Promise.resolve();
+      },
+      remove(keys) {
+        for (const k of [].concat(keys)) delete window.__storage[k];
+        return Promise.resolve();
       }
     }
   },
-  action: { setBadgeText() { return Promise.resolve(); }, setBadgeBackgroundColor() { return Promise.resolve(); } }
+  action: { setBadgeText() { return Promise.resolve(); }, setBadgeBackgroundColor() { return Promise.resolve(); } },
+  // Placeholders, so code that looks for these at load finds them: the panel
+  // tracks the page in front through chrome.tabs events (Auto Fill). A test
+  // replaces whichever methods it drives, and fires the events it needs
+  // through window.__tabListeners.
+  tabs: {
+    query() { return Promise.resolve([]); },
+    create(o) { return Promise.resolve({ id: 999, ...o }); },
+    onActivated: { addListener(fn) { window.__tabListeners.activated.push(fn); } },
+    onUpdated: { addListener(fn) { window.__tabListeners.updated.push(fn); } }
+  },
+  permissions: { request() { return Promise.resolve(false); }, contains() { return Promise.resolve(false); } },
+  scripting: { executeScript() { return Promise.reject(new Error("no pages to inject into in the harness")); } }
 };
+window.__tabListeners = { activated: [], updated: [] };
 
 // Only api.openai.com is intercepted. EDIT THE RESPONSES BELOW per what
 // you're actually testing this session — this is a starting template, not a
 // fixed contract. Keep gotcha #4 in mind for any "never responds" case.
 const REAL_FETCH = window.fetch.bind(window);
+const COLLECTOR_REDIRECT = ${JSON.stringify(COLLECTOR)};
 window.fetch = async (url, opts) => {
+  if (COLLECTOR_REDIRECT && typeof url === "string" && url.startsWith("http://localhost:4500")) {
+    url = COLLECTOR_REDIRECT + url.slice("http://localhost:4500".length);
+  }
   if (typeof url === "string" && url.includes("api.openai.com")) {
     const auth = (opts && opts.headers && opts.headers.Authorization) || "";
     const body = JSON.parse((opts && opts.body) || "{}");

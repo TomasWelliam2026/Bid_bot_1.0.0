@@ -9,8 +9,12 @@ import { randomBytes } from 'node:crypto';
  *
  *  Everything Sheet-sync used to keep per tab (Web App URL, Sheet URL, Sheet
  *  tab name, secret) is now one setting shared by every tab -- see
- *  `getSheetSettings`/`updateSheetSettings` -- so only Profile (D) is still a
- *  per-tab column here. `sheet_region`, `sheet_web_app_url`, `sheet_url`,
+ *  `getSheetSettings`/`updateSheetSettings` -- so only Profile (D), Country
+ *  (C) and Role are still per-tab columns here. Country (C) lives in
+ *  `sheet_region`, the column C value from the per-tab days, and is set on its
+ *  own rather than taken from the tab's name. Role is the tab's job function:
+ *  never written to the sheet, it is what -- with Country (C) -- decides which
+ *  tabs list each other's applications. `sheet_web_app_url`, `sheet_url`,
  *  `sheet_tab_name` and `sheet_secret` stay in the table (dropping a column
  *  is more upheaval than a now-unused one is worth) but nothing reads or
  *  writes them through this map any more. */
@@ -18,6 +22,19 @@ const USER_PATCH_FIELDS = {
   name: 'name',
   auto: 'auto',
   applicant: 'sheet_applicant',
+  country: 'sheet_region',
+  role: 'sheet_role',
+  // What the extension writes this profile's resumes with -- its own prompt,
+  // master resume (and whether it is sent) and resume style, set from the
+  // extension's Profile screen. Blank prompt or style means the extension's
+  // built-in default.
+  prompt: 'gpt_prompt',
+  masterResume: 'master_resume',
+  masterResumeMode: 'master_resume_mode',
+  resumeStyle: 'resume_style',
+  // The profile's summary, which Recruiter Bid puts in the body of the email
+  // it sends to a recruiter.
+  summary: 'summary',
 };
 
 /** The `settings` keys `updateSheetSettings` will write, keyed by the
@@ -39,19 +56,34 @@ const SHEET_SETTINGS_FIELDS = {
  * on disk are the artefact, so the markup is dropped. `users` is the archive's
  * multi-tab concept: one row per country a human is applying from (the
  * dashboard shows these as tabs), each with their own Automatic/Human-check
- * preference and their own Profile (D) value. `records.user_id` points at
+ * preference and their own Profile (D), Country (C) and Role values -- and,
+ * since every tab is a profile the extension writes resumes for, their own
+ * prompt, master resume and resume style.
+ * `records.user_id` points at
  * one, or is NULL for a submission nobody has attributed yet ("Unassigned").
  *
  * Everywhere else Sheet-sync used to be configured per tab -- the Web App
  * URL, the Sheet URL, the Sheet tab name, the shared secret -- is one setting
  * for the whole archive now, held in `settings` (see `getSheetSettings`):
- * every tab sends its rows to the same Google Sheet, and Column C (Category)
- * is what tells them apart there, not a separate deployment each.
+ * every tab sends its rows to the same Google Sheet, and each tab's own
+ * Country (C) is what tells them apart there, not a separate deployment each.
  *
  * `status` is what happened to the documents; `sent_status` is the separate
  * question of whether the row has been copied to the Google Sheet. The two
  * never move together: a row can be filed and not sent, or sent and later
  * rejected.
+ *
+ * `sent_status` is the sheet status of the tab the record is filed under. A
+ * tab sharing its Country (C) and Role can send the same record too, written
+ * with that tab's own Profile (D) and Country (C) -- and that send is that
+ * tab's, one row in `sheet_sends`, never folded into the record's own status:
+ * sheet status belongs to a profile, not to the record.
+ *
+ * Deleting works the same way round. A record is deleted only from the tab it
+ * is filed under; a tab it is shared into deletes just its own part of it --
+ * the record leaves that tab's list (`hidden_rows`) and that tab's
+ * `sheet_sends` row goes -- while the record, its files and its own tab's
+ * status stay.
  */
 export class Store {
   constructor(file) {
@@ -107,7 +139,49 @@ export class Store {
         sheet_region      TEXT NOT NULL DEFAULT 'US',
         sheet_applicant   TEXT NOT NULL DEFAULT '',
         sheet_secret      TEXT NOT NULL DEFAULT '',
-        created_at        TEXT NOT NULL
+        created_at        TEXT NOT NULL,
+        sheet_role        TEXT NOT NULL DEFAULT '',
+        gpt_prompt        TEXT NOT NULL DEFAULT '',
+        master_resume     TEXT NOT NULL DEFAULT '',
+        master_resume_mode TEXT NOT NULL DEFAULT 'use',
+        resume_style      TEXT NOT NULL DEFAULT '',
+        summary           TEXT NOT NULL DEFAULT ''
+      );
+
+      -- A record sent to the sheet by a tab other than the one it is filed
+      -- under: one row per such tab, the way records.sent_status/sent_at is
+      -- the record's own tab's. Removed with the record, and with the tab.
+      CREATE TABLE IF NOT EXISTS sheet_sends (
+        record_id INTEGER NOT NULL,
+        user_id   INTEGER NOT NULL,
+        sent_at   TEXT NOT NULL,
+        PRIMARY KEY (record_id, user_id)
+      );
+
+      -- A record a tab it is shared into has deleted from its own list. The
+      -- record stays everywhere else. Removed with the record, and with the tab.
+      -- An email Recruiter Bid sent: one row per send. A recruiter's address
+      -- here is what keeps them from being imported and emailed again.
+      CREATE TABLE IF NOT EXISTS recruiter_sends (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        email_address TEXT NOT NULL COLLATE NOCASE,
+        company_name  TEXT NOT NULL DEFAULT '',
+        email_title   TEXT NOT NULL DEFAULT '',
+        email_content TEXT NOT NULL DEFAULT '',
+        arrived_date  TEXT NOT NULL DEFAULT '',
+        subject       TEXT NOT NULL DEFAULT '',
+        body          TEXT NOT NULL DEFAULT '',
+        profile_id    INTEGER,
+        profile_name  TEXT NOT NULL DEFAULT '',
+        sent_at       TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS recruiter_sends_email ON recruiter_sends (email_address);
+
+      CREATE TABLE IF NOT EXISTS hidden_rows (
+        record_id INTEGER NOT NULL,
+        user_id   INTEGER NOT NULL,
+        hidden_at TEXT NOT NULL,
+        PRIMARY KEY (record_id, user_id)
       );
 
       CREATE INDEX IF NOT EXISTS records_status ON records (status);
@@ -123,6 +197,22 @@ export class Store {
 
     this.addColumn('user_id', 'INTEGER');
     this.db.exec('CREATE INDEX IF NOT EXISTS records_user ON records (user_id)');
+
+    // Role arrived after the users table did. Blank until someone sets it,
+    // which leaves every existing tab listing only its own applications.
+    this.addColumn('sheet_role', "TEXT NOT NULL DEFAULT ''", 'users');
+
+    // Each tab is a profile the extension writes resumes for, with its own
+    // prompt, master resume and resume style -- which used to be one set for
+    // the whole extension. Blank until the extension sets them.
+    this.addColumn('gpt_prompt', "TEXT NOT NULL DEFAULT ''", 'users');
+    this.addColumn('master_resume', "TEXT NOT NULL DEFAULT ''", 'users');
+    this.addColumn('master_resume_mode', "TEXT NOT NULL DEFAULT 'use'", 'users');
+    this.addColumn('resume_style', "TEXT NOT NULL DEFAULT ''", 'users');
+
+    // The summary a recruiter email carries -- set from the extension's
+    // Profile screen, blank until then.
+    this.addColumn('summary', "TEXT NOT NULL DEFAULT ''", 'users');
 
     // Every record before this column existed belonged to the one person who
     // used this archive before it had a multi-user concept at all. Give that
@@ -172,15 +262,26 @@ export class Store {
       this.setSetting('sheet_secret', sisu?.sheet_secret || randomBytes(16).toString('hex'));
       this.setSetting('migrated_global_sheet_settings', 'true');
     }
+
+    // Column C used to be the tab's own name, sent with every row; now it is
+    // each tab's Country (C), set on its own. Seed it from the name once, so
+    // a tab keeps writing exactly what it wrote before until someone changes
+    // it -- `sheet_region` itself still holds the stale 'US' default from the
+    // per-tab days, which would have relabelled every tab.
+    if (this.getSetting('migrated_sheet_country') !== 'true') {
+      this.db.exec('UPDATE users SET sheet_region = name');
+      this.setSetting('migrated_sheet_country', 'true');
+    }
   }
 
-  /** Add a column to `records` unless it is already there. Returns whether it
-   *  actually added one, so a caller can run one-time follow-up work only on
-   *  the migration that introduces the column. */
-  addColumn(name, definition) {
-    const columns = this.db.prepare('PRAGMA table_info(records)').all();
+  /** Add a column to `table` (`records` unless said otherwise) unless it is
+   *  already there. Returns whether it actually added one, so a caller can run
+   *  one-time follow-up work only on the migration that introduces the
+   *  column. */
+  addColumn(name, definition, table = 'records') {
+    const columns = this.db.prepare(`PRAGMA table_info(${table})`).all();
     if (columns.some((column) => column.name === name)) return false;
-    this.db.exec(`ALTER TABLE records ADD COLUMN ${name} ${definition}`);
+    this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
     return true;
   }
 
@@ -201,8 +302,8 @@ export class Store {
      Where "Send to sheet" sends a row, and what rides along with it -- one
      setting for the whole archive (see SHEET_SETTINGS_FIELDS), not one per
      tab: every tab writes to the same Google Sheet, and Column C (Category)
-     is what tells a tab's rows apart there, filled in from the tab's own name
-     rather than a separate setting. */
+     is what tells a tab's rows apart there, filled in from that tab's own
+     Country (C) -- see USER_PATCH_FIELDS. */
 
   getSheetSettings() {
     return {
@@ -311,12 +412,83 @@ export class Store {
    * OK, so the answer lives with the record rather than in the browser that
    * happened to click the button -- every tab, and every later session, reads
    * the same status.
+   *
+   * `userId` is the tab that sent it. Left out, or the tab the record is filed
+   * under, it is the record's own `sent_status`; any other tab's send is that
+   * tab's own row in `sheet_sends`, so one profile's send never reads as
+   * another's.
    */
-  markSent(id, sent = true) {
-    this.db
-      .prepare('UPDATE records SET sent_status = ?, sent_at = ? WHERE id = ?')
-      .run(sent ? 'sent' : 'unsent', sent ? new Date().toISOString() : null, id);
+  markSent(id, sent = true, userId = null) {
+    const record = this.get(id);
+    if (!record) return null;
+    const at = sent ? new Date().toISOString() : null;
+
+    if (userId == null || userId === record.user_id) {
+      this.db
+        .prepare('UPDATE records SET sent_status = ?, sent_at = ? WHERE id = ?')
+        .run(sent ? 'sent' : 'unsent', at, id);
+    } else if (sent) {
+      this.db
+        .prepare(
+          `INSERT INTO sheet_sends (record_id, user_id, sent_at) VALUES (?, ?, ?)
+           ON CONFLICT(record_id, user_id) DO UPDATE SET sent_at = excluded.sent_at`,
+        )
+        .run(id, userId, at);
+    } else {
+      this.db.prepare('DELETE FROM sheet_sends WHERE record_id = ? AND user_id = ?').run(id, userId);
+    }
     return this.get(id);
+  }
+
+  /**
+   * A record taken off one tab's list -- a tab it is shared into, never the
+   * tab it is filed under -- along with that tab's own sheet status for it.
+   * That is the whole of that tab's part in it: the record itself, its files
+   * and its own tab's status are not touched.
+   */
+  hideFor(id, userId) {
+    this.db.prepare('DELETE FROM sheet_sends WHERE record_id = ? AND user_id = ?').run(id, userId);
+    this.db
+      .prepare(
+        `INSERT INTO hidden_rows (record_id, user_id, hidden_at) VALUES (?, ?, ?)
+         ON CONFLICT(record_id, user_id) DO NOTHING`,
+      )
+      .run(id, userId, new Date().toISOString());
+    return this.get(id);
+  }
+
+  /** Each row with what other tabs hold of it: `sheet_sends` -- [{ user_id,
+   *  sent_at }], oldest first, for every tab other than its own that has sent
+   *  it -- and `hidden_for`, the ids of the tabs that have deleted it from
+   *  their own list. One query per table for the lot, however many rows there
+   *  are; `recordId` narrows both to one record. */
+  withTabData(rows, recordId = null) {
+    if (!rows.length) return rows;
+    const where = recordId == null ? '' : 'WHERE record_id = ?';
+    const params = recordId == null ? [] : [recordId];
+    const add = (map, key, value) => {
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(value);
+    };
+
+    const sends = new Map();
+    for (const { record_id, user_id, sent_at } of this.db
+      .prepare(`SELECT record_id, user_id, sent_at FROM sheet_sends ${where} ORDER BY sent_at`)
+      .all(...params)) {
+      add(sends, record_id, { user_id, sent_at });
+    }
+    const hidden = new Map();
+    for (const { record_id, user_id } of this.db
+      .prepare(`SELECT record_id, user_id FROM hidden_rows ${where}`)
+      .all(...params)) {
+      add(hidden, record_id, user_id);
+    }
+
+    return rows.map((row) => ({
+      ...row,
+      sheet_sends: sends.get(row.id) ?? [],
+      hidden_for: hidden.get(row.id) ?? [],
+    }));
   }
 
   markRejected(id) {
@@ -334,7 +506,8 @@ export class Store {
   }
 
   get(id) {
-    return this.db.prepare('SELECT * FROM records WHERE id = ?').get(id) || null;
+    const record = this.db.prepare('SELECT * FROM records WHERE id = ?').get(id);
+    return record ? this.withTabData([record], id)[0] : null;
   }
 
   /**
@@ -349,11 +522,13 @@ export class Store {
   list({ status, limit = 200, order = 'desc' } = {}) {
     const direction = order === 'asc' ? 'ASC' : 'DESC';
     const cap = limit > 0 ? limit : -1;
-    return status
-      ? this.db
-          .prepare(`SELECT * FROM records WHERE status = ? ORDER BY id ${direction} LIMIT ?`)
-          .all(status, cap)
-      : this.db.prepare(`SELECT * FROM records ORDER BY id ${direction} LIMIT ?`).all(cap);
+    return this.withTabData(
+      status
+        ? this.db
+            .prepare(`SELECT * FROM records WHERE status = ? ORDER BY id ${direction} LIMIT ?`)
+            .all(status, cap)
+        : this.db.prepare(`SELECT * FROM records ORDER BY id ${direction} LIMIT ?`).all(cap),
+    );
   }
 
   /**
@@ -362,25 +537,35 @@ export class Store {
    * Matched case-insensitively on trimmed values: the same posting scraped
    * twice rarely comes back byte-identical, and a near-miss here would report
    * a job as new when it is already in the archive.
+   *
+   * `userId` narrows it to one tab: a number is that tab, null is the
+   * unassigned records, and leaving it out searches every tab.
    */
-  findByJob(company, jobTitle) {
+  findByJob(company, jobTitle, userId) {
+    const byTab = userId !== undefined;
+    const params = [String(company), String(jobTitle)];
+    if (byTab) params.push(userId);
     return (
       this.db
         .prepare(
           `SELECT * FROM records
              WHERE lower(trim(company)) = lower(trim(?))
                AND lower(trim(job_title)) = lower(trim(?))
+               ${byTab ? 'AND user_id IS ?' : ''}
              ORDER BY id DESC LIMIT 1`,
         )
-        .get(String(company), String(jobTitle)) || null
+        .get(...params) || null
     );
   }
 
-  /** Remove one record and its held draft. Returns the row that was removed. */
+  /** Remove one record, its held draft and what other tabs hold of it.
+   *  Returns the row that was removed. */
   remove(id) {
     const record = this.get(id);
     if (!record) return null;
     this.db.prepare('DELETE FROM drafts WHERE record_id = ?').run(id);
+    this.db.prepare('DELETE FROM sheet_sends WHERE record_id = ?').run(id);
+    this.db.prepare('DELETE FROM hidden_rows WHERE record_id = ?').run(id);
     this.db.prepare('DELETE FROM records WHERE id = ?').run(id);
     return record;
   }
@@ -388,7 +573,7 @@ export class Store {
   /** Clear the log. Returns every row that was removed, so its files can go too. */
   removeAll() {
     const records = this.db.prepare('SELECT * FROM records').all();
-    this.db.exec('DELETE FROM drafts; DELETE FROM records;');
+    this.db.exec('DELETE FROM drafts; DELETE FROM sheet_sends; DELETE FROM hidden_rows; DELETE FROM records;');
     return records;
   }
 
@@ -428,10 +613,10 @@ export class Store {
     if (!trimmed) throw new Error('a tab needs a name');
     const result = this.db
       .prepare(
-        `INSERT INTO users (name, auto, sheet_applicant, created_at)
-         VALUES (?, ?, ?, ?)`,
+        `INSERT INTO users (name, auto, sheet_applicant, sheet_region, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
       )
-      .run(trimmed, auto ? 1 : 0, trimmed, new Date().toISOString());
+      .run(trimmed, auto ? 1 : 0, trimmed, trimmed, new Date().toISOString());
     return this.getUser(Number(result.lastInsertRowid));
   }
 
@@ -461,6 +646,36 @@ export class Store {
   /** Applies whichever of `patch`'s keys are real user fields; anything else
    *  in `patch` is ignored rather than erroring, so a caller can pass a whole
    *  request body through without pre-filtering it. */
+  /** One email Recruiter Bid sent. Returns the stored row. */
+  addRecruiterSend(send) {
+    const text = (value) => String(value ?? '');
+    const { lastInsertRowid } = this.db
+      .prepare(
+        `INSERT INTO recruiter_sends
+           (email_address, company_name, email_title, email_content, arrived_date,
+            subject, body, profile_id, profile_name, sent_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        text(send.email_address),
+        text(send.company_name),
+        text(send.email_title),
+        text(send.email_content),
+        text(send.arrived_date),
+        text(send.subject),
+        text(send.body),
+        Number.isInteger(send.profile_id) ? send.profile_id : null,
+        text(send.profile_name),
+        text(send.sent_at) || new Date().toISOString()
+      );
+    return this.db.prepare('SELECT * FROM recruiter_sends WHERE id = ?').get(lastInsertRowid);
+  }
+
+  /** Every email Recruiter Bid sent, newest first. */
+  listRecruiterSends() {
+    return this.db.prepare('SELECT * FROM recruiter_sends ORDER BY sent_at DESC, id DESC').all();
+  }
+
   updateUser(id, patch) {
     const sets = [];
     const values = [];
@@ -489,6 +704,10 @@ export class Store {
    * `user_id` pointing at a row that no longer exists.
    */
   deleteUser(id) {
+    // Its sends of other tabs' records are its own sheet status, and its
+    // deleted list its own list: both go with it.
+    this.db.prepare('DELETE FROM sheet_sends WHERE user_id = ?').run(id);
+    this.db.prepare('DELETE FROM hidden_rows WHERE user_id = ?').run(id);
     this.db.prepare('DELETE FROM users WHERE id = ?').run(id);
   }
 

@@ -96,7 +96,7 @@ function submittedDate(value) {
 }
 
 /** Render and file one submission, updating the record either way. */
-async function fileSubmission(id, { company, jobTitle, jobUrl, documents, date }) {
+async function fileSubmission(id, { company, jobTitle, jobUrl, documents, date, profile }) {
   try {
     const stored = await storeSubmission({
       root: config.dataRoot,
@@ -105,6 +105,7 @@ async function fileSubmission(id, { company, jobTitle, jobUrl, documents, date }
       jobUrl,
       documents,
       date,
+      profile,
     });
     store.dropDraft(id);
     const record = store.markSaved(id, stored);
@@ -196,7 +197,11 @@ app.post('/save-data', async (req, res) => {
   // Hold the markup until it is safely on disk: a render that fails can then be
   // retried from the dashboard instead of losing what was sent.
   store.saveDraft(id, documents);
-  const result = await fileSubmission(id, { company, jobTitle, jobUrl, documents, date });
+  // The applicant's own name, not the tab's -- Profile (D) in the Sheet sync
+  // panel (`sheet_applicant`), falling back to the tab's name only while that
+  // is still blank, so two unconfigured tabs still never collide.
+  const applicantName = user ? user.sheet_applicant || user.name : undefined;
+  const result = await fileSubmission(id, { company, jobTitle, jobUrl, documents, date, profile: applicantName });
   return res.status(result.ok ? 201 : 500).json({
     ok: result.ok,
     id,
@@ -215,7 +220,7 @@ app.post('/save-data', async (req, res) => {
 /**
  * Has this posting already been taken?
  *
- *   POST /get-item  { company, job_title }
+ *   POST /get-item  { company, job_title, user? }
  *     -> { code: 200, msg: 'already exist' }
  *     -> { code: 401, msg: 'not exist' }
  *
@@ -223,6 +228,12 @@ app.post('/save-data', async (req, res) => {
  * reads one place for the answer and never has to treat a normal "no" as a
  * transport failure. `record` rides along for callers that want to know what
  * was found -- a rejected posting is still a posting that was seen before.
+ *
+ * `user` is the tab name, the same string /save-data files the job under.
+ * When it is sent, only that tab counts: the same company and title on
+ * another tab is somebody else's application, so this one is still new. A
+ * blank `user` means the unassigned records, and a tab that does not exist
+ * yet holds nothing. Without `user` at all, every tab is searched.
  */
 app.post('/get-item', (req, res) => {
   const company = String(req.body?.company || '').trim();
@@ -232,7 +243,19 @@ app.post('/get-item', (req, res) => {
     return res.status(400).json({ code: 400, msg: 'company and job_title are required' });
   }
 
-  const record = store.findByJob(company, jobTitle);
+  let userId;
+  if (req.body && Object.hasOwn(req.body, 'user')) {
+    const userName = String(req.body.user || '').trim();
+    if (userName) {
+      const user = store.getUserByName(userName);
+      if (!user) return res.json({ code: 401, msg: 'not exist' });
+      userId = user.id;
+    } else {
+      userId = null;
+    }
+  }
+
+  const record = store.findByJob(company, jobTitle, userId);
   if (!record) return res.json({ code: 401, msg: 'not exist' });
 
   return res.json({
@@ -245,6 +268,7 @@ app.post('/get-item', (req, res) => {
       job_url: record.job_url,
       status: record.status,
       dir_path: record.dir_path,
+      user_id: record.user_id,
       created_at: record.created_at,
     },
   });
@@ -275,6 +299,10 @@ app.post('/api/records/:id/approve', async (req, res) => {
   const draft = store.getDraft(id);
   if (!draft) return res.status(410).json({ ok: false, error: 'The submitted documents are no longer held' });
 
+  // The applicant's own name, not the tab's -- Profile (D), falling back to
+  // the tab's name only while that is still blank. See the matching comment
+  // in /save-data above.
+  const approvingUser = record.user_id ? store.getUser(record.user_id) : null;
   const result = await fileSubmission(id, {
     company: record.company,
     jobTitle: record.job_title,
@@ -282,6 +310,7 @@ app.post('/api/records/:id/approve', async (req, res) => {
     documents: draft,
     // The day the application was made, which for an imported row is not today.
     date: submittedDate(record.created_at),
+    profile: approvingUser ? approvingUser.sheet_applicant || approvingUser.name : undefined,
   });
   res.status(result.ok ? 200 : 500).json(result);
 });
@@ -307,16 +336,30 @@ app.post('/api/records/:id/sent', (req, res) => {
 
   // `{ sent: false }` puts a row back to unsent, for a row that has to go again.
   const sent = req.body?.sent !== false;
-  const record = store.markSent(id, sent);
+
+  // `user_id` is the tab that sent it, which is not always the tab the record
+  // is filed under: a tab sharing its Country (C) and Role can send it too,
+  // with its own Profile (D) and Country (C), and that send is that tab's
+  // sheet status, not the record's own. Left out, it is the record's own.
+  let userId = null;
+  if (req.body?.user_id != null) {
+    userId = Number(req.body.user_id);
+    if (!store.getUser(userId)) return res.status(404).json({ ok: false, error: 'No such tab' });
+  }
+
+  const record = store.markSent(id, sent, userId);
   pushRecord(record);
-  console.log(`[${sent ? 'sent' : 'unsent'}] #${id} ${record.company}`);
+  const by = userId != null && userId !== record.user_id ? ` by ${store.getUser(userId).name}` : '';
+  console.log(`[${sent ? 'sent' : 'unsent'}] #${id} ${record.company}${by}`);
   res.json({ ok: true, record });
 });
 
 /* --- users --------------------------------------------------------------------
    One row per tab the archive tracks -- a country a human is applying from,
    shown in the dashboard as a tab, each with its own Automatic/Human-check
-   preference and its own Profile (D) value. Broadcasting every create/update
+   preference and its own Profile (D), Country (C) and Role values -- and, as
+   a profile the extension writes resumes for, its own prompt, master resume
+   and resume style, which the extension reads and saves here. Broadcasting every create/update
    as its own SSE event, the same way a record change is, is what keeps two
    open dashboards from disagreeing about a tab's settings until one of them
    happens to refetch. Sheet-sync's Web App URL, Sheet URL, Sheet tab name and
@@ -329,10 +372,42 @@ const userJson = (user) => ({
   created_at: user.created_at,
   sheet: {
     applicant: user.sheet_applicant,
+    // Column C on the sheet -- its own value, not the tab's name.
+    country: user.sheet_region,
+    // The tab's job function. Not on the sheet: tabs sharing it and Country
+    // (C) list each other's applications in the dashboard.
+    role: user.sheet_role,
+  },
+  // What the extension writes this profile's resumes with, set from its
+  // Profile screen. A blank prompt or style is the extension's own default.
+  resume: {
+    prompt: user.gpt_prompt,
+    masterResume: user.master_resume,
+    masterResumeMode: user.master_resume_mode === 'none' ? 'none' : 'use',
+    style: user.resume_style,
+    // The body of the emails Recruiter Bid sends for this profile.
+    summary: user.summary || '',
   },
 });
 
 const pushUser = (user) => broadcast('user', { user: userJson(user) });
+
+/**
+ * The emails Recruiter Bid has sent. The extension saves each one here once
+ * Gmail has confirmed it, and reads the addresses back to skip those
+ * recruiters on the next import.
+ */
+app.get('/api/recruiter-sends', (_req, res) => {
+  res.json({ ok: true, sends: store.listRecruiterSends() });
+});
+
+app.post('/api/recruiter-sends', (req, res) => {
+  const body = req.body || {};
+  if (!String(body.email_address || '').trim()) {
+    return res.status(400).json({ ok: false, error: 'email_address is required' });
+  }
+  res.status(201).json({ ok: true, send: store.addRecruiterSend(body) });
+});
 
 app.get('/api/users', (_req, res) => {
   res.json({ users: store.listUsers().map(userJson) });
@@ -377,6 +452,13 @@ app.patch('/api/users/:id', (req, res) => {
 
   if ('auto' in body) patch.auto = Boolean(body.auto);
   if ('applicant' in body) patch.applicant = body.applicant;
+  if ('country' in body) patch.country = body.country;
+  if ('role' in body) patch.role = body.role;
+  if ('prompt' in body) patch.prompt = body.prompt;
+  if ('masterResume' in body) patch.masterResume = body.masterResume;
+  if ('masterResumeMode' in body) patch.masterResumeMode = body.masterResumeMode === 'none' ? 'none' : 'use';
+  if ('resumeStyle' in body) patch.resumeStyle = body.resumeStyle;
+  if ('summary' in body) patch.summary = String(body.summary ?? '');
 
   const user = store.updateUser(id, patch);
   pushUser(user);
@@ -445,10 +527,30 @@ app.patch('/api/sheet-settings', (req, res) => {
 
 const wantsFiles = (req) => /^(1|true|yes)$/i.test(String(req.query.files ?? req.body?.files ?? ''));
 
+/**
+ * `?user_id=` is the tab the delete was made on. A tab the record is shared
+ * into -- same Country (C) and Role -- deletes only its own part of it: the
+ * record leaves that tab's list and that tab's sheet status for it goes, while
+ * the record, its files and the tab it is filed under keep everything. That
+ * answers with `hidden` rather than `ids`, and every dashboard hears it as an
+ * ordinary record update. Left out, or the record's own tab, it is deleted.
+ */
 app.delete('/api/records/:id', async (req, res) => {
   const id = Number(req.params.id);
+  const existing = store.get(id);
+  if (!existing) return res.status(404).json({ ok: false, error: 'No such record' });
+
+  const userId = req.query.user_id ? Number(req.query.user_id) : null;
+  if (userId != null && userId !== existing.user_id) {
+    const tab = store.getUser(userId);
+    if (!tab) return res.status(404).json({ ok: false, error: 'No such tab' });
+    const record = store.hideFor(id, userId);
+    console.log(`[removed] #${id} ${record.company} from "${tab.name}" — still on its own tab`);
+    pushRecord(record);
+    return res.json({ ok: true, ids: [], hidden: [id], filesRemoved: 0 });
+  }
+
   const record = store.remove(id);
-  if (!record) return res.status(404).json({ ok: false, error: 'No such record' });
 
   const removed = wantsFiles(req) ? await removeFiles(filesOf(record), config.dataRoot) : [];
   console.log(`[deleted] #${id} ${record.company}${removed.length ? ` and ${removed.length} file(s)` : ''}`);

@@ -1,0 +1,20 @@
+{
+  "name": "bid-bot-desktop",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Bid Bot as a Windows app: the Jobright Live Feed extension's job pipeline, driving Google Chrome through the Chrome DevTools MCP server.",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test --test-concurrency=1 \"test/*.test.js\"",
+    "build": "node scripts/build.js"
+  },
+  "devDependencies": {
+    "@electron/packager": "^20.3.0",
+    "electron": "^45.0.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "chrome-devtools-mcp": "^1.12.0"
+  }
+}

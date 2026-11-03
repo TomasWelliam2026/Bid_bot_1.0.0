@@ -11,9 +11,14 @@
             aria-selected="true" aria-controls="pane-generate" tabindex="0">
       Generate JD &amp; Resume
     </button>
+    <!-- Auto Fill; the ids are the ones the tab had as "Job bid". -->
     <button id="tab-bid" class="tab" role="tab"
             aria-selected="false" aria-controls="pane-bid" tabindex="-1">
-      Job bid
+      Auto Fill
+    </button>
+    <button id="tab-recruiter" class="tab" role="tab"
+            aria-selected="false" aria-controls="pane-recruiter" tabindex="-1">
+      Recruiter Bid
     </button>
   </nav>
 
@@ -21,83 +26,307 @@
   <section id="pane-generate" class="pane" role="tabpanel" aria-labelledby="tab-generate">
     <header>
       <div class="titlebar">
-        <h1>Jobright feed</h1>
-        <span id="count" class="count">0</span>
-        <button id="themeToggle" class="icon-btn" type="button"
-                aria-pressed="false" aria-label="Switch to dark mode" title="Switch to dark mode">
-          <svg id="iconMoon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false"
-               fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
-          </svg>
-          <svg id="iconSun" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false"
-               fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" hidden>
-            <circle cx="12" cy="12" r="4"/>
-            <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>
-          </svg>
-        </button>
-        <button id="openSettings" class="icon-btn" type="button"
-                aria-controls="pane-profile" aria-expanded="false"
-                aria-label="Settings" title="Settings">
+        <button id="openUserSettings" class="icon-btn" type="button"
+                aria-controls="userPanel" aria-expanded="false"
+                aria-label="User Settings" title="User Settings">
           <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false"
                fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="3"/>
-            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+            <circle cx="9" cy="7" r="4"/><path d="M2 21v-1a6 6 0 0 1 6-6h3"/><circle cx="18" cy="17" r="2.5"/><path d="M18 12.5v2M18 19.5v2M13.5 17h2M20.5 17h2M14.8 13.8l1.4 1.4M19.8 18.8l1.4 1.4M14.8 20.2l1.4-1.4M19.8 15.2l1.4-1.4"/>
           </svg>
         </button>
+        <button id="openChatgpt" class="icon-btn" type="button"
+                aria-controls="gptPanel" aria-expanded="false"
+                aria-label="ChatGPT Settings" title="ChatGPT Settings">
+          <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false" fill="currentColor">
+            <path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z"/>
+          </svg>
+        </button>
+        <!-- Where the job comes from: the jobright feed, or typed in by hand —
+             a small switch at the row's end. Everything after it is the same
+             pipeline either way. -->
+        <div id="modeSwitch" class="mode-switch" role="radiogroup" aria-label="Where jobs come from">
+          <button id="mode-auto" class="mode" type="button" role="radio"
+                  aria-checked="true" aria-controls="auto-body" tabindex="0">
+            <svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg>
+            Auto
+          </button>
+          <button id="mode-manual" class="mode" type="button" role="radio"
+                  aria-checked="false" aria-controls="manual-body" tabindex="-1">
+            <svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>
+            Manual
+          </button>
+        </div>
+        <!-- How the run is going, beside the switch. Auto's only: Manual has
+             no run. -->
+        <div id="runInfo" class="run-info">
+          <p id="status">Idle.</p>
+        </div>
+      </div>
+      <!-- What Start checked, under the switch, and item by item beneath
+           that: open when something is wrong. Auto's only too. -->
+      <div id="preflightRow" class="preflight-row">
+        <details id="preflight" class="preflight" hidden>
+          <summary id="preflightSummary"></summary>
+        </details>
+        <ul id="preflightList" class="preflight" hidden></ul>
       </div>
 
-      <!-- Where the job comes from: the jobright feed, or typed in by hand.
-           Everything after the switch is the same pipeline either way. -->
-      <div id="modeSwitch" class="mode-switch" role="radiogroup" aria-label="Where jobs come from">
-        <button id="mode-auto" class="mode" type="button" role="radio"
-                aria-checked="true" aria-controls="auto-body" tabindex="0">Auto</button>
-        <button id="mode-manual" class="mode" type="button" role="radio"
-                aria-checked="false" aria-controls="manual-body" tabindex="-1">Manual</button>
+      <!-- ChatGPT Settings: opened by the GPT button above it (in the desktop
+           app, by the one in its title bar, and shown beneath that), closed
+           by its own Save. -->
+      <div id="gptPanel" class="form gpt-panel" hidden>
+        <label class="field-label" for="apiKey">OpenAI API key</label>
+        <input id="apiKey" type="password" autocomplete="off" spellcheck="false"
+               placeholder="sk-…">
+        <!-- Until the key's own models are loaded, a built-in list; once they
+             are, exactly the models this key can use (sidepanel.js
+             renderModels replaces these options). -->
+        <label class="field-label" for="model">Model</label>
+        <select id="model">
+          <option value="gpt-4o-mini">gpt-4o-mini — fast and cheap</option>
+          <option value="gpt-4o">gpt-4o — stronger writing</option>
+          <option value="gpt-4.1-mini">gpt-4.1-mini</option>
+          <option value="gpt-4.1">gpt-4.1</option>
+          <option value="gpt-4-turbo">gpt-4-turbo</option>
+          <option value="gpt-5.6-sol">gpt-5.6-sol</option>
+          <option value="gpt-5.6-terra">gpt-5.6-terra</option>
+          <option value="__custom__">Custom…</option>
+        </select>
+        <input id="modelCustom" type="text" autocomplete="off" spellcheck="false"
+               placeholder="model id, e.g. gpt-4o-2024-11-20" hidden>
+        <div class="controls test-actions">
+          <button id="loadModels" type="button">Load models</button>
+          <p id="modelsStatus" class="hint" hidden></p>
+        </div>
+        <div class="controls test-actions">
+          <button id="testConnection" type="button">Test connection</button>
+          <p id="testStatus" class="hint" hidden></p>
+        </div>
+        <div class="controls form-actions">
+          <button id="gptSave" class="primary" type="button">Save</button>
+        </div>
+        <p id="gptStatus" class="hint" hidden></p>
+      </div>
+
+      <!-- User Settings: the bid profiles — country and role, each one's prompt,
+           master resume, Summary and style. Opened by its button above (in the
+           desktop app, by the one in its browser bar), closed by its Save. -->
+      <div id="userPanel" class="form gpt-panel user-panel" hidden>
+        <!-- A profile is one of the dashboard's tabs. Country and Role pick which
+             of them a caught job gets resumes for; each one listed below has its
+             own prompt, master resume and resume style, kept on its tab. -->
+        <section id="subpane-profile">
+          <div class="field-row profile-pick">
+            <div>
+              <label class="field-label" for="profileCountry">Country</label>
+              <select id="profileCountry">
+                <option value="">— Select —</option>
+              </select>
+            </div>
+            <div>
+              <label class="field-label" for="profileRole">Role</label>
+              <select id="profileRole">
+                <option value="">— Select —</option>
+              </select>
+            </div>
+            <button id="reloadProfiles" class="icon-btn" type="button"
+                    aria-label="Reload profiles" title="Reload profiles">
+              <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false"
+                   fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 12a9 9 0 1 1-2.64-6.36L21 8"/>
+                <path d="M21 3v5h-5"/>
+              </svg>
+            </button>
+          </div>
+          <p id="profilesStatus" class="hint" hidden></p>
+
+          <div id="profileList" class="profile-list"></div>
+          <p id="profileEmpty" class="hint warn" hidden></p>
+
+          <!-- The built resume at letter width, scaled down to the panel. Sandboxed
+               without scripts; same-origin only so its height can be read. Kept
+               here while closed, and moved into the card whose style it shows. -->
+          <div id="stylePreview" class="style-preview" hidden>
+            <div class="style-preview-bar">
+              <span id="stylePreviewTitle" class="style-preview-title"></span>
+              <button id="stylePreviewOpen" type="button">Open full size</button>
+              <button id="stylePreviewClose" type="button">Close</button>
+            </div>
+            <div class="style-preview-page">
+              <div id="stylePreviewSizer" class="style-preview-sizer">
+                <iframe id="stylePreviewFrame" sandbox="allow-same-origin" title="Resume preview"></iframe>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <div class="controls form-actions">
+          <button id="saveProfile" class="primary" disabled>Save</button>
+          <button id="revertProfile" disabled>Revert</button>
+        </div>
+
+        <p id="profileStatus" class="hint"></p>
       </div>
 
       <div id="auto-controls">
+        <!-- Which job board Auto fetches from. Only Jobright is wired up; the
+             others can be picked, and say so, but Start stays off for them. -->
+        <div class="source-row">
+          <button id="openSearch" class="icon-btn" type="button"
+                  aria-controls="searchPanel" aria-expanded="false"
+                  aria-label="Search Settings" title="Search Settings">
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false"
+                 fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="10.5" cy="10.5" r="7"/>
+              <path d="M21 21l-5.5-5.5"/>
+              <path d="M7.5 9h6M7.5 12h3.5"/>
+            </svg>
+          </button>
+          <select id="jobSource" class="source-select" aria-label="Job board">
+            <option value="jobright">Jobright</option>
+            <option value="dice">Dice</option>
+            <option value="glassdoor">Glassdoor</option>
+            <option value="himalayas">Himalayas</option>
+            <option value="indeed">Indeed</option>
+            <option value="monster">Monster</option>
+            <option value="ziprecruiter">ZipRecruiter</option>
+          </select>
+        </div>
+        <p id="sourceNote" class="hint warn source-note" hidden></p>
+
+        <!-- Search Settings: what each job site is searched for, set by the
+             user; the bot has no search of its own. Several terms, separated by
+             ";", are searched one after the other. Country picks which
+             country's Indeed site is searched, by ISO code, and is shown for
+             Indeed only. Opened by the icon above, closed by its Save. -->
+        <div id="searchPanel" class="form gpt-panel search-panel" hidden>
+          <p id="searchNote" class="hint" hidden>Jobright lists its own recommendations, so it has nothing to search.</p>
+          <fieldset id="indeedSearch" class="search-form">
+            <legend id="searchLegend" class="field-label">Search</legend>
+  
+            <!-- The board's own two search boxes, "What" and "Where". -->
+            <label class="field-label" for="searchRole">Search terms</label>
+            <input id="searchRole" type="text" autocomplete="off"
+                   placeholder="e.g. data engineer; python developer">
+            <p id="searchTermsHint" class="hint search-hint">Separate several with “;” — each is searched in turn.</p>
+  
+            <div id="searchLocationField">
+              <label class="field-label" for="searchLocation">Where</label>
+              <input id="searchLocation" type="text" autocomplete="off" placeholder="City, state, zip code, or &quot;remote&quot;">
+            </div>
+  
+            <div class="field-row">
+              <div id="searchCountryField">
+                <label class="field-label" for="searchCountry">Country</label>
+                <select id="searchCountry">
+                  <option value="US">United States</option>
+                  <option value="GB">United Kingdom</option>
+                  <option value="CA">Canada</option>
+                  <option value="AU">Australia</option>
+                  <option value="IN">India</option>
+                  <option value="DE">Germany</option>
+                  <option value="FR">France</option>
+                  <option value="IE">Ireland</option>
+                  <option value="NL">Netherlands</option>
+                  <option value="ES">Spain</option>
+                  <option value="IT">Italy</option>
+                  <option value="PL">Poland</option>
+                  <option value="SE">Sweden</option>
+                  <option value="CH">Switzerland</option>
+                  <option value="BE">Belgium</option>
+                  <option value="AT">Austria</option>
+                  <option value="PT">Portugal</option>
+                  <option value="SG">Singapore</option>
+                  <option value="JP">Japan</option>
+                  <option value="PH">Philippines</option>
+                  <option value="AE">United Arab Emirates</option>
+                  <option value="ZA">South Africa</option>
+                  <option value="NZ">New Zealand</option>
+                  <option value="BR">Brazil</option>
+                  <option value="MX">Mexico</option>
+                </select>
+              </div>
+              <div>
+                <label class="field-label" for="searchJobType">Job type</label>
+                <select id="searchJobType">
+                  <option value="">Any</option>
+                  <option value="fulltime">Full-time</option>
+                  <option value="parttime">Part-time</option>
+                  <option value="contract">Contract</option>
+                  <option value="internship">Internship</option>
+                </select>
+              </div>
+              <div>
+                <label class="field-label" for="searchPosted">Posted</label>
+                <select id="searchPosted">
+                  <option value="">Any time</option>
+                  <option value="1">Last 24 hours</option>
+                  <option value="3">Last 3 days</option>
+                  <option value="7">Last 7 days</option>
+                  <option value="14">Last 14 days</option>
+                </select>
+              </div>
+            </div>
+  
+            <label class="switch-row" for="searchRemote">
+              <input id="searchRemote" class="switch-input" type="checkbox">
+              <span class="switch" aria-hidden="true"><span class="switch-knob"></span></span>
+              Remote only
+            </label>
+          </fieldset>
+          <div class="controls form-actions">
+            <button id="searchSave" class="primary" type="button">Save</button>
+          </div>
+        </div>
+
+        <!-- Capture only: each job's company, title, link and description is
+             kept for export, and no resume is written or sent. -->
+        <label class="switch-row" for="captureOnly">
+          <input id="captureOnly" class="switch-input" type="checkbox">
+          <span class="switch" aria-hidden="true"><span class="switch-knob"></span></span>
+          Capture job info only — no resumes
+        </label>
+
         <div class="controls">
           <button id="start" class="primary">Start</button>
           <button id="stop" class="danger" disabled>Stop</button>
           <button id="clear">Clear</button>
         </div>
-
-        <label class="opt">
-          <input id="autoScroll" type="checkbox" checked>
-          Scroll the list to load every card
-        </label>
-
-        <label class="opt">
-          <input id="visitJobs" type="checkbox" checked>
-          Open each job · drop LinkedIn · read details
-        </label>
-
-        <label class="opt">
-          <input id="saveJobs" type="checkbox" checked>
-          POST to <code>localhost:4500/save-data</code>
-        </label>
       </div>
-
-      <p id="manual-lead" class="hint" hidden>
-        One posting, typed in — no tab is opened and the feed is left alone.
-      </p>
     </header>
 
     <div id="auto-body" class="mode-body">
-      <p id="status">Idle.</p>
       <p id="queue" hidden></p>
+
+      <!-- The jobs captured so far, across runs, and their export. -->
+      <div id="captures" class="captures" hidden>
+        <span id="captureCount" class="capture-count"></span>
+        <div class="controls">
+          <button id="exportCsv" type="button">Export CSV</button>
+          <button id="exportJson" type="button">Export JSON</button>
+          <button id="clearCaptures" class="danger" type="button">Clear</button>
+        </div>
+      </div>
+
+      <!-- Shown while a run waits for someone to pass a site's human check. -->
+      <div id="verifyNotice" class="verify-notice" role="alert" hidden>
+        <p class="verify-title">Paused — Indeed wants a human check</p>
+        <p id="verifyText" class="verify-text"></p>
+        <div class="controls">
+          <button id="verifyShow" class="primary" type="button">Show the tab</button>
+        </div>
+      </div>
 
       <ul id="list" aria-live="polite"></ul>
 
-      <p id="empty" class="empty">
-        Press <strong>Start</strong>. The recommendations page opens and every card
-        appears here as it is found.
-      </p>
     </div>
 
     <!-- The same generate-and-save pass the queue runs, with the two things it
          would have read off the page typed in instead. -->
     <div id="manual-body" class="form" hidden>
+      <!-- Desktop app, connected to Octo Browser: fills the form from its tab. -->
+      <button id="catchJob" type="button" hidden>Catch Job</button>
+
       <label class="field-label" for="manualCompany">Company name</label>
       <input id="manualCompany" type="text" autocomplete="off" placeholder="e.g. Acme Robotics">
 
@@ -111,10 +340,6 @@
       <textarea id="manualDescription" rows="14"
                 placeholder="Paste the posting — responsibilities, requirements, the lot."></textarea>
 
-      <p class="hint">Sent to OpenAI with your prompt and master resume, exactly as a job read
-        from the feed is. The resume that comes back is POSTed to
-        <code>localhost:4500/save-data</code>, which writes the PDFs.</p>
-
       <div class="controls form-actions">
         <button id="manualGenerate" class="primary" type="button">Generate</button>
       </div>
@@ -124,101 +349,38 @@
     </div>
   </section>
 
+  <!-- Auto Fill: the applicant's details, and "Fill this page" puts them into
+       the job application form on the page in front (autofill.js). -->
   <section id="pane-bid" class="pane" role="tabpanel" aria-labelledby="tab-bid" hidden>
-    <p class="empty">
-      <strong>Job bid</strong> has no behaviour yet — this pane is the shell for it.
-    </p>
-    <p class="empty">
-      <span id="bidCount">0</span> job(s) collected so far are available to it,
-      with their description, company, title and URL already read.
-    </p>
   </section>
 
-  <!-- Opened by the "Settings" button on the Generate pane, not a top-level tab. -->
-  <section id="pane-profile" class="pane" role="region" aria-labelledby="settings-title" hidden>
-    <div class="settings-bar">
-      <button id="closeSettings" class="back" type="button">&larr; Back</button>
-      <h2 id="settings-title">Settings</h2>
+  <!-- Recruiter Bid: recruiters' emails imported from a JSON file; picking
+       one sends them an email from Gmail — the subject, and the Summary of
+       the profile picked here as its body. -->
+  <section id="pane-recruiter" class="pane" role="tabpanel" aria-labelledby="tab-recruiter" hidden>
+    <div class="rb-bar">
+      <button id="rbImport" class="primary" type="button">
+        <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" focusable="false" fill="none"
+             stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/>
+        </svg>
+        Import JSON
+      </button>
+      <input id="rbFile" type="file" accept=".json,application/json" hidden>
+      <span id="rbCount" class="rb-count"></span>
+      <button id="rbClear" type="button" hidden>Clear</button>
     </div>
-
-    <nav class="tabs" id="settingsTabs" role="tablist" aria-label="Settings sections">
-      <button id="subtab-chatgpt" class="tab" role="tab"
-              aria-selected="true" aria-controls="subpane-chatgpt" tabindex="0">
-        ChatGPT setting
-      </button>
-      <button id="subtab-resumeStyle" class="tab" role="tab"
-              aria-selected="false" aria-controls="subpane-resumeStyle" tabindex="-1">
-        Resume style
-      </button>
-      <button id="subtab-profile" class="tab" role="tab"
-              aria-selected="false" aria-controls="subpane-profile" tabindex="-1">
-        Profile
-      </button>
-    </nav>
-
-    <div class="form">
-      <section id="subpane-chatgpt" class="subpane" role="tabpanel" aria-labelledby="subtab-chatgpt">
-        <label class="field-label" for="apiKey">OpenAI API key</label>
-        <input id="apiKey" type="password" autocomplete="off" spellcheck="false"
-               placeholder="sk-…">
-        <label class="field-label" for="model">Model</label>
-        <select id="model">
-          <option value="gpt-4o-mini">gpt-4o-mini — fast and cheap</option>
-          <option value="gpt-4o">gpt-4o — stronger writing</option>
-          <option value="gpt-4.1-mini">gpt-4.1-mini</option>
-          <option value="gpt-4.1">gpt-4.1</option>
-          <option value="gpt-4-turbo">gpt-4-turbo</option>
-          <option value="__custom__">Custom…</option>
-        </select>
-        <input id="modelCustom" type="text" autocomplete="off" spellcheck="false"
-               placeholder="model id, e.g. gpt-4o-2024-11-20" hidden>
-        <div class="controls test-actions">
-          <button id="testConnection" type="button">Test connection</button>
-          <p id="testStatus" class="hint" hidden></p>
-        </div>
-
-        <label class="field-label" for="prompt">Prompt</label>
-        <textarea id="prompt" rows="7"
-                  placeholder="Instructions sent with each job description…"></textarea>
-        <label class="field-label" for="masterResume">Master resume</label>
-        <textarea id="masterResume" rows="12"
-                  placeholder="Paste your full resume — every role, bullet and skill. Sent with each job description so the tailored resume is built from your real experience."></textarea>
-        <p class="hint">Sent to OpenAI with every job, together with the prompt and the job description.</p>
-      </section>
-
-      <section id="subpane-resumeStyle" class="subpane" role="tabpanel" aria-labelledby="subtab-resumeStyle" hidden>
-        <label class="field-label" for="resumeStyle">Resume style</label>
-        <select id="resumeStyle">
-          <option value="DE-1">DE-1 — teal headings, sans-serif</option>
-          <option value="SF-1">SF-1 — serif, dated entries, lavender rule</option>
-        </select>
-        <div class="controls style-actions">
-          <button id="addStyle" type="button">Style add</button>
-          <button id="removeStyle" type="button" disabled>Remove style</button>
-        </div>
-        <input id="styleFile" type="file" accept=".html,.htm,text/html" hidden>
-        <p class="hint">The layout the generated resume is built with. Applies to the next job written.
-          <strong>Style add</strong> loads your own HTML template. The file needs a
-          <code>&lt;p id="summary"&gt;</code>, a <code>&lt;div id="skills"&gt;</code> and one
-          <code>&lt;ul data-exp="n"&gt;</code> per role.</p>
-        <p id="styleStatus" class="hint" hidden></p>
-      </section>
-
-      <section id="subpane-profile" class="subpane" role="tabpanel" aria-labelledby="subtab-profile" hidden>
-        <label class="field-label" for="countryName">Country name</label>
-        <input id="countryName" type="text" autocomplete="off" spellcheck="false"
-               placeholder="e.g. United States">
-        <p class="hint">Tags every application this profile saves with a country, so the shared
-          dashboard files it under that tab. Leave it blank and it won't show up under any tab there.</p>
-      </section>
-
-      <div class="controls form-actions">
-        <button id="saveProfile" class="primary" disabled>Save</button>
-        <button id="revertProfile" disabled>Revert</button>
-      </div>
-
-      <p id="profileStatus" class="hint"></p>
+    <!-- Whose Summary the emails carry, from Settings → Profile. Extension
+         only: the desktop app sends as the bid profile linked to the browser
+         profile connected. -->
+    <div class="rb-from">
+      <label class="field-label" for="rbProfile">Send as</label>
+      <select id="rbProfile"></select>
+      <span id="rbProfileNote" class="rb-note"></span>
     </div>
+    <p id="rbStatus" class="rb-status" role="status" hidden></p>
+    <ul id="rbList" class="rb-list"></ul>
+    <nav id="rbPager" class="rb-pager" aria-label="Recruiter pages" hidden></nav>
   </section>
 
   <script src="sidepanel.js"></script>

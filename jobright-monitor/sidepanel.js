@@ -9,15 +9,12 @@ const $ = (id) => document.getElementById(id);
 
 const listEl = $("list");
 const statusEl = $("status");
-const countEl = $("count");
-const emptyEl = $("empty");
 const startEl = $("start");
 const stopEl = $("stop");
 const queueEl = $("queue");
-const bidCountEl = $("bidCount");
 
 // Keep in step with MAX_ITEMS in content.js and MAX_STORED in background.js.
-const MAX_ITEMS = 50;
+const MAX_ITEMS = 30;
 
 const rendered = new Map(); // key -> the <li>, so details can be filled in later
 let sawStaleClass = false;
@@ -27,11 +24,64 @@ let sawStaleClass = false;
 // keeps draining after the stream itself has finished.
 let feedRunning = false;
 let queueRunning = false;
+// A run waiting on a human check is still a run: Stop stays on, Start off.
+let verifyPaused = false;
 
 function syncButtons() {
-  const active = feedRunning || queueRunning;
-  startEl.disabled = active;
+  const active = feedRunning || queueRunning || verifyPaused;
+  // Start also waits on a job board that can actually be fetched from.
+  startEl.disabled = active || !SUPPORTED_SOURCES.has(jobSource);
   stopEl.disabled = !active;
+  // The board is fixed while a run is on: switching clears the list, and a
+  // stream still running would fill it straight back up from the old board.
+  // So is what it was asked to search for.
+  $("jobSource").disabled = active;
+  $("indeedSearch").disabled = active;
+  const captureOnly = $("captureOnly"); // not in the desktop app
+  if (captureOnly) captureOnly.disabled = active;
+}
+
+// ---------------------------------------------------------------------------
+// Job board
+//
+// The picker under Auto/Manual says where Auto fetches jobs from. Jobright,
+// Dice, Glassdoor, Indeed and ZipRecruiter each have a content script; Indeed
+// opens at the search the form below asks for rather than a fixed page.
+// Monster can be picked but has no fetcher yet, so Start stays off and the
+// panel says why. The choice is remembered in this panel's own storage.
+// ---------------------------------------------------------------------------
+
+const SOURCE_NAMES = {
+  jobright: "Jobright",
+  dice: "Dice",
+  glassdoor: "Glassdoor",
+  himalayas: "Himalayas",
+  indeed: "Indeed",
+  monster: "Monster",
+  ziprecruiter: "ZipRecruiter"
+};
+const SUPPORTED_SOURCES = new Set(["jobright", "dice", "glassdoor", "himalayas", "indeed", "ziprecruiter"]);
+// Boards the search form applies to. Jobright's feed is its own recommendations.
+const SEARCHABLE_SOURCES = new Set(["dice", "glassdoor", "himalayas", "indeed", "ziprecruiter"]);
+// Boards searched through an API: no tab, so no browser needed.
+const API_SOURCES = new Set(["himalayas"]);
+// What the status line says while a run opens that board's page.
+const SOURCE_OPENING = {
+  jobright: "Opening jobright.ai/jobs/recommend…",
+  dice: "Opening the Dice job search…",
+  glassdoor: "Opening the Glassdoor job search…",
+  himalayas: "Searching Himalayas…",
+  indeed: "Opening the Indeed job search…",
+  ziprecruiter: "Opening the ZipRecruiter job search…"
+};
+const SOURCE_KEY = "jobSource";
+
+let jobSource = "jobright";
+try {
+  const saved = localStorage.getItem(SOURCE_KEY);
+  if (Object.hasOwn(SOURCE_NAMES, saved)) jobSource = saved;
+} catch {
+  // storage unavailable: Jobright, as before
 }
 
 // ---------------------------------------------------------------------------
@@ -55,6 +105,7 @@ async function send(msg) {
 
 function setStatus(text, kind = "") {
   statusEl.textContent = text;
+  statusEl.title = text; // the row is short: the whole of it on hover
   statusEl.className = kind;
 }
 
@@ -70,6 +121,7 @@ function addJob(job, { animate = true } = {}) {
 
   const li = document.createElement("li");
   if (animate) li.className = "fresh";
+  li.dataset.source = job.source || "";
   rendered.set(job.key, li);
 
   // Title — a link when the card had one, plain text otherwise.
@@ -90,12 +142,19 @@ function addJob(job, { animate = true } = {}) {
     li.appendChild(company);
   }
 
-  const meta = document.createElement("div");
-  meta.className = "job-meta";
-  meta.textContent = `#${job.index}`;
-  if (!job.company) meta.textContent += " · no company found";
-  if (!job.href) meta.textContent += " · no link";
-  li.appendChild(meta);
+  // Where it is, what it pays and when it was posted, from boards whose cards
+  // say (Indeed's).
+  const info = [job.location, job.salary, job.posted].filter(Boolean);
+  if (info.length) li.appendChild(tag("job-info", info.join(" · ")));
+
+  // Only what went wrong reading the card; a clean card gets no meta line.
+  const missing = [!job.company && "no company found", !job.href && "no link"].filter(Boolean);
+  if (missing.length) {
+    const meta = document.createElement("div");
+    meta.className = "job-meta";
+    meta.textContent = missing.join(" · ");
+    li.appendChild(meta);
+  }
 
   listEl.appendChild(li);
 
@@ -103,7 +162,6 @@ function addJob(job, { animate = true } = {}) {
   if (job.detail) addDetail(job.key, job.detail);
 
   if (job.staleTitleClass || job.staleCompanyClass) sawStaleClass = true;
-  updateCount();
 }
 
 // ---------------------------------------------------------------------------
@@ -111,10 +169,88 @@ function addJob(job, { animate = true } = {}) {
 // own page.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// The step the worker is at on the job it is working on, shown on that job's
+// own row until its outcome arrives. The worker sends it with every queue
+// status, so a panel opened mid-run picks it up too. The seconds count shows
+// the slow wait — ChatGPT — is still moving rather than stuck.
+// ---------------------------------------------------------------------------
+
+const STAGE_TEXT = {
+  opening: "Opening the job page…",
+  reading: "Reading the job description…",
+  pane: "Clicking the job's card on Indeed…",
+  verify: "Paused — waiting for the human check in the Indeed tab…",
+  waiting: "Waiting for data from ChatGPT…",
+  building: "Building resume…",
+  saving: "Sending to localhost:4500…"
+};
+
+// With whose resume it is, once the job is being written for each profile.
+const stageText = (active) =>
+  (STAGE_TEXT[active.stage] || active.stage) + (active.profile ? ` — ${active.profile}` : "");
+
+let stageEl = null;
+let stageTimer = null;
+
+function showStage(active) {
+  const li = active && rendered.get(active.key);
+  if (!li || li.dataset.detailed) {
+    clearStage();
+    return;
+  }
+
+  if (stageEl?.parentNode !== li) {
+    clearStage();
+    stageEl = tag("job-note stage", "");
+    stageEl.setAttribute("role", "status");
+    stageEl.append(document.createElement("span"), document.createElement("span"));
+    stageEl.lastChild.className = "elapsed";
+    li.appendChild(stageEl);
+  }
+
+  stageEl.firstChild.textContent = stageText(active);
+  const tick = () => {
+    const secs = Math.max(0, Math.round((Date.now() - active.at) / 1000));
+    stageEl.lastChild.textContent = secs >= 3 ? `${secs}s` : "";
+  };
+  tick();
+  clearInterval(stageTimer);
+  stageTimer = setInterval(tick, 1000);
+}
+
+function clearStage() {
+  clearInterval(stageTimer);
+  stageTimer = null;
+  stageEl?.remove();
+  stageEl = null;
+}
+
 function addDetail(key, detail) {
   const li = rendered.get(key);
   if (!li || li.dataset.detailed) return;
   li.dataset.detailed = "1";
+  if (stageEl?.parentNode === li) clearStage();
+
+  // ZipRecruiter's card carries no permalink of its own — the job's real
+  // link is the address the browser is actually left on once the card is
+  // clicked and its description comes up, known only now that it has been
+  // read. The title becomes (or stays) a link to exactly that.
+  if (li.dataset.source === "ziprecruiter" && detail?.url) {
+    let title = li.querySelector(".job-title");
+    if (title && title.tagName !== "A") {
+      const a = document.createElement("a");
+      a.className = title.className;
+      a.textContent = title.textContent;
+      title.replaceWith(a);
+      title = a;
+    }
+    if (title) {
+      title.href = detail.url;
+      title.target = "_blank";
+      title.rel = "noreferrer";
+    }
+  }
 
   if (!detail?.ok) {
     li.classList.add("failed");
@@ -125,43 +261,35 @@ function addDetail(key, detail) {
   // The whole point of the pass: a LinkedIn origin ends it here.
   if (detail.isLinkedIn) {
     li.classList.add("dropped");
-    li.appendChild(tag("job-note", "LinkedIn posting · tab closed, skipped"));
+    li.appendChild(tag("job-note", detail.captured ? "LinkedIn posting · captured without its description" : "LinkedIn posting · tab closed, skipped"));
     return;
   }
 
-  // The POST outcome is the thing you actually need to see at a glance, so it
-  // sits on the row rather than inside the collapsed block.
-  // Generation runs before the save, so its outcome is reported first.
-  if (detail.resume && !detail.resume.ok) {
-    li.appendChild(
-      tag(
-        detail.resume.skipped ? "job-note" : "job-note warn",
-        `No resume: ${detail.resume.error}`
-      )
-    );
-    // The save is gated on the resume, so this job went nowhere. Say so plainly
-    // rather than leaving a row with no outcome on it at all.
+  if (detail.captured) li.appendChild(tag("job-note", "Captured · company, title, link and description kept"));
+
+  // The POST outcomes are the thing you actually need to see at a glance, so
+  // they sit on the row rather than inside the collapsed block — one set per
+  // profile the job was written for.
+  const results = resultsOf(detail);
+
+  // Profiles whose tab already had this job, so it was not written for them.
+  if (detail.existingOn?.length) {
+    li.appendChild(tag("job-note", `Already on ${detail.existingOn.join(", ")} — not written again`));
+  }
+  if (detail.profilesError) {
+    li.appendChild(tag("job-note warn", `No resumes: ${detail.profilesError}`));
+  }
+
+  appendOutcomes(li, results);
+  // No resume built for anyone, so this job went nowhere: said by the row's
+  // look as well as its notes.
+  if (detail.profilesError || (results.length && !results.some((r) => r.resume?.ok))) {
     li.classList.add("failed");
-    li.appendChild(tag("job-note warn", "Not sent — nothing is saved without a resume"));
   }
 
-  // A resume that built but not cleanly — wrong number of roles, an empty job.
-  for (const w of detail.resume?.warnings || []) {
-    li.appendChild(tag("job-note warn", w));
-  }
-
-  if (detail.save) {
-    li.appendChild(
-      detail.save.ok
-        ? tag("job-note saved", detail.resume?.ok ? "Saved with resume" : "Saved to localhost:4500")
-        : tag("job-note warn", `Save failed: ${detail.save.error}`)
-    );
-
-    // Saved, but the duplicate check itself was not answered.
-    if (detail.save.checkError) {
-      li.appendChild(tag("job-note warn", `Duplicate check failed: ${detail.save.checkError}`));
-    }
-  }
+  // Written, but the duplicate check itself was not answered.
+  const checkError = detail.checkError ?? detail.save?.checkError;
+  if (checkError) li.appendChild(tag("job-note warn", `Duplicate check failed: ${checkError}`));
 
   if (!detail.descriptionFound) {
     li.appendChild(tag("job-note warn", "No #overview-1 element on the page"));
@@ -171,11 +299,9 @@ function addDetail(key, detail) {
   box.className = "detail";
 
   const summary = document.createElement("summary");
-  summary.textContent = detail.resume?.raw
-    ? `Answer · ${detail.resume.raw.length.toLocaleString()} chars`
-    : detail.descriptionFound
-      ? "Read, but no answer"
-      : "No description found";
+  summary.textContent =
+    answersSummary(results) ||
+    (detail.captured ? "Job description" : detail.descriptionFound ? "Read, but no answer" : "No description found");
   box.appendChild(summary);
 
   if (detail.originText || detail.originHref) {
@@ -183,7 +309,8 @@ function addDetail(key, detail) {
   }
 
   // Confirms the trim actually bit, rather than leaving you to eyeball the HTML.
-  if (detail.descriptionFound) {
+  // Only Jobright's reading is trimmed; the other boards' carry no counts.
+  if (detail.descriptionFound && detail.droppedSections != null) {
     box.appendChild(
       field(
         "Trimmed",
@@ -192,33 +319,117 @@ function addDetail(key, detail) {
     );
   }
 
-  if (detail.resume?.ok) {
-    const r = detail.resume;
-    box.appendChild(
-      field(
-        "Resume built",
-        `${r.html.length.toLocaleString()} chars of HTML · ` +
-          `${r.data.SKILLS.length} skills line(s) · ` +
-          `${r.data.EXPERIENCE.reduce((n, e) => n + (e.bullets ?? e).length, 0)} bullet(s) across ` +
-          `${r.data.EXPERIENCE.length} role(s)`
-      )
-    );
-    box.appendChild(field("Summary", r.data.SUMMARY));
-    if (r.coverletter) box.appendChild(field("Cover letter", r.coverletter));
-  }
-
-  // What the model actually returned, parsed or not. The job description is
-  // deliberately not shown — it is readable on the job's own page, and this
-  // block is for checking the answer against the prompt.
-  if (detail.resume?.raw) {
-    box.appendChild(
-      field(detail.resume.ok ? "Answer" : "Answer (did not parse)", detail.resume.raw)
-    );
-  }
+  appendAnswers(box, results);
 
   if (detail.staleDetailClass) sawStaleClass = true;
 
   li.appendChild(box);
+}
+
+// One entry per profile a resume was written for: { profileName, resume,
+// save }. A job stored by an older build has a single `resume` and `save`
+// and no profile — shown as one entry without a name.
+function resultsOf(detail) {
+  if (detail.results) return detail.results;
+  return detail.resume ? [{ profileName: null, resume: detail.resume, save: detail.save }] : [];
+}
+
+const whoOf = (result) => (result.profileName ? `${result.profileName} · ` : "");
+
+// What happened for each profile, as notes: a resume that did not build (and
+// so was not sent), one that built but not cleanly — wrong number of roles, an
+// empty job — and whether its save landed. Generation runs before the save, so
+// its outcome comes first. Answers how many were saved.
+// The outcomes that went well, as small icons at the card's right, what each
+// means in its tooltip.
+const svgIcon = (body) =>
+  `<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">${body}</svg>`;
+const BADGE_ICONS = {
+  // A gauge, for the score.
+  ats: svgIcon('<path d="M4 18a9 9 0 1 1 16 0"/><path d="M12 15l4-5"/><circle cx="12" cy="15" r="1"/>'),
+  // A tick in a circle, for saved.
+  saved: svgIcon('<circle cx="12" cy="12" r="9.5"/><path d="M8 12.5l2.7 2.7L16 9.5"/>')
+};
+
+function addBadge(container, kind, icon, label, text = "") {
+  let row = container.querySelector(":scope > .job-badges");
+  if (!row) {
+    row = document.createElement("div");
+    row.className = "job-badges";
+    container.appendChild(row);
+  }
+  const badge = document.createElement("span");
+  badge.className = `job-badge ${kind}`;
+  badge.title = label;
+  badge.setAttribute("aria-label", label);
+  badge.setAttribute("role", "img");
+  badge.innerHTML = icon;
+  if (text) badge.appendChild(document.createTextNode(text));
+  row.appendChild(badge);
+}
+
+function appendOutcomes(container, results) {
+  let saved = 0;
+  for (const r of results) {
+    const who = whoOf(r);
+    if (!r.resume?.ok) {
+      container.appendChild(
+        tag(r.resume?.skipped ? "job-note" : "job-note warn", `${who}No resume: ${r.resume?.error || "unknown"}`)
+      );
+      // The save is gated on the resume, so this one went nowhere. Said
+      // plainly rather than leaving it with no outcome at all.
+      container.appendChild(tag("job-note warn", `${who}Not sent — nothing is saved without a resume`));
+      continue;
+    }
+    for (const w of r.resume.warnings || []) container.appendChild(tag("job-note warn", `${who}${w}`));
+    if (r.save?.ok) saved++;
+    if (r.resume.data?.atsScore) {
+      const score = String(r.resume.data.atsScore);
+      addBadge(container, "ats", BADGE_ICONS.ats, `${who}ATS score: ${score}`, score.match(/\d+(?:\.\d+)?/)?.[0] ?? score);
+    }
+    if (r.save?.ok) addBadge(container, "saved", BADGE_ICONS.saved, `${who}Saved with resume`);
+    else container.appendChild(tag("job-note warn", `${who}Save failed: ${r.save?.error || "unknown"}`));
+  }
+  return saved;
+}
+
+// "Answer · 4,120 chars", or with several profiles, how many answered and
+// how much they wrote between them. Empty when none answered.
+function answersSummary(results) {
+  const answered = results.filter((r) => r.resume?.raw);
+  if (!answered.length) return "";
+  const chars = answered.reduce((n, r) => n + r.resume.raw.length, 0).toLocaleString();
+  return answered.length === 1 && !answered[0].profileName
+    ? `Answer · ${chars} chars`
+    : `${answered.length} answer(s) · ${chars} chars`;
+}
+
+// What each profile's answer gave, and the answer itself to check that
+// against — parsed or not. The job description is deliberately not shown: it
+// is readable on the job's own page, and this block is for checking each
+// answer against its prompt.
+function appendAnswers(box, results) {
+  for (const r of results) {
+    const who = whoOf(r);
+    const resume = r.resume;
+    if (resume?.ok) {
+      box.appendChild(
+        field(
+          `${who}Resume built`,
+          `${resume.html.length.toLocaleString()} chars of HTML · ` +
+            `${resume.data.SKILLS.length} skills line(s) · ` +
+            `${resume.data.EXPERIENCE.reduce((n, e) => n + (e.bullets ?? e).length, 0)} bullet(s) across ` +
+            `${resume.data.EXPERIENCE.length} role(s)`
+        )
+      );
+      if (resume.data.atsScore) box.appendChild(field(`${who}ATS score`, resume.data.atsScore));
+      box.appendChild(field(`${who}Summary`, resume.data.SUMMARY));
+      if (resume.coverletter) box.appendChild(field(`${who}Cover letter`, resume.coverletter));
+    }
+    if (resume?.raw) {
+      box.appendChild(field(resume.ok ? `${who}Answer` : `${who}Answer (did not parse)`, resume.raw));
+    }
+  }
 }
 
 function tag(className, text) {
@@ -234,12 +445,6 @@ function field(label, text) {
   wrap.appendChild(tag("field-label", label));
   wrap.appendChild(tag("field-text", text));
   return wrap;
-}
-
-function updateCount() {
-  countEl.textContent = String(rendered.size);
-  emptyEl.hidden = rendered.size > 0;
-  bidCountEl.textContent = String(rendered.size);
 }
 
 function setRunning(next) {
@@ -265,15 +470,82 @@ chrome.runtime.onMessage.addListener((msg) => {
     return false;
   }
 
+  if (msg?.type === "VERIFY_STATUS") {
+    showVerify(msg.pause);
+    return false;
+  }
+
+  // A full list, every job in it done: the worker has cleared it and is
+  // fetching the next batch — Jobright scrolls on, the other boards turn the
+  // page or load more. Only the rows go — the queue strip's tally is the
+  // whole run's, so it stays.
+  if (msg?.type === "BATCH_CLEARED") {
+    clearStage();
+    listEl.replaceChildren();
+    rendered.clear();
+    setStatus(
+      `Batch ${msg.batch} done · ${msg.done ?? msg.size} job${(msg.done ?? msg.size) === 1 ? "" : "s"} ${captureRun ? "captured" : "written and sent"} · list cleared, ${msg.board || "Jobright"} ${msg.next || "scrolling for more"}…`,
+      "live"
+    );
+    return false;
+  }
+
+  // Every job caught so far is done, the list is not full yet, and the feed
+  // has more below: it scrolls on for them.
+  if (msg?.type === "SCROLLING_MORE") {
+    setStatus(`All caught jobs done · ${msg.accepted} of ${msg.size} · scrolling Jobright for more…`, "live");
+    return false;
+  }
+
+  // Several search terms: the last one's jobs are all read, and the same tab
+  // has gone on to search for the next, from an empty list.
+  if (msg?.type === "TERM_STARTED") {
+    clearStage();
+    listEl.replaceChildren();
+    rendered.clear();
+    setStatus(`Search ${msg.index + 1} of ${msg.total}: “${msg.term}”…`, "live");
+    return false;
+  }
+
+  if (msg?.type === "TERMS_DONE") {
+    setStatus(`All ${msg.total} search terms done.`);
+    return false;
+  }
+
+  if (msg?.type === "CAPTURE_ADDED") {
+    showCaptureCount(msg.count);
+    return false;
+  }
+
+  // The search for this batch is over; the resumes are built now.
+  if (msg?.type === "BUILD_STARTED") {
+    setStatus(
+      `Search done · ${msg.count} job${msg.count === 1 ? "" : "s"} caught — ${captureRun ? "reading each one" : "building the resumes"}…`,
+      "live"
+    );
+    return false;
+  }
+
+  if (msg?.type === "FEED_DONE") {
+    setStatus(`Every caught job is done · Jobright has ${msg.reason}.`);
+    return false;
+  }
+
   if (msg?.type === "DETAIL_STATUS") {
     const s = msg.status;
     queueRunning = s.draining;
     syncButtons();
+    showStage(s.active);
     queueEl.hidden = !s.draining && !s.pending;
-    const tally = `${s.visited} read · ${s.generated} written · ${s.saved} saved · ${s.skipped} filtered out`;
+    const tally = captureRun
+      ? `${s.visited} read and captured`
+      : `${s.visited} read · ${s.generated} written · ${s.saved} saved · ${s.skipped} filtered out`;
+    const doing = s.active ? ` · ${s.active.title} — ${stageText(s.active)}` : "";
     queueEl.textContent = s.draining
-      ? `Reading · ${s.pending} queued · ${tally}${s.current ? ` · ${s.current}` : ""}`
-      : tally;
+      ? `Reading · ${s.pending} queued · ${tally}${doing}`
+      : s.pending
+        ? `${s.pending} caught · searching for more before building · ${tally}`
+        : tally;
     return false;
   }
 
@@ -281,8 +553,11 @@ chrome.runtime.onMessage.addListener((msg) => {
   // asked for it has anything on screen to update, and it is the only one
   // listening.
   if (msg?.type === "MANUAL_STATUS") {
-    if (msg.stage === "generating") showManualStatus("Writing the resume — this takes as long as the model does…");
-    if (msg.stage === "saving") showManualStatus("Resume built — sending it to localhost:4500…");
+    const who = msg.profile ? `${msg.profile}: ` : "";
+    if (msg.stage === "generating") showManualStatus(`${who}Writing the resume — this takes as long as the model does…`);
+    if (msg.stage === "waiting") showManualStatus(`${who}Waiting for data from ChatGPT — this takes as long as the model does…`);
+    if (msg.stage === "building") showManualStatus(`${who}Answer received — building the resume…`);
+    if (msg.stage === "saving") showManualStatus(`${who}Resume built — sending it to localhost:4500…`);
     return false;
   }
 
@@ -292,10 +567,20 @@ chrome.runtime.onMessage.addListener((msg) => {
 
     if (s.signedOut) {
       setStatus("No cards — you are probably signed out of jobright.ai.", "err");
+    } else if (s.error) {
+      setStatus(`Error: ${s.error}`, "err");
+    } else if (s.blocked) {
+      // A human check in place of the results; the notice says what to do.
+      setStatus("Paused · waiting for the human check in the Indeed tab", "live");
     } else if (s.streaming && !s.onRecommendPage) {
-      setStatus("That tab left the recommendations page.", "err");
+      setStatus("That tab left the job list.", "err");
     } else if (s.atLimit) {
-      setStatus(`${s.accepted} new · limit reached, no more scrolling`);
+      // Every board goes on in batches of MAX_ITEMS.
+      setStatus(`${s.accepted} new · list full — once every job is done, the list is cleared and more are caught`);
+    } else if (s.paging) {
+      setStatus(`This page is done · clicking Next for more jobs… ${s.accepted} new so far`, "live");
+    } else if (s.lastPage) {
+      setStatus(`Last page reached · ${s.accepted} new of ${s.total} seen`);
     } else if (s.harvesting) {
       setStatus(`Scrolling the list… ${s.accepted} new of ${s.limit}`, "live");
     } else if (s.streaming) {
@@ -314,19 +599,108 @@ chrome.runtime.onMessage.addListener((msg) => {
 // Controls
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Before a run
+//
+// Start first asks the worker whether everything a job catch needs is in
+// place — the board, the collector, the profiles, ChatGPT, each profile's
+// resume style — and shows the answer as a list. Anything marked ✕ would stop
+// the run from getting anywhere, so the run is not started; ! is a warning,
+// and the run goes ahead. Run in the desktop app, the list also says whether
+// the browser is connected, or can be.
+// ---------------------------------------------------------------------------
+
+const preflightEl = $("preflight");
+const preflightSummaryEl = $("preflightSummary");
+const preflightListEl = $("preflightList");
+
+// The list sits on a row of its own, under the line that opens it.
+function showPreflightList() {
+  preflightListEl.hidden = preflightEl.hidden || !preflightEl.open;
+}
+preflightEl.addEventListener("toggle", showPreflightList);
+const CHECK_MARK = { ok: "✓", warn: "!", fail: "✕" };
+
+function showPreflight(checks) {
+  const failed = checks.filter((c) => c.state === "fail");
+  const warned = checks.filter((c) => c.state === "warn");
+  preflightListEl.replaceChildren(
+    ...checks.map((c) => {
+      const li = document.createElement("li");
+      li.className = `check ${c.state}`;
+      const mark = document.createElement("span");
+      mark.className = "check-mark";
+      mark.setAttribute("aria-label", c.state === "ok" ? "OK" : c.state === "warn" ? "Warning" : "Problem");
+      mark.textContent = CHECK_MARK[c.state];
+      const label = document.createElement("span");
+      label.className = "check-label";
+      label.textContent = c.label;
+      const detail = document.createElement("span");
+      detail.className = "check-detail";
+      detail.textContent = c.detail || "";
+      li.append(mark, label, detail);
+      return li;
+    })
+  );
+  preflightSummaryEl.textContent = failed.length
+    ? `✕ ${failed.length} of ${checks.length} checks failed — not started`
+    : warned.length
+      ? `! All ${checks.length} checks passed · ${warned.length} warning${warned.length === 1 ? "" : "s"}`
+      : `✓ All ${checks.length} checks passed`;
+  preflightEl.className = `preflight ${failed.length ? "fail" : warned.length ? "warn" : "ok"}`;
+  // Open when something needs doing; folded to its one line when all is well.
+  preflightEl.open = failed.length > 0 || warned.length > 0;
+  preflightEl.hidden = false;
+  showPreflightList();
+}
+
+async function runPreflight(options) {
+  const reply = await send({ type: "PREFLIGHT", options });
+  const checks = reply.ok ? reply.checks : [{ key: "worker", label: "Bid Bot", state: "fail", detail: reply.error }];
+  // The desktop app adds the one thing only it knows: the browser. An API
+  // board works without one.
+  if (window.bidbotDesktop?.checkBrowser && !API_SOURCES.has(options.source)) {
+    try {
+      checks.unshift(await window.bidbotDesktop.checkBrowser());
+    } catch (err) {
+      checks.unshift({ key: "browser", label: "Browser", state: "fail", detail: err?.message || String(err) });
+    }
+  }
+  showPreflight(checks);
+  return !checks.some((c) => c.state === "fail");
+}
+
 startEl.addEventListener("click", async () => {
   if (feedRunning || queueRunning) return;
 
-  setStatus("Opening jobright.ai/jobs/recommend…", "live");
-  setRunning(true);
+  // The search terms, on every board but Jobright. Indeed has no page of its
+  // own to open — only a search, which needs something to search for.
+  const search = SEARCHABLE_SOURCES.has(jobSource) ? readSearch() : undefined;
+  const capture = captureOnlyEl.checked;
 
+  startEl.disabled = true;
+  setStatus("Checking everything a run needs…", "live");
+  const ready = await runPreflight({ source: jobSource, search, capture });
+  syncButtons();
+  if (!ready) {
+    setStatus("Not started — fix the items marked ✕, then press Start again.", "err");
+    if (search && !search.role) {
+      showSearchPanel(true);
+      $("searchRole").focus();
+    }
+    return;
+  }
+
+  setStatus(SOURCE_OPENING[jobSource] || "Opening the job board…", "live");
+  setRunning(true);
+  captureRun = capture;
+
+  // A run always does the whole job: scroll for every card, open each one,
+  // and send what it builds to the collector — or, capturing, keep what it
+  // read of each job instead.
   const reply = await send({
     type: "START",
-    options: {
-      autoScroll: $("autoScroll").checked,
-      visitJobs: $("visitJobs").checked,
-      saveJobs: $("saveJobs").checked
-    }
+    options: { source: jobSource, search, capture, autoScroll: true, visitJobs: true, saveJobs: !capture }
   });
 
   if (!reply.ok) {
@@ -355,23 +729,44 @@ stopEl.addEventListener("click", async () => {
   );
 });
 
-// Toggling mid-run takes effect immediately rather than waiting for a restart.
-$("visitJobs").addEventListener("change", (e) =>
-  send({ type: "SET_VISIT", enabled: e.target.checked })
-);
+// ---------------------------------------------------------------------------
+// The human check
+//
+// While the worker waits for someone to pass a site's human check, the notice
+// says so and where: the search page, or a job's own page. The worker looks
+// at the tab every few seconds and carries on by itself once it is passed, so
+// there is nothing to press here afterwards — only the tab to bring up.
+// ---------------------------------------------------------------------------
 
-$("saveJobs").addEventListener("change", (e) =>
-  send({ type: "SET_SAVE", enabled: e.target.checked })
-);
+const verifyNoticeEl = $("verifyNotice");
 
-$("clear").addEventListener("click", async () => {
+function showVerify(pause) {
+  verifyPaused = !!pause;
+  verifyNoticeEl.hidden = !pause;
+  syncButtons();
+  if (!pause) return;
+
+  const where = pause.page === "job" && pause.title
+    ? `before it shows the job “${pause.title}”`
+    : "before it shows the search results";
+  $("verifyText").textContent =
+    `Indeed wants a person to confirm ${where}. Complete the check in the Indeed tab — ` +
+    "the run carries on by itself once it is passed. If the tab shows no check to complete, press Stop.";
+}
+
+$("verifyShow").addEventListener("click", () => send({ type: "FOCUS_VERIFY" }));
+
+// Empties the list here and in the worker. Clear does it on demand; changing
+// the job board does it too, so one board's jobs never sit under another's.
+async function clearList() {
   listEl.replaceChildren();
   rendered.clear();
   sawStaleClass = false;
   queueEl.hidden = true;
-  updateCount();
   await send({ type: "CLEAR" });
-});
+}
+
+$("clear").addEventListener("click", clearList);
 
 // ---------------------------------------------------------------------------
 // Auto / Manual
@@ -390,7 +785,6 @@ $("clear").addEventListener("click", async () => {
 
 const modeSwitchEl = $("modeSwitch");
 const autoControlsEl = $("auto-controls");
-const manualLeadEl = $("manual-lead");
 const modeButtons = [...modeSwitchEl.querySelectorAll('[role="radio"]')];
 
 function selectMode(button) {
@@ -400,11 +794,11 @@ function selectMode(button) {
     b.tabIndex = on ? 0 : -1; // one stop in the tab order, arrows move within
     $(b.getAttribute("aria-controls")).hidden = !on;
   }
-  // The feed's own controls belong to Auto: Start/Stop and the three options
-  // have nothing to act on when the job is being typed in.
-  const manual = button.id === "mode-manual";
-  autoControlsEl.hidden = manual;
-  manualLeadEl.hidden = !manual;
+  // The feed's own controls belong to Auto: Start/Stop/Clear and the board
+  // picker have nothing to act on when the job is being typed in.
+  autoControlsEl.hidden = button.id === "mode-manual";
+  $("runInfo").hidden = autoControlsEl.hidden;
+  $("preflightRow").hidden = autoControlsEl.hidden;
 }
 
 for (const button of modeButtons) {
@@ -414,11 +808,223 @@ for (const button of modeButtons) {
     const step = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
     if (!step) return;
     e.preventDefault();
-    const next = modeButtons[(modeButtons.indexOf(button) + step + modeButtons.length) % modeButtons.length];
+    const open = modeButtons.filter((b) => !b.disabled);
+    const next = open[(open.indexOf(button) + step + open.length) % open.length];
     selectMode(next);
     next.focus();
   });
 }
+
+const jobSourceEl = $("jobSource");
+const sourceNoteEl = $("sourceNote");
+
+// ---------------------------------------------------------------------------
+// The Indeed search
+//
+// What Indeed is searched for: Indeed's own two boxes — the role ("What") and
+// where (a city, state, zip code, or "remote") — plus the country whose Indeed
+// site is searched, and optionally a job type, how recent, and remote only.
+// Shown while Indeed is the board, sent with Start, and remembered in this
+// panel's own storage like the board itself.
+// ---------------------------------------------------------------------------
+
+const SEARCH_KEY = "indeedSearch";
+const searchEl = $("indeedSearch");
+const SEARCH_FIELDS = {
+  role: $("searchRole"),
+  country: $("searchCountry"),
+  location: $("searchLocation"),
+  jobType: $("searchJobType"),
+  postedDays: $("searchPosted"),
+  remote: $("searchRemote")
+};
+
+function readSearch() {
+  const f = SEARCH_FIELDS;
+  return {
+    role: f.role.value.trim(),
+    country: f.country.value,
+    location: f.location.value.trim(),
+    jobType: f.jobType.value,
+    postedDays: Number(f.postedDays.value) || 0,
+    remote: f.remote.checked
+  };
+}
+
+function saveSearch() {
+  try {
+    localStorage.setItem(SEARCH_KEY, JSON.stringify(readSearch()));
+  } catch {
+    // not remembered; the fields still hold it until the panel closes
+  }
+}
+
+function restoreSearch() {
+  let saved = null;
+  try {
+    saved = JSON.parse(localStorage.getItem(SEARCH_KEY) || "null");
+  } catch {
+    // unreadable: the form starts blank
+  }
+  if (!saved || typeof saved !== "object") saved = {};
+
+  const f = SEARCH_FIELDS;
+  f.role.value = String(saved.role || "");
+  f.location.value = String(saved.location || "");
+  f.remote.checked = !!saved.remote;
+  // A select keeps its first option when the saved value is not one of its own.
+  const pick = (select, value) => {
+    if ([...select.options].some((o) => o.value === value)) select.value = value;
+  };
+  pick(f.country, String(saved.country || "US"));
+  pick(f.jobType, String(saved.jobType || ""));
+  pick(f.postedDays, saved.postedDays ? String(saved.postedDays) : "");
+}
+
+restoreSearch();
+
+// Search Settings: the icon opens and closes the panel, always on what is
+// saved; Save stores it and closes it. Only one settings panel is open at once.
+const searchPanelEl = $("searchPanel");
+const openSearchEl = $("openSearch");
+
+function showSearchPanel(open) {
+  searchPanelEl.hidden = !open;
+  openSearchEl.setAttribute("aria-expanded", String(open));
+  restoreSearch();
+  if (open) {
+    showGptPanel(false);
+    showUserPanel(false);
+  }
+}
+
+openSearchEl.addEventListener("click", () => showSearchPanel(searchPanelEl.hidden));
+$("searchSave").addEventListener("click", () => {
+  saveSearch();
+  showSearchPanel(false);
+});
+
+function selectSource(source) {
+  jobSource = source;
+  jobSourceEl.value = source;
+  searchEl.hidden = !SEARCHABLE_SOURCES.has(source);
+  $("searchNote").hidden = !searchEl.hidden;
+  $("searchLegend").textContent = `${SOURCE_NAMES[source]} search`;
+  // Himalayas goes by country, as Indeed does, and has only remote jobs.
+  $("searchCountryField").hidden = source !== "indeed" && source !== "himalayas";
+  // Glassdoor is searched across the United States; see glassdoorSearchUrl.
+  $("searchLocationField").hidden = source === "glassdoor" || source === "himalayas";
+  const supported = SUPPORTED_SOURCES.has(source);
+  sourceNoteEl.hidden = supported;
+  sourceNoteEl.textContent = supported
+    ? ""
+    : `${SOURCE_NAMES[source]} is not connected yet — only Jobright, Dice, Glassdoor, Indeed and ZipRecruiter fetch jobs for now.`;
+  try {
+    localStorage.setItem(SOURCE_KEY, source);
+  } catch {
+    // not remembered; the choice still applies until the panel closes
+  }
+  syncButtons();
+}
+
+// A different board starts from an empty list.
+jobSourceEl.addEventListener("change", () => {
+  if (jobSourceEl.value === jobSource) return;
+  selectSource(jobSourceEl.value);
+  clearList();
+});
+
+selectSource(jobSource);
+
+// ---------------------------------------------------------------------------
+// Capture only
+//
+// With the switch on, a run reads each job and keeps its company, title,
+// link and description — no resume, nothing sent to the collector. What is
+// captured builds up across runs, in the worker, until Clear under it; the
+// strip above the list says how many and exports them as CSV or JSON.
+// ---------------------------------------------------------------------------
+
+const CAPTURE_KEY = "captureOnly";
+const captureOnlyEl = $("captureOnly");
+let captureRun = false;
+
+// The desktop app has no capture-only runs: the switch and the captured
+// list are the extension's alone, and every app run writes resumes.
+const CAPTURE_OFFERED = !window.bidbotDesktop;
+if (!CAPTURE_OFFERED) captureOnlyEl.closest(".switch-row").remove();
+
+try {
+  captureOnlyEl.checked = CAPTURE_OFFERED && localStorage.getItem(CAPTURE_KEY) === "1";
+} catch {
+  // not remembered: off
+}
+captureOnlyEl.addEventListener("change", () => {
+  try {
+    localStorage.setItem(CAPTURE_KEY, captureOnlyEl.checked ? "1" : "0");
+  } catch {
+    // applies until the panel closes
+  }
+});
+
+function showCaptureCount(count) {
+  $("captures").hidden = !count || !CAPTURE_OFFERED;
+  $("captureCount").textContent = `${count} job${count === 1 ? "" : "s"} captured`;
+}
+
+const CAPTURE_COLUMNS = ["term", "board", "company", "title", "url", "location", "description", "note", "capturedAt"];
+
+const csvCell = (value) => {
+  const text = String(value ?? "");
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+};
+
+// A file handed to the browser's own download, named for today.
+function download(name, type, text) {
+  const url = URL.createObjectURL(new Blob([text], { type }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+async function exportCaptures(format) {
+  const reply = await send({ type: "GET_CAPTURES" });
+  if (!reply.ok) return setStatus(`Error: ${reply.error}`, "err");
+  const stamp = new Date().toISOString().slice(0, 10);
+  if (format === "json") {
+    download(`jobs-${stamp}.json`, "application/json", JSON.stringify(reply.captures, null, 2));
+  } else {
+    const rows = [CAPTURE_COLUMNS, ...reply.captures.map((c) => CAPTURE_COLUMNS.map((k) => c[k]))];
+    // The byte order mark is what makes Excel read the file as UTF-8.
+    download(`jobs-${stamp}.csv`, "text/csv", "\ufeff" + rows.map((r) => r.map(csvCell).join(",")).join("\r\n"));
+  }
+  setStatus(`Exported ${reply.captures.length} job${reply.captures.length === 1 ? "" : "s"} as ${format.toUpperCase()}.`);
+}
+
+$("exportCsv").addEventListener("click", () => exportCaptures("csv"));
+$("exportJson").addEventListener("click", () => exportCaptures("json"));
+// Two presses, so one stray click cannot throw a whole capture away.
+const clearCapturesEl = $("clearCaptures");
+let clearArmed = null;
+clearCapturesEl.addEventListener("click", async () => {
+  if (!clearArmed) {
+    clearCapturesEl.textContent = "Press again to clear";
+    clearArmed = setTimeout(() => {
+      clearArmed = null;
+      clearCapturesEl.textContent = "Clear";
+    }, 4000);
+    return;
+  }
+  clearTimeout(clearArmed);
+  clearArmed = null;
+  clearCapturesEl.textContent = "Clear";
+  await send({ type: "CLEAR_CAPTURES" });
+  showCaptureCount(0);
+});
 
 const manualGenerateEl = $("manualGenerate");
 const manualStatusEl = $("manualStatus");
@@ -430,16 +1036,23 @@ function showManualStatus(text, kind = "") {
   manualStatusEl.textContent = text;
 }
 
-// The same outcomes the feed puts on a row, under the form instead: what the
-// model gave back, whether it was sent, and the answer itself to check the
-// first two against.
-function renderManualResult({ resume, save, duplicate, checkError }) {
+// The same outcomes the feed puts on a row, under the form instead: for each
+// profile, what the model gave back and whether it was sent, and the answers
+// themselves to check those against.
+function renderManualResult({ results = [], duplicate, existingOn = [], checkError }) {
   manualResultEl.replaceChildren();
 
   // Found before the model was asked, so nothing was written or sent.
   if (duplicate) {
-    showManualStatus("Already exists — the collector has this company and job title. Nothing generated.", "warn");
+    showManualStatus(
+      `Already exists — ${existingOn.join(", ")} already ${existingOn.length === 1 ? "has" : "have"} this company and job title. Nothing generated.`,
+      "warn"
+    );
     return;
+  }
+
+  if (existingOn.length) {
+    manualResultEl.appendChild(tag("job-note", `Already on ${existingOn.join(", ")} — not written again`));
   }
 
   // The check failing is not a reason to hold the job back, but it means the
@@ -448,48 +1061,24 @@ function renderManualResult({ resume, save, duplicate, checkError }) {
     manualResultEl.appendChild(tag("job-note warn", `Duplicate check failed: ${checkError}`));
   }
 
-  if (!resume?.ok) {
-    showManualStatus(`No resume: ${resume?.error || "unknown"}`, "warn");
-    // Gated exactly as a feed job is — a resume that did not build means
-    // nothing was sent, so the collector has nothing half-written in it.
-    manualResultEl.appendChild(tag("job-note warn", "Not sent — nothing is saved without a resume"));
-    if (resume?.raw) {
-      manualResultEl.appendChild(field("Answer (did not parse)", resume.raw));
-    }
-    return;
-  }
-
-  for (const w of resume.warnings || []) {
-    manualResultEl.appendChild(tag("job-note warn", w));
-  }
-
+  // Gated exactly as a feed job is — a resume that did not build means
+  // nothing was sent for that profile, so its tab has nothing half-written.
+  const saved = appendOutcomes(manualResultEl, results);
   showManualStatus(
-    save?.ok
-      ? "Saved with resume — the collector writes the PDFs from here."
-      : `Save failed: ${save?.error || "unknown"}`,
-    save?.ok ? "saved" : "warn"
+    saved === results.length
+      ? `Saved with resume${results.length > 1 ? ` for all ${results.length} profiles` : ""} — the collector writes the PDFs from here.`
+      : `Saved for ${saved} of ${results.length} profile(s) — see below.`,
+    saved === results.length ? "saved" : "warn"
   );
 
+  const answers = answersSummary(results);
+  if (!answers) return;
   const box = document.createElement("details");
   box.className = "detail";
-
   const summary = document.createElement("summary");
-  summary.textContent = `Answer · ${resume.raw.length.toLocaleString()} chars`;
+  summary.textContent = answers;
   box.appendChild(summary);
-
-  box.appendChild(
-    field(
-      "Resume built",
-      `${resume.html.length.toLocaleString()} chars of HTML · ` +
-        `${resume.data.SKILLS.length} skills line(s) · ` +
-        `${resume.data.EXPERIENCE.reduce((n, e) => n + (e.bullets ?? e).length, 0)} bullet(s) across ` +
-        `${resume.data.EXPERIENCE.length} role(s)`
-    )
-  );
-  box.appendChild(field("Summary", resume.data.SUMMARY));
-  if (resume.coverletter) box.appendChild(field("Cover letter", resume.coverletter));
-  box.appendChild(field("Answer", resume.raw));
-
+  appendAnswers(box, results);
   manualResultEl.appendChild(box);
 }
 
@@ -523,32 +1112,72 @@ manualGenerateEl.addEventListener("click", async () => {
   renderManualResult(reply);
 });
 
+// Connected to an Octo Browser profile the app only reads a job from it, so
+// Auto is off and Manual gets Catch Job. It fills the form to look over before
+// Generate.
+const catchJobEl = $("catchJob");
+
+window.addEventListener("bidbot-octo-changed", () => {
+  const octo = window.bidbotDesktop.octo;
+  catchJobEl.hidden = !octo;
+  $("mode-auto").disabled = octo;
+  if (octo) selectMode($("mode-manual"));
+});
+
+catchJobEl.addEventListener("click", async () => {
+  catchJobEl.disabled = true;
+  manualResultEl.replaceChildren();
+  showManualStatus("Reading the LinkedIn tab in Octo Browser…");
+
+  const reply = await window.bidbotDesktop.catchJob();
+
+  catchJobEl.disabled = false;
+
+  if (!reply.ok) {
+    showManualStatus(reply.error, "warn");
+    return;
+  }
+
+  $("manualCompany").value = reply.job.company;
+  $("manualTitle").value = reply.job.title;
+  $("manualUrl").value = reply.job.url;
+  $("manualDescription").value = reply.job.description;
+  showManualStatus(`Caught ${reply.job.title} at ${reply.job.company}. Check it, then Generate.`);
+});
+
 // ---------------------------------------------------------------------------
-// Profile
+// Settings
 //
-// Saved on change, which for a text field and a textarea means on blur — so a
-// prompt is not written on every keystroke.
+// What these screens save: the API key and model under ChatGPT Settings, the
+// Country and Role picked under Profile, and — kept on each dashboard tab
+// rather than here — every listed profile's own prompt, master resume and
+// resume style. One Save covers the lot; nothing is written on a keystroke.
 // ---------------------------------------------------------------------------
 
-// Everything the ChatGPT setting screen holds. `model` and `resumeStyle` are
-// handled separately because they are selects — model with a free-text escape
-// hatch, resumeStyle with the built-in list plus any added with Style add; the
-// rest are plain inputs and textareas, read and written the same way.
-const PROFILE_TEXT_FIELDS = ["apiKey", "prompt", "masterResume", "countryName"];
-const PROFILE_FIELDS = [...PROFILE_TEXT_FIELDS, "model", "resumeStyle"];
+// What is saved to this extension's own storage. `model` is a select with a
+// free-text escape hatch; country and role are picked from the profiles.
+const SETTINGS_FIELDS = ["country", "role"]; // the API key and model have their own panel and Save
 
 const CUSTOM_MODEL = "__custom__";
-const DEFAULT_RESUME_STYLE = "DE-1";
 const modelEl = $("model");
-const resumeStyleEl = $("resumeStyle");
 const modelCustomEl = $("modelCustom");
 const saveProfileEl = $("saveProfile");
 const revertProfileEl = $("revertProfile");
 const profileStatusEl = $("profileStatus");
+const countryEl = $("profileCountry");
+const roleEl = $("profileRole");
 
-// The last saved values, so "has anything changed?" is a comparison rather
+// The last saved settings, so "has anything changed?" is a comparison rather
 // than a flag that can drift out of step with the fields.
-let savedProfile = null;
+let savedSettings = null;
+
+// What a profile with no prompt or style of its own is written with — the
+// worker's own, sent along with the settings.
+let defaults = { prompt: "", resumeStyle: "DE-1" };
+
+// Country and role are matched the way the worker and the dashboard match
+// them: ignoring case and surrounding spaces.
+const matchKey = (s) => String(s ?? "").trim().toLowerCase();
 
 // A model the list does not carry — a pinned snapshot, or one released after
 // this build — selects Custom… and shows the free-text box.
@@ -559,36 +1188,39 @@ function setModelControls(model) {
   modelCustomEl.hidden = known;
 }
 
-// Only the key is trimmed — a prompt or an address may legitimately carry
-// leading whitespace, and silently rewriting what was typed is worse than
+// Only the key is trimmed — silently rewriting what was typed is worse than
 // storing it as-is.
-function readForm() {
-  const out = {
-    model: modelEl.value === CUSTOM_MODEL ? modelCustomEl.value.trim() : modelEl.value,
-    resumeStyle: resumeStyleEl.value
+function readGptForm() {
+  return {
+    apiKey: $("apiKey").value.trim(),
+    model: modelEl.value === CUSTOM_MODEL ? modelCustomEl.value.trim() : modelEl.value
   };
-  for (const f of PROFILE_TEXT_FIELDS) out[f] = $(f).value;
-  out.apiKey = out.apiKey.trim();
-  return out;
 }
 
-function fillForm(profile) {
-  for (const f of PROFILE_TEXT_FIELDS) $(f).value = profile[f] ?? "";
-  setModelControls(profile.model ?? "");
-  // A style this build does not carry — one stored by a later build, or one
-  // since removed — would otherwise leave the select blank. Showing the
-  // default instead matches what the worker will actually fall back to, and
-  // the row reads as an unsaved change until it is saved.
-  const style = profile.resumeStyle ?? DEFAULT_RESUME_STYLE;
-  const knownStyle = [...resumeStyleEl.options].some((o) => o.value === style);
-  resumeStyleEl.value = knownStyle ? style : DEFAULT_RESUME_STYLE;
-  syncRemoveStyle();
+function readForm() {
+  return { country: countryEl.value, role: roleEl.value };
 }
 
+function fillGptForm(settings) {
+  $("apiKey").value = settings.apiKey ?? "";
+  setModelControls(settings.model ?? "");
+}
+
+function fillForm(settings) {
+  fillGptForm(settings);
+  renderChoices(settings.country, settings.role);
+}
+
+// A saved "us" shown as the dashboard's own "US" is the same pick, not an edit.
 const isDirty = () => {
-  if (!savedProfile) return false;
+  if (!savedSettings) return false;
   const now = readForm();
-  return PROFILE_FIELDS.some((f) => now[f] !== (savedProfile[f] ?? ""));
+  const changed = SETTINGS_FIELDS.some((f) =>
+    f === "country" || f === "role"
+      ? matchKey(now[f]) !== matchKey(savedSettings[f])
+      : now[f] !== (savedSettings[f] ?? "")
+  );
+  return changed || profileDrafts.size > 0;
 };
 
 // Save is only offered when there is something to save, and an unsaved edit
@@ -603,7 +1235,7 @@ function syncProfileButtons() {
     profileStatusEl.className = "hint dirty";
     profileStatusEl.textContent = "Unsaved changes.";
   } else {
-    showKeyState(savedProfile?.apiKey);
+    showKeyState(savedSettings?.apiKey);
   }
 }
 
@@ -614,20 +1246,741 @@ function showKeyState(apiKey) {
     : "No key set — nothing will be saved, since a job is only sent once its resume is built.";
 }
 
-async function loadProfile() {
-  const reply = await send({ type: "GET_PROFILE" });
+async function loadSettings() {
+  const reply = await send({ type: "GET_SETTINGS" });
   if (!reply.ok) {
     profileStatusEl.className = "hint warn";
     profileStatusEl.textContent = `Could not load: ${reply.error}`;
     return;
   }
-  // Options first: fillForm treats a style the select does not carry as
-  // unknown and falls back to the default.
-  renderCustomStyles(reply.styles);
-  savedProfile = reply.profile;
-  fillForm(savedProfile);
+  defaults = reply.defaults ?? defaults;
+  savedSettings = reply.settings;
+  fillForm(savedSettings);
+  syncProfileButtons();
+  restoreModels(savedSettings.apiKey); // not waited for: it may ask OpenAI
+}
+
+// ---------------------------------------------------------------------------
+// The models the key can use
+//
+// The Model list starts as the built-in one in sidepanel.html. Once the key's
+// own models are loaded — asked of OpenAI by the worker, on Load models, when
+// a new key is entered, or on opening with a key whose list was never loaded
+// — it is exactly those: the names that always mean the latest version,
+// newest first, then the dated snapshots. Custom… stays for anything else.
+// ---------------------------------------------------------------------------
+
+const BUILTIN_MODELS = modelEl.innerHTML; // the HTML's own options, Custom… included
+const loadModelsEl = $("loadModels");
+const modelsStatusEl = $("modelsStatus");
+
+function showModelsStatus(text, kind = "") {
+  modelsStatusEl.hidden = !text;
+  modelsStatusEl.className = `hint ${kind}`.trim();
+  modelsStatusEl.textContent = text;
+}
+
+// Which key a kept list belongs to, by its last four characters.
+const keyEnd = (key) => String(key || "").trim().slice(-4);
+
+function describeModels(list) {
+  const when = new Date(list.loadedAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  const snapshots = list.snapshots.length ? ` and ${list.snapshots.length} snapshot(s)` : "";
+  return `${list.models.length} model(s)${snapshots} available to this key · loaded ${when}`;
+}
+
+// The list's options from a loaded list, or the built-in ones with none,
+// keeping whatever model the form shows picked — a pick the new list does
+// not carry moves to Custom…, as a saved one always has.
+function renderModels(list) {
+  const picked = readForm().model;
+  if (!list) {
+    modelEl.innerHTML = BUILTIN_MODELS;
+  } else {
+    const group = (label, ids) => {
+      const g = document.createElement("optgroup");
+      g.label = label;
+      for (const id of ids) g.appendChild(new Option(id, id));
+      return g;
+    };
+    modelEl.replaceChildren();
+    if (list.models.length) modelEl.appendChild(group(`Available to your API key (${list.models.length})`, list.models));
+    if (list.snapshots.length) modelEl.appendChild(group(`Dated snapshots (${list.snapshots.length})`, list.snapshots));
+    modelEl.appendChild(new Option("Custom…", CUSTOM_MODEL));
+  }
+  setModelControls(picked);
   syncProfileButtons();
 }
+
+async function loadModels(apiKey) {
+  apiKey = String(apiKey || "").trim();
+  if (!apiKey) {
+    showModelsStatus("Enter an API key first — the list is the models that key can use.", "warn");
+    return;
+  }
+  loadModelsEl.disabled = true;
+  showModelsStatus("Loading the models this key can use…");
+  const reply = await send({ type: "LIST_MODELS", apiKey });
+  loadModelsEl.disabled = false;
+
+  if (!reply.ok) {
+    showModelsStatus(`Could not load the models: ${reply.error}`, "warn");
+    return;
+  }
+  // The list stays as it was rather than empty out.
+  if (!reply.models.length && !reply.snapshots.length) {
+    showModelsStatus(`This key can use none of OpenAI's text models (${reply.total} model(s) in all).`, "warn");
+    return;
+  }
+  renderModels(reply);
+  showModelsStatus(describeModels(reply), "saved");
+}
+
+// On opening: the list kept for this key — or, for a key whose list was
+// never loaded, loaded now.
+async function restoreModels(apiKey) {
+  const reply = await send({ type: "GET_MODELS" });
+  const list = reply.ok ? reply.list : null;
+  if (list && apiKey && list.keyEnd === keyEnd(apiKey)) {
+    renderModels(list);
+    showModelsStatus(describeModels(list));
+  } else if (apiKey) {
+    loadModels(apiKey);
+  }
+}
+
+loadModelsEl.addEventListener("click", () => loadModels($("apiKey").value));
+
+// A key typed or pasted in gets its own models, once the field is left. While
+// it is being edited, what the line says is about the key before — so it goes.
+$("apiKey").addEventListener("input", () => showModelsStatus(""));
+$("apiKey").addEventListener("change", () => {
+  const key = $("apiKey").value.trim();
+  if (key) loadModels(key);
+});
+
+// ---------------------------------------------------------------------------
+// Profiles
+//
+// A profile is one of the dashboard's tabs: a person applying in a country
+// for a role. The Country and Role picked here — chosen from what the tabs
+// carry, which is set in each tab's Sheet sync on the dashboard — list the
+// profiles a caught job gets resumes for, one card each: that profile's own
+// prompt, master resume and resume style, read from and saved to its tab.
+// The list comes from the collector each time Profile is opened, or on
+// Reload profiles.
+//
+// An edit is a draft until Save, kept per profile rather than in its card:
+// picking another country or role shows other cards, and edits made in the
+// ones it hides are still there — and still saved — all the same.
+// ---------------------------------------------------------------------------
+
+const profileListEl = $("profileList");
+const profileEmptyEl = $("profileEmpty");
+const reloadProfilesEl = $("reloadProfiles");
+const profilesStatusEl = $("profilesStatus");
+
+const OWN_FIELDS = ["prompt", "masterResume", "masterResumeMode", "resumeStyle", "summary"];
+
+let profiles = []; // every dashboard tab, as last loaded
+const profileDrafts = new Map(); // profile id -> its unsaved own values
+const openCards = new Set(); // ids of the cards folded open
+const profileStyleNames = new Map(); // profile id -> names of the styles it added
+const styleEditors = new Map(); // profile id -> its Add a style editor's state
+
+function showProfilesStatus(text, kind = "") {
+  profilesStatusEl.hidden = !text;
+  profilesStatusEl.className = `hint ${kind}`.trim();
+  profilesStatusEl.textContent = text;
+}
+
+// A profile's own values as its card shows them. A blank prompt or style is
+// shown as the default it stands for, so a fresh profile reads as what it
+// will actually be written with.
+function savedOwn(profile) {
+  const own = profile.resume || {};
+  return {
+    prompt: String(own.prompt || "").trim() ? own.prompt : defaults.prompt,
+    masterResume: own.masterResume || "",
+    masterResumeMode: own.masterResumeMode === "none" ? "none" : "use",
+    resumeStyle: own.style || defaults.resumeStyle,
+    summary: own.summary || ""
+  };
+}
+
+const sameOwn = (a, b) => OWN_FIELDS.every((f) => a[f] === b[f]);
+
+// What changed, as the collector stores it. A prompt or style left at the
+// default is saved blank, so the profile keeps following the default rather
+// than a copy of it.
+function storedPatch(draft, saved) {
+  const patch = {};
+  for (const f of OWN_FIELDS) {
+    if (draft[f] === saved[f]) continue;
+    const isDefault =
+      (f === "prompt" && draft[f] === defaults.prompt) ||
+      (f === "resumeStyle" && draft[f] === defaults.resumeStyle);
+    patch[f] = isDefault ? "" : draft[f];
+  }
+  return patch;
+}
+
+// Distinct values in order, the first spelling of each kept, blanks dropped.
+function distinct(values) {
+  const seen = new Map();
+  for (const value of values) {
+    const text = String(value ?? "").trim();
+    if (text && !seen.has(matchKey(text))) seen.set(matchKey(text), text);
+  }
+  return [...seen.values()];
+}
+
+// Rebuilds a picker's options, keeping `selected`. A value no profile
+// carries — renamed on the dashboard since, or the profiles not loaded yet —
+// stays as an option of its own rather than blanking, which would save as
+// nothing on the next Save.
+function fillChoices(select, values, selected) {
+  select.replaceChildren(new Option("— Select —", ""));
+  for (const value of values) select.add(new Option(value, value));
+  const wanted = matchKey(selected);
+  if (!wanted) {
+    select.value = "";
+    return;
+  }
+  const match = [...select.options].find((o) => o.value && matchKey(o.value) === wanted);
+  if (match) {
+    select.value = match.value;
+    return;
+  }
+  select.add(new Option(`${selected} — no profile has it`, selected));
+  select.value = selected;
+}
+
+// The two pickers, then the cards for what they pick. A role is offered when
+// a profile in the picked country has it.
+function renderChoices(country, role) {
+  fillChoices(countryEl, distinct(profiles.map((p) => p.sheet?.country)), country);
+  const inCountry = profiles.filter((p) => matchKey(p.sheet?.country) === matchKey(countryEl.value));
+  fillChoices(roleEl, distinct(inCountry.map((p) => p.sheet?.role)), role);
+  renderCards();
+}
+
+function renderCards() {
+  const country = matchKey(countryEl.value);
+  const role = matchKey(roleEl.value);
+  const shown =
+    country && role
+      ? profiles.filter((p) => matchKey(p.sheet?.country) === country && matchKey(p.sheet?.role) === role)
+      : [];
+
+  // A preview open in a card goes with it, rather than being taken along.
+  if (profileListEl.contains(stylePreviewEl)) closePreview();
+  // Every card starts folded; only the ones you opened since picking the
+  // Profile tab are drawn open again.
+  profileListEl.replaceChildren(...shown.map((p) => profileCard(p, openCards.has(p.id))));
+
+  profileEmptyEl.hidden = shown.length > 0;
+  profileEmptyEl.textContent =
+    !country || !role
+      ? "Pick a country and a role."
+      : `No profile has Country "${countryEl.value}" and Role "${roleEl.value}".`;
+}
+
+// The styles every profile has: the ones that ship with the extension, by the
+// name the panel shows them under. Keep in step with RESUME_STYLES in
+// background.js. Anything else a profile can pick is one it added itself.
+const BUILTIN_STYLES = new Map([
+  ["DE-1", "Sisu_DE_1"],
+  ["DE-2", "Sisu_DE_2"],
+  ["SF-1", "SF Resume style 1"],
+  ["SF-2", "CreditStar_SF_1"]
+]);
+
+// A built-in style by the name the list shows it under; an added one by its own.
+const styleLabel = (value) => BUILTIN_STYLES.get(value) ?? value;
+
+// The names of the styles a profile has added, from the last load.
+const ownStyles = (profileId) => profileStyleNames.get(profileId) ?? [];
+
+function el(tagName, className, text) {
+  const node = document.createElement(tagName);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+function button(text) {
+  const node = el("button", "", text);
+  node.type = "button";
+  return node;
+}
+
+// A profile's style picker: the built-in styles, then its own. A style it
+// was set to that has since been removed builds with the default, and says so.
+function fillStyleOptions(select, profileId, selected) {
+  select.replaceChildren();
+  for (const [value, label] of BUILTIN_STYLES) select.add(new Option(label, value));
+  for (const name of ownStyles(profileId)) select.add(new Option(`${name} — added`, name));
+  if (![...select.options].some((o) => o.value === selected)) {
+    select.add(new Option(`${selected} — removed, builds with ${styleLabel(defaults.resumeStyle)}`, selected));
+  }
+  select.value = selected;
+}
+
+// One profile's card. Its fields start from that profile's draft, if it has
+// one, and every edit updates the draft — or drops it, once the fields are
+// back to what is saved.
+//
+// Handed to Claude (or another model) alongside a resume screenshot, so a
+// human can get a working Template HTML style in one pass instead of the
+// back-and-forth it otherwise takes: every structural hole the builder
+// needs, the DE-1 html/body baseline verbatim (not sampled from the image),
+// precisely-measured colors/spacing/line-height, and a live-preview script
+// + data.js so the result can be checked by just opening the file, before
+// it's ever pasted in here. Kept as one block so "Template prompt" below can
+// hand it over unedited — if the rules in it ever drift from what the
+// builder actually requires (missingHoles, buildResumeHtml, the DE-1
+// template), fix it here too.
+const TEMPLATE_STYLE_PROMPT = `I'm attaching a screenshot of a resume. Recreate its visual design — layout, spacing, fonts/weights, colors, section order, dividers/rules, how headings and dates are styled — as closely as you can in one self-contained HTML file.
+
+This isn't just a visual copy, though: the output has to be a TEMPLATE for a Chrome extension that builds resumes by string-replacing specific elements. It will be rejected if it doesn't follow these exact structural rules, so treat them as hard constraints, not suggestions — match the image's look, but keep this structure underneath it.
+
+REQUIRED (the extension refuses the template if any is missing):
+1. \`<p id="summary">...</p>\` — the summary/profile paragraph, wherever the image has one (or near the top if it doesn't).
+2. \`<div id="skills">...</div>\` — the skills section.
+3. At least one \`<div class="job"> ... <ul data-exp="0"> ... </ul> ... </div>\` block — the pattern the builder clones once per job, so match the image's FIRST (or most typical) job entry exactly. Fill it with realistic placeholder content matching the image's own content, since this block also doubles as the template's own preview.
+
+Inside that job block, include:
+- one element with class="company", one with class="role"
+- EITHER class="location" and class="dates" as separate elements (optionally joined by \`<span class="sep">...</span>\` using whatever separator character/style the image uses, e.g. "|" or "•"), OR — if the image shows location and dates as one combined line — a single element with class="meta" instead.
+- \`<ul data-exp="0">\` holding a few \`<li>\` bullets matching the image's bullet style.
+
+OPTIONAL but include if the image has them (filled automatically if present, otherwise just left as placeholder, so give each real sample content):
+- \`<h1 class="name">\`, a \`<title>\` tag, class="title" for the headline under the name, and \`<p class="contact">\` with the contact items the image shows, separated by \`<span class="sep">...</span>\`. If the image puts links (LinkedIn/portfolio/GitHub) on their own separate line from the rest of the contact info, put those specifically in a second \`<p class="contact links">\`.
+- A repeatable \`<div class="edu-item">\` per school, with class="school", class="year", and a repeatable class="degree" line inside each (for multiple degrees at one school).
+- A repeatable \`<div class="cert-item">\` (wrap the whole section in something with class="cert-section" if the image has a distinct certifications block), with class="cert-name" inside each one.
+
+Go through the visual match like a design review, measuring, not guessing:
+
+1. COLORS — look at the actual pixels in the image. Pick out the exact text color, heading color, any accent/rule color, and background, as hex values. Don't guess a "close enough" color (e.g. a generic navy when the image uses a specific teal/slate) — sample it as precisely as you can.
+
+2. SPACING — measure, relative to the page: the margin around the whole page, the gap between sections (name → contact → summary → experience → education, etc.), the gap between a job's heading and its bullets, and the gap between bullets themselves.
+
+3. LINE SPACING — measure this precisely, don't eyeball it:
+   - Find a bullet or paragraph in the image that wraps onto at least two lines. Measure the pixel distance from the top of the text on the first wrapped line to the top of the text on the second wrapped line (baseline to baseline, or cap-height to cap-height — pick one and be consistent).
+   - Divide that distance by the font size you sampled for that same text. That ratio IS the line-height — state it explicitly before writing any code (e.g. "bullets: ~15px line pitch at 9.8pt font ≈ 1.42 unitless ratio").
+   - Do this separately for each block of wrapping text that looks visually different in the image (summary paragraph vs. bullets vs. any dense multi-line block) — they are not always the same ratio, even within one resume.
+   - This is strictly about spacing BETWEEN WRAPPED LINES OF THE SAME bullet/paragraph — never confuse it with the gap between one bullet and the next, or between a bullet list and the heading above/below it; those are margins from item 2.
+   - Write the result as a bare unitless number (e.g. \`1.45\`), never a px or % value — this project's PDF builder only reliably reads the unitless form.
+
+4. LIVE PREVIEW — the template also needs to be able to render itself when opened directly in a browser, so I can actually see it filled in rather than a blank/placeholder page. Add:
+   - \`<script src="./data.js"></script>\` near the top.
+   - A \`<script type="module">\` at the end of the body that reads the global \`resume\` object \`data.js\` defines and fills the page from it:
+     - \`#summary\` ← \`resume.SUMMARY\`
+     - \`#skills\` ← one \`<p>\` per \`resume.SKILLS\` line, splitting on the first \`:\` into a \`.label\` span + \`.colon\` span + the rest
+     - \`h1.name\` / \`.title\` / \`.contact\` ← \`resume.CONTACT\` as \`[name, title, ...contactItems]\`, each extra item joined with a \`.sep\` span between them, any \`https://\` item turned into an \`<a>\` (LinkedIn links shown as the text "LinkedIn")
+     - the FIRST \`.job\` block is the pattern: clone it once per \`resume.EXPERIENCE\` entry (\`[company, role, location, dates, ...bullets]\`), fill \`.company\`/\`.role\`/\`.location\`/\`.dates\` (or \`.meta\`), set \`data-exp\` on its \`<ul>\` to the entry's index, fill \`<li>\`s from the bullets, then remove the original pattern block(s)
+     - same clone-fill-remove pattern for \`.edu-item\` from \`resume.EDUCATION\` (\`[school, [[degree, field], ...], year]\`) and \`.cert-item\` from \`resume.CERTIFICATIONS\` (plain strings) — if there are no certifications, remove \`.cert-section\` entirely instead
+   - Also give me a separate \`data.js\` file with realistic sample content matching what's actually in the screenshot, in exactly this shape:
+     \`\`\`
+     const resume = {
+       CONTACT: ["Name", "Title", "location", "phone", "email", "https://linkedin.com/in/..."],
+       SUMMARY: "...",
+       SKILLS: ["Label: item, item, item"],
+       EXPERIENCE: [["Company", "Role", "Location", "Dates", "bullet", "bullet"]],
+       CERTIFICATIONS: [],
+       EDUCATION: [["School", [["Degree", "Field"]], "Year"]]
+     };
+     \`\`\`
+   This script is for LOCAL PREVIEW ONLY — when this template is actually used, every \`<script>\` in it is stripped and the same content gets baked in by directly string-replacing the elements by their id/class, not by running this JS. So the structural ids/classes themselves must be correct and complete on their own, with or without the script running.
+
+5. PAGE MARGINS (PDF vs. browser preview) — this project's PDF builder adds its own fixed 15mm margin on every side of the page automatically, and reads \`@media print\` rules, overriding the normal ones for the same element. So:
+   - \`body\`'s plain \`padding\` controls how it looks when opened directly in a browser (for live preview) — keep whatever padding matches the image there.
+   - Never put page-margin spacing in a CSS \`margin\` on \`body\` — only \`padding\` is read for this. A \`margin\` on \`body\` is fine ONLY if it's purely for centering the page in a browser (e.g. \`margin: 0 auto;\`), never as a stand-in for the page margin itself.
+
+6. BODY & HTML — this project's other templates (Sisu_DE_1 above all) use one exact, unstyled \`html\`/\`body\` baseline, and it must be copied verbatim here, not reinvented or sampled from the image:
+   - Do not style \`html\` at all — no background, no box-shadow, nothing.
+   - \`body\` gets exactly this, character for character, with only the \`color\` value's variable name possibly differing to match this template's own theme variable names:
+     \`\`\`css
+     body {
+       margin: 0 auto;
+       padding: 32px 40px 48px;
+       max-width: 8.5in;
+       font-family: "Segoe UI", Calibri, "Helvetica Neue", Arial, sans-serif;
+       font-size: 13.5px;
+       line-height: 1.45;
+       color: var(--body);
+       background: #fff;
+     }
+     \`\`\`
+   - No \`box-shadow\`, no \`min-height\`, no fixed \`width\`, no \`-webkit-font-smoothing\`, no \`font-family\` other than the one above — the page's own paper-like look (the shadow framing it, the gray page background behind it) is already drawn by this project's own Preview panel around every template; the template's own \`body\`/\`html\` must not try to reproduce it.
+   - \`@media print { body { padding: 0; font-size: 11pt; } }\` stays exactly this, matching DE-1's own print rule — nothing more under it.
+   - Everything else — colors, fonts inside the content, headings, spacing between sections, the specific layout (centered vs. left-aligned, etc.) — stays free to match the image. Only \`html\`/\`body\` themselves are locked to this exact shared baseline.
+
+HARD RULES — do not break these even if it means deviating slightly from the image:
+- Any \`<script>\` is stripped when the extension builds a real resume, so the layout can never depend on JS running at build time. A script is only allowed as the self-contained live-preview helper above — never for anything structural or visual.
+- One self-contained HTML file: inline/embedded \`<style>\`, no external fonts or assets I'd have to host separately. Use system/web-safe fonts closest to what's in the image.
+- Every class/id name above must appear verbatim — the extension matches on these exact strings, not on meaning.
+
+Give me:
+- A short list of what you measured and picked (colors as hex, the line-height ratios with your math, the margin/gap values) before the code, so I can tell you if something's misread.
+- The corrected, complete HTML file, plus the data.js file.
+
+Output just those two files.`;
+
+// Its resume style is its own as well: picked from the built-in styles and
+// the ones added under this card, which no other profile is offered. The
+// Add a style editor keeps what is typed in it per profile, so a card drawn
+// again — a reload, another country picked and back — still has it.
+function profileCard(profile, open) {
+  const values = profileDrafts.get(profile.id) ?? savedOwn(profile);
+  const idFor = (field) => `profile-${profile.id}-${field}`;
+
+  const card = el("details", "profile-card");
+  card.dataset.id = String(profile.id);
+  card.open = open;
+  card.addEventListener("toggle", () => (card.open ? openCards.add(profile.id) : openCards.delete(profile.id)));
+
+  const summary = el("summary");
+  const dirty = el("span", "profile-dirty", "● unsaved");
+  dirty.hidden = !profileDrafts.has(profile.id);
+  summary.append(
+    el("span", "profile-name", profile.name),
+    ...(profile.sheet?.applicant ? [el("span", "profile-sub", profile.sheet.applicant)] : []),
+    dirty
+  );
+
+  const promptLabel = el("label", "field-label", "Prompt");
+  promptLabel.htmlFor = idFor("prompt");
+  const prompt = el("textarea");
+  prompt.id = idFor("prompt");
+  prompt.rows = 7;
+  prompt.placeholder = "Instructions sent with each job description…";
+  prompt.value = values.prompt;
+
+  // Whether the master resume goes to OpenAI with each job — a switch, saved
+  // as "use" or "none". Off hides the box; its text is kept, so switching
+  // back on shows it again.
+  const switchRow = el("label", "switch-row");
+  const use = el("input", "switch-input");
+  use.type = "checkbox";
+  use.setAttribute("role", "switch");
+  use.checked = values.masterResumeMode !== "none";
+  const track = el("span", "switch");
+  track.setAttribute("aria-hidden", "true");
+  track.append(el("span", "switch-knob"));
+  const useState = el("span");
+  switchRow.append(use, track, useState);
+  const master = el("textarea");
+  master.rows = 10;
+  master.setAttribute("aria-label", `${profile.name} — master resume`);
+  master.placeholder = "Paste this profile's full resume";
+  master.value = values.masterResume;
+  const syncMaster = () => {
+    master.hidden = !use.checked;
+    useState.textContent = use.checked
+      ? "Use master resume"
+      : "Don't use master resume — only the job description is sent";
+  };
+  syncMaster();
+
+  // The body of the emails Recruiter Bid sends to recruiters for this profile.
+  const summaryLabel = el("label", "field-label", "Summary");
+  summaryLabel.htmlFor = idFor("summary");
+  const summaryText = el("textarea");
+  summaryText.id = idFor("summary");
+  summaryText.rows = 6;
+  summaryText.placeholder = "What every Recruiter Bid email to a recruiter says";
+  summaryText.value = values.summary;
+
+  // --- resume style -------------------------------------------------------
+
+  const styleSelectLabel = el("label", "field-label", "Resume style");
+  styleSelectLabel.htmlFor = idFor("style");
+  const style = el("select");
+  style.id = idFor("style");
+  fillStyleOptions(style, profile.id, values.resumeStyle);
+  const preview = button("Preview");
+  const copy = button("Copy to editor");
+  const remove = button("Remove style");
+  const actions = el("div", "controls style-actions");
+  actions.append(preview, copy, remove);
+  const syncRemove = () => (remove.disabled = !ownStyles(profile.id).includes(style.value));
+  syncRemove();
+
+  // This profile's editor, folded away until it is wanted, and its state —
+  // kept across redraws: what is typed, what was last copied in or added
+  // (anything else in it is work Copy to editor would throw away), and the
+  // last thing said about this profile's styles.
+  const editor = styleEditors.get(profile.id) ?? { name: "", html: "", kept: "", open: false, armedFor: null, status: null };
+  styleEditors.set(profile.id, editor);
+  const adder = el("details", "detail style-adder");
+  adder.open = editor.open;
+  adder.addEventListener("toggle", () => (editor.open = adder.open));
+  const nameLabel = el("label", "field-label", "Style name");
+  nameLabel.htmlFor = idFor("style-name");
+  const name = el("input");
+  name.id = idFor("style-name");
+  name.type = "text";
+  name.autocomplete = "off";
+  name.spellcheck = false;
+  name.maxLength = 40;
+  name.placeholder = "e.g. Clean two-column";
+  name.value = editor.name;
+  const htmlLabel = el("label", "field-label", "Template HTML");
+  htmlLabel.htmlFor = idFor("style-html");
+  const html = el("textarea", "code");
+  html.id = idFor("style-html");
+  html.rows = 12;
+  html.wrap = "off";
+  html.spellcheck = false;
+  html.placeholder = "Paste or type the template's HTML";
+  html.value = editor.html;
+  const draftPreview = button("Preview");
+  const templatePrompt = button("Template prompt");
+  const add = button("Add new");
+  const adderActions = el("div", "controls style-actions");
+  adderActions.append(draftPreview, templatePrompt, add);
+
+  // For a human with no screenshot-to-HTML model of their own handy, or
+  // whose clipboard write is blocked (no permission prompt, no https, …):
+  // the same prompt, open and selectable, instead of lost to a silent
+  // failure.
+  const promptPeek = el("details", "style-prompt-peek");
+  const promptBox = el("textarea", "code");
+  promptBox.readOnly = true;
+  promptBox.rows = 8;
+  promptBox.value = TEMPLATE_STYLE_PROMPT;
+  promptBox.addEventListener("focus", () => promptBox.select());
+  promptPeek.append(el("summary", "", "Prompt"), promptBox);
+
+  adder.append(el("summary", "", "Add a style"), nameLabel, name, htmlLabel, html, adderActions, promptPeek);
+
+  const status = el("p", "hint");
+  const showStatus = (text, kind = "") => {
+    editor.status = text ? { text, kind } : null;
+    status.hidden = !text;
+    status.className = `hint ${kind}`.trim();
+    status.textContent = text;
+  };
+  showStatus(editor.status?.text ?? "", editor.status?.kind);
+
+  // Handed to a model alongside a resume screenshot — no page here can
+  // script that model itself, same reasoning as Sheet sync's own Generate
+  // script. Copies silently when it can; the Prompt details below holds the
+  // same text, open and selectable, for when it can't.
+  templatePrompt.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(TEMPLATE_STYLE_PROMPT);
+      showStatus("Prompt copied — paste it into Claude (or another model) along with a resume screenshot.", "saved");
+    } catch {
+      promptPeek.open = true;
+      promptBox.focus();
+      showStatus("Could not copy — selected below, so you can copy it by hand.", "warn");
+    }
+  });
+
+  // Said on the button before it is pressed, not after: a name this profile
+  // has already added replaces that style.
+  const syncAdd = () => (add.textContent = ownStyles(profile.id).includes(name.value.trim()) ? "Update style" : "Add new");
+  syncAdd();
+
+  // --- edits ---------------------------------------------------------------
+
+  const read = () => ({
+    prompt: prompt.value,
+    masterResume: master.value,
+    masterResumeMode: use.checked ? "use" : "none",
+    resumeStyle: style.value,
+    summary: summaryText.value
+  });
+  const onEdit = () => {
+    const draft = read();
+    if (sameOwn(draft, savedOwn(profile))) profileDrafts.delete(profile.id);
+    else profileDrafts.set(profile.id, draft);
+    dirty.hidden = !profileDrafts.has(profile.id);
+    syncProfileButtons();
+  };
+  prompt.addEventListener("input", onEdit);
+  master.addEventListener("input", onEdit);
+  summaryText.addEventListener("input", onEdit);
+  style.addEventListener("change", () => {
+    syncRemove();
+    onEdit();
+  });
+  use.addEventListener("change", () => {
+    syncMaster();
+    onEdit();
+  });
+  name.addEventListener("input", () => {
+    editor.name = name.value;
+    syncAdd();
+  });
+  // Typing again starts Copy to editor's question over.
+  html.addEventListener("input", () => {
+    editor.html = html.value;
+    editor.armedFor = null;
+  });
+
+  // --- style actions -------------------------------------------------------
+
+  preview.addEventListener("click", () =>
+    showPreview(
+      { profileId: profile.id, style: style.value },
+      `"${styleLabel(style.value)}" — ${profile.name}`,
+      preview,
+      card,
+      showStatus
+    )
+  );
+
+  draftPreview.addEventListener("click", () => {
+    if (!html.value.trim()) {
+      showStatus("Type or paste the template's HTML first.", "warn");
+      return;
+    }
+    const title = name.value.trim() ? `"${name.value.trim()}" (editor)` : "the editor's HTML";
+    showPreview({ profileId: profile.id, html: html.value }, `${title} — ${profile.name}`, draftPreview, card, showStatus);
+  });
+
+  // Replacing edits that were never added asks first — by asking for a
+  // second click, since a side panel has no dialog to ask with. Typing again,
+  // or picking another style, starts the question over.
+  copy.addEventListener("click", async () => {
+    const value = style.value;
+    const label = styleLabel(value);
+    const unkept = html.value.trim() && html.value !== editor.kept;
+    if (unkept && editor.armedFor !== value) {
+      editor.armedFor = value;
+      showStatus(`Template HTML has edits that were never added. Press Copy to editor again to replace them with "${label}".`, "warn");
+      return;
+    }
+    editor.armedFor = null;
+
+    copy.disabled = true;
+    const reply = await send({ type: "GET_STYLE_HTML", profileId: profile.id, name: value });
+    copy.disabled = false;
+    if (!reply.ok) {
+      showStatus(`Could not read "${label}": ${reply.error}`, "warn");
+      return;
+    }
+
+    html.value = editor.html = editor.kept = reply.html;
+    // An added style keeps its name, so the button updates it in place; a
+    // built-in one cannot be overwritten, so its copy starts under a new name.
+    name.value = editor.name = reply.builtin ? `${value} copy` : value;
+    adder.open = true;
+    syncAdd();
+    showStatus(`Copied "${label}" into the editor. Edit it, then press ${add.textContent}.`, "saved");
+  });
+
+  // Added to this profile and picked for it, as an edit — Save puts it to use.
+  add.addEventListener("click", async () => {
+    const styleName = name.value.trim();
+    if (!styleName) {
+      showStatus("Give the style a name first.", "warn");
+      return;
+    }
+    if (!html.value.trim()) {
+      showStatus("Type or paste the template's HTML first.", "warn");
+      return;
+    }
+
+    add.disabled = true;
+    const reply = await send({ type: "ADD_STYLE", profileId: profile.id, name: styleName, html: html.value });
+    add.disabled = false;
+    if (!reply.ok) {
+      showStatus(`Could not add "${styleName}": ${reply.error}`, "warn");
+      return;
+    }
+
+    editor.kept = html.value;
+    profileStyleNames.set(profile.id, reply.styles.map((s) => s.name));
+    fillStyleOptions(style, profile.id, reply.name);
+    syncRemove();
+    syncAdd();
+    onEdit();
+    showStatus(
+      reply.replaced
+        ? `Updated "${reply.name}" — used from the next job.`
+        : `Added "${reply.name}" and picked it — Save to build with it.`,
+      "saved"
+    );
+  });
+
+  remove.addEventListener("click", async () => {
+    const value = style.value;
+    if (!ownStyles(profile.id).includes(value)) return;
+
+    remove.disabled = true;
+    const reply = await send({ type: "REMOVE_STYLE", profileId: profile.id, name: value });
+    if (!reply.ok) {
+      remove.disabled = false;
+      showStatus(`Could not remove: ${reply.error}`, "warn");
+      return;
+    }
+    // The worker puts the profile back on the default if it was using it.
+    // An unsaved pick of it goes the same way; the rest of the edits stay.
+    const draft = profileDrafts.get(profile.id);
+    if (draft?.resumeStyle === value) draft.resumeStyle = defaults.resumeStyle;
+    showStatus(`Removed "${value}". ${profile.name} builds with ${styleLabel(defaults.resumeStyle)} unless another style is picked.`, "saved");
+    await loadProfiles();
+  });
+
+  card.append(
+    summary,
+    promptLabel,
+    prompt,
+    el("p", "field-label", "Master resume"),
+    switchRow,
+    master,
+    summaryLabel,
+    summaryText,
+    styleSelectLabel,
+    style,
+    actions,
+    adder,
+    status
+  );
+  return card;
+}
+
+async function loadProfiles() {
+  reloadProfilesEl.disabled = true;
+  showProfilesStatus("Loading profiles…");
+  const reply = await send({ type: "GET_PROFILES" });
+  reloadProfilesEl.disabled = false;
+
+  if (!reply.ok) {
+    showProfilesStatus(`Could not load the dashboard's profiles: ${reply.error}`, "warn");
+    return;
+  }
+
+  profiles = reply.profiles;
+  profileStyleNames.clear();
+  for (const [id, list] of Object.entries(reply.styles || {})) {
+    profileStyleNames.set(Number(id), list.map((style) => style.name));
+  }
+  // A profile gone from the dashboard takes its unsaved edits with it; one
+  // whose saved values now match its edits has nothing left to save.
+  for (const [id, draft] of [...profileDrafts]) {
+    const profile = profiles.find((p) => p.id === id);
+    if (!profile || sameOwn(draft, savedOwn(profile))) profileDrafts.delete(id);
+  }
+  renderChoices(countryEl.value, roleEl.value);
+  syncProfileButtons();
+  showProfilesStatus(profiles.length ? "" : "The dashboard has no tabs yet — add one there first.", "warn");
+}
+
+countryEl.addEventListener("change", () => {
+  renderChoices(countryEl.value, roleEl.value);
+  syncProfileButtons();
+});
+roleEl.addEventListener("change", () => {
+  renderCards();
+  syncProfileButtons();
+});
+reloadProfilesEl.addEventListener("click", loadProfiles);
 
 // ---------------------------------------------------------------------------
 // Test connection
@@ -677,117 +2030,102 @@ testConnectionEl.addEventListener("click", async () => {
 });
 
 // ---------------------------------------------------------------------------
-// Style add
+// Style preview
 //
-// The picked HTML file is read here and handed to the worker, which checks it
-// has the holes the builder fills and keeps it in storage — an extension
-// cannot write into its own folder. It then appears in Resume style and is
-// used for every resume built while it is selected and saved.
+// Fills a template the way a job's resume is filled — the worker's own
+// builder, with that profile's newest resume, or a sample until it has one —
+// for either the style a profile has picked or whatever is in its editor,
+// added or not yet. The one preview box is shown inside the card it was
+// opened from, and put back here when it is closed or the cards are redrawn.
 // ---------------------------------------------------------------------------
 
-const addStyleEl = $("addStyle");
-const removeStyleEl = $("removeStyle");
-const styleFileEl = $("styleFile");
-const styleStatusEl = $("styleStatus");
-const BUILTIN_STYLES = new Set([...resumeStyleEl.options].map((o) => o.value));
+const stylePreviewEl = $("stylePreview");
+const stylePreviewTitleEl = $("stylePreviewTitle");
+const stylePreviewSizerEl = $("stylePreviewSizer");
+const stylePreviewFrameEl = $("stylePreviewFrame");
+const previewHomeEl = stylePreviewEl.parentNode;
+const PAGE_WIDTH = 816; // a letter page, 8.5in at 96px to the inch
 
-function renderCustomStyles(styles = []) {
-  for (const o of [...resumeStyleEl.options]) {
-    if (!BUILTIN_STYLES.has(o.value)) o.remove();
-  }
-  for (const s of styles) {
-    resumeStyleEl.add(new Option(`${s.name} — added from ${s.file || "file"}`, s.name));
-  }
-  syncRemoveStyle();
+// What the preview is showing, for Open full size.
+let previewHtml = "";
+
+// The frame keeps the page's width and is scaled down to the panel's — never
+// up past its real size in a panel dragged wide; its height follows the
+// document, read once it has loaded.
+function fitPreview() {
+  const doc = stylePreviewFrameEl.contentDocument;
+  if (stylePreviewEl.hidden || !doc?.documentElement) return;
+  const scale = Math.min(1, stylePreviewSizerEl.clientWidth / PAGE_WIDTH);
+  const height = doc.documentElement.scrollHeight;
+  stylePreviewFrameEl.style.height = `${height}px`;
+  stylePreviewFrameEl.style.transform = `scale(${scale})`;
+  stylePreviewSizerEl.style.height = `${Math.ceil(height * scale)}px`;
 }
 
-function syncRemoveStyle() {
-  removeStyleEl.disabled = BUILTIN_STYLES.has(resumeStyleEl.value);
+stylePreviewFrameEl.addEventListener("load", fitPreview);
+window.addEventListener("resize", fitPreview);
+
+function closePreview() {
+  stylePreviewEl.hidden = true;
+  stylePreviewFrameEl.removeAttribute("srcdoc");
+  if (stylePreviewEl.parentNode !== previewHomeEl) previewHomeEl.append(stylePreviewEl);
 }
 
-function showStyleStatus(text, kind = "") {
-  styleStatusEl.hidden = !text;
-  styleStatusEl.className = `hint ${kind}`.trim();
-  styleStatusEl.textContent = text;
-}
-
-addStyleEl.addEventListener("click", () => {
-  styleFileEl.value = ""; // so picking the same file again still fires change
-  styleFileEl.click();
-});
-
-styleFileEl.addEventListener("change", async () => {
-  const file = styleFileEl.files?.[0];
-  if (!file) return;
-
-  const name = file.name.replace(/\.html?$/i, "");
-  addStyleEl.disabled = true;
-  try {
-    const reply = await send({ type: "ADD_STYLE", name, file: file.name, html: await file.text() });
-    if (!reply.ok) {
-      showStyleStatus(`Could not add ${file.name}: ${reply.error}`, "warn");
-      return;
-    }
-    renderCustomStyles(reply.styles);
-    resumeStyleEl.value = reply.name;
-    syncRemoveStyle();
-    syncProfileButtons();
-    showStyleStatus(
-      `${reply.replaced ? "Replaced" : "Added"} "${reply.name}".` +
-        (isDirty() ? " Press Save to build resumes with it." : ""),
-      "saved"
-    );
-  } catch (err) {
-    showStyleStatus(`Could not read ${file.name}: ${err?.message || err}`, "warn");
-  } finally {
-    addStyleEl.disabled = false;
-  }
-});
-
-removeStyleEl.addEventListener("click", async () => {
-  const name = resumeStyleEl.value;
-  if (BUILTIN_STYLES.has(name)) return;
-
-  const reply = await send({ type: "REMOVE_STYLE", name });
+// `host` is the card the preview opens in; `report` is that card's status line.
+async function showPreview(request, title, trigger, host, report) {
+  trigger.disabled = true;
+  report("Building the preview…");
+  const reply = await send({ type: "PREVIEW_STYLE", ...request });
+  trigger.disabled = false;
   if (!reply.ok) {
-    showStyleStatus(`Could not remove: ${reply.error}`, "warn");
+    report(`Could not preview ${title}: ${reply.error}`, "warn");
     return;
   }
-  // The worker resets a saved profile that pointed at it; any unsaved edits in
-  // the other fields are kept.
-  const edits = readForm();
-  renderCustomStyles(reply.styles);
-  savedProfile = reply.profile;
-  fillForm({ ...edits, resumeStyle: edits.resumeStyle === name ? savedProfile.resumeStyle : edits.resumeStyle });
-  syncRemoveStyle();
-  syncProfileButtons();
-  showStyleStatus(`Removed "${name}".`, "saved");
+
+  previewHtml = reply.html;
+  stylePreviewTitleEl.textContent = title;
+  host.append(stylePreviewEl);
+  stylePreviewEl.hidden = false;
+  stylePreviewFrameEl.srcdoc = reply.html;
+  stylePreviewEl.scrollIntoView({ block: "nearest" });
+
+  const problems = [...reply.missing.map((hole) => `no ${hole}, so it cannot be added`), ...reply.warnings];
+  report(
+    (reply.from
+      ? `Filled with the resume ChatGPT wrote for ${reply.from}.`
+      : "Filled with sample data — no resume has been generated for this profile yet.") +
+      (problems.length ? ` Template: ${problems.join("; ")}.` : ""),
+    problems.length ? "warn" : ""
+  );
+}
+
+$("stylePreviewOpen").addEventListener("click", () => {
+  const url = URL.createObjectURL(new Blob([previewHtml], { type: "text/html" }));
+  window.open(url, "_blank");
+  // The tab has loaded it by then; until then it needs the URL to stay good.
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
 });
 
-// Typing, picking a model, or switching to Custom… all re-evaluate.
-for (const f of PROFILE_TEXT_FIELDS) $(f).addEventListener("input", syncProfileButtons);
+$("stylePreviewClose").addEventListener("click", closePreview);
+
+// Typing, picking a model, or switching to Custom… all re-evaluate. The
+// profile cards re-evaluate on their own edits.
+$("apiKey").addEventListener("input", syncProfileButtons);
 modelCustomEl.addEventListener("input", syncProfileButtons);
 modelEl.addEventListener("change", () => {
   modelCustomEl.hidden = modelEl.value !== CUSTOM_MODEL;
   if (!modelCustomEl.hidden) modelCustomEl.focus();
   syncProfileButtons();
 });
-resumeStyleEl.addEventListener("change", () => {
-  syncRemoveStyle();
-  syncProfileButtons();
-});
 
+// The settings to this extension's storage, then each edited profile to its
+// own dashboard tab. A profile that fails to save keeps its edits, so the
+// next Save tries it again.
 saveProfileEl.addEventListener("click", async () => {
   const patch = readForm();
 
-  if (modelEl.value === CUSTOM_MODEL && !patch.model) {
-    profileStatusEl.className = "hint warn";
-    profileStatusEl.textContent = "Enter a model id, or pick one from the list.";
-    return;
-  }
-
   saveProfileEl.disabled = true;
-  const reply = await send({ type: "SET_PROFILE", patch });
+  const reply = await send({ type: "SET_SETTINGS", patch });
 
   if (!reply.ok) {
     profileStatusEl.className = "hint warn";
@@ -795,36 +2133,95 @@ saveProfileEl.addEventListener("click", async () => {
     saveProfileEl.disabled = false;
     return;
   }
+  savedSettings = reply.settings;
 
-  savedProfile = reply.profile;
-  fillForm(savedProfile); // echo back what was actually stored, e.g. trimmed
+  const failed = [];
+  for (const [id, draft] of [...profileDrafts]) {
+    const profile = profiles.find((p) => p.id === id);
+    if (!profile) {
+      profileDrafts.delete(id);
+      continue;
+    }
+    const result = await send({ type: "UPDATE_PROFILE", id, patch: storedPatch(draft, savedOwn(profile)) });
+    if (!result.ok) {
+      failed.push(`${profile.name} (${result.error})`);
+      continue;
+    }
+    profiles = profiles.map((p) => (p.id === id ? result.profile : p));
+    profileDrafts.delete(id);
+  }
+
+  renderChoices(savedSettings.country, savedSettings.role); // echo back what was stored — the cards with it
   syncProfileButtons();
 
-  profileStatusEl.className = "hint saved";
-  profileStatusEl.textContent = "Saved.";
-  setTimeout(() => {
-    if (!isDirty()) showKeyState(savedProfile.apiKey);
-  }, 1500);
+  if (failed.length) {
+    profileStatusEl.className = "hint warn";
+    profileStatusEl.textContent = `Saved, except ${failed.join("; ")} — press Save to try again.`;
+    return;
+  }
+  showKeyState(savedSettings.apiKey);
+  showUserPanel(false);
 });
 
 revertProfileEl.addEventListener("click", () => {
-  if (savedProfile) fillForm(savedProfile);
+  profileDrafts.clear();
+  if (savedSettings) renderChoices(savedSettings.country, savedSettings.role);
   syncProfileButtons();
+});
+
+// ---------------------------------------------------------------------------
+// ChatGPT Settings
+//
+// The API key and model, in a panel of their own beneath the GPT button. The
+// button opens and closes it, always on what is saved; Save stores them and
+// closes it.
+// ---------------------------------------------------------------------------
+
+const gptPanelEl = $("gptPanel");
+const openChatgptEl = $("openChatgpt");
+const gptStatusEl = $("gptStatus");
+
+function showGptStatus(text) {
+  gptStatusEl.hidden = !text;
+  gptStatusEl.className = "hint warn";
+  gptStatusEl.textContent = text || "";
+}
+
+function showGptPanel(open) {
+  gptPanelEl.hidden = !open;
+  openChatgptEl.setAttribute("aria-expanded", String(open));
+  showGptStatus("");
+  if (open) { // one panel at a time
+    showUserPanel(false);
+    showSearchPanel(false);
+  }
+  if (open && savedSettings) fillGptForm(savedSettings);
+}
+
+openChatgptEl.addEventListener("click", () => showGptPanel(gptPanelEl.hidden));
+
+$("gptSave").addEventListener("click", async () => {
+  const patch = readGptForm();
+  if (modelEl.value === CUSTOM_MODEL && !patch.model) return showGptStatus("Enter a model id, or pick one from the list.");
+  const reply = await send({ type: "SET_SETTINGS", patch });
+  if (!reply.ok) return showGptStatus(`Could not save: ${reply.error}`);
+  savedSettings = reply.settings;
+  syncProfileButtons();
+  showGptPanel(false);
 });
 
 // ---------------------------------------------------------------------------
 // Tabs
 //
-// Two independent strips share this wiring: the top-level Generate/Job bid
-// pair, and the ChatGPT setting/Resume style pair inside the settings screen.
-// Each is wired separately so arrow-key navigation stays scoped to its own
+// The top-level strip's wiring, kept general: arrow-key navigation stays
+// scoped to its own
 // strip — switching between the settings tabs must not also step through
-// Generate/Job bid.
+// Generate/Auto Fill.
 //
 // Switching only shows and hides. The feed keeps streaming into the Generate
-// pane while the Job bid tab is in front, and an edit in the master resume
-// survives a trip to the Resume style tab, because the panes are still in the
-// document, just not displayed.
+// pane while the Auto Fill tab is in front, and an edit in a profile's master
+// resume survives a trip to ChatGPT setting, because the panes are still in
+// the document, just not displayed.
 // ---------------------------------------------------------------------------
 
 function wireTabStrip(listEl, { onSelect } = {}) {
@@ -857,79 +2254,341 @@ function wireTabStrip(listEl, { onSelect } = {}) {
 }
 
 const mainTabs = wireTabStrip($("mainTabs"), {
-  // Picking a top-level tab also leaves the settings screen, if it is open.
-  onSelect: () => {
-    $("pane-profile").hidden = true;
-    $("openSettings").setAttribute("aria-expanded", "false");
+  onSelect: (tab) => {
+    if (tab.id === "tab-recruiter") loadRecruiters();
   }
 });
 
-wireTabStrip($("settingsTabs"));
-
 // ---------------------------------------------------------------------------
-// Settings
+// Recruiter Bid
 //
-// Not a top-level tab: the button on the Generate pane opens this screen in
-// place of the feed, and Back — or picking Generate/Job bid — closes it again.
-// Like a tab switch it only shows and hides, so the feed keeps streaming and
-// an unsaved edit in either settings tab survives a trip back to the list.
+// Recruiters' emails, imported from a JSON file — an array of
+// { email_address, company_name, email_title, email_content, arrived_date },
+// or one such object. The worker keeps the list. Picking a recruiter has the
+// worker send them an email from Gmail in the browser: the subject, and as
+// the body the Summary of the profile picked under "Send as".
 // ---------------------------------------------------------------------------
 
-const settingsPaneEl = $("pane-profile");
-const openSettingsEl = $("openSettings");
-const closeSettingsEl = $("closeSettings");
+const rbListEl = $("rbList");
+const rbStatusEl = $("rbStatus");
+const rbFileEl = $("rbFile");
 
-function showSettings(open) {
-  settingsPaneEl.hidden = !open;
-  openSettingsEl.setAttribute("aria-expanded", String(open));
-  const current = mainTabs.tabs.find((t) => t.getAttribute("aria-selected") === "true") || mainTabs.tabs[0];
-  $(current.getAttribute("aria-controls")).hidden = open;
+// The report over the list, coloured for how things went — success, info,
+// warning or danger — and gone after RB_STATUS_MS. Something still under way
+// (stay: true) stays until its outcome replaces it.
+const RB_STATUS_MS = 5000;
+let rbStatusTimer = null;
+
+function rbStatus(text, kind = "info", { stay = false } = {}) {
+  clearTimeout(rbStatusTimer);
+  rbStatusEl.hidden = !text;
+  rbStatusEl.textContent = text || "";
+  rbStatusEl.className = `rb-status ${kind}`;
+  if (text && !stay) rbStatusTimer = setTimeout(() => (rbStatusEl.hidden = true), RB_STATUS_MS);
 }
 
-openSettingsEl.addEventListener("click", () => {
-  showSettings(true);
-  closeSettingsEl.focus();
+const rbWhen = (iso) => {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? "" : d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+};
+
+// The list a page at a time, with the pager under it. The page picked stays
+// picked — through an import, the tab closing, the panel or the app
+// restarting — until another is picked; only a list too short for it moves
+// it back.
+const RB_PAGE_SIZE = 20;
+const RB_PAGE_KEY = "rbPage";
+let rbAll = [];
+let rbPage = 0;
+try {
+  rbPage = Math.max(0, Math.floor(Number(localStorage.getItem(RB_PAGE_KEY))) || 0);
+} catch {
+  // not remembered: the first page
+}
+
+function renderRecruiters(list) {
+  rbAll = list;
+  const pages = Math.max(1, Math.ceil(list.length / RB_PAGE_SIZE));
+  // Before the list has been read there is nothing to measure the page by.
+  if (list.length) rbPage = Math.min(rbPage, pages - 1);
+  const from = rbPage * RB_PAGE_SIZE;
+  const shown = list.slice(from, from + RB_PAGE_SIZE);
+  rbListEl.replaceChildren(
+    ...shown.map((r) => {
+      const li = document.createElement("li");
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "rb-item";
+      b.title = `${r.email_title}${r.arrived_date ? `\n${rbWhen(r.arrived_date)}` : ""}\n\nSend ${r.email_address} an email`;
+      const state = tag(`rb-state${r.sentAt ? " done" : ""}`, r.sentAt ? `✓ Sent ${rbWhen(r.sentAt)}` : rbWhen(r.arrived_date));
+      b.append(tag("rb-company", r.company_name || r.email_address), state, tag("rb-email", r.email_address));
+      if (r.email_title) b.append(tag("rb-title", r.email_title));
+      b.addEventListener("click", () => sendTo(r, b, state));
+      li.appendChild(b);
+      return li;
+    })
+  );
+  rbListEl.scrollTop = 0;
+  $("rbCount").textContent = list.length ? `${list.length} recruiter${list.length === 1 ? "" : "s"}` : "";
+  $("rbClear").hidden = !list.length;
+  renderPager(pages, from, shown.length, list.length);
+}
+
+// The page numbers to offer: the first and last, and the ones either side
+// of the current page, with a gap ("…") wherever pages are left out.
+function pageNumbers(current, pages) {
+  const keep = new Set([0, pages - 1, current - 1, current, current + 1].filter((p) => p >= 0 && p < pages));
+  const out = [];
+  let last = -1;
+  for (const p of [...keep].sort((a, b) => a - b)) {
+    if (p - last > 1) out.push(null);
+    out.push(p);
+    last = p;
+  }
+  return out;
+}
+
+function renderPager(pages, from, count, total) {
+  const pager = $("rbPager");
+  pager.hidden = pages <= 1;
+  if (pager.hidden) return pager.replaceChildren();
+  const go = (page) => {
+    rbPage = page;
+    try {
+      localStorage.setItem(RB_PAGE_KEY, String(page));
+    } catch {
+      // kept until the panel closes
+    }
+    renderRecruiters(rbAll);
+  };
+  const arrow = (label, text, page, disabled) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "rb-page rb-arrow";
+    b.textContent = text;
+    b.setAttribute("aria-label", label);
+    b.title = label;
+    b.disabled = disabled;
+    b.addEventListener("click", () => go(page));
+    return b;
+  };
+  const numbers = pageNumbers(rbPage, pages).map((p) => {
+    if (p === null) return tag("rb-gap", "…");
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "rb-page";
+    b.textContent = String(p + 1);
+    b.setAttribute("aria-label", `Page ${p + 1}`);
+    if (p === rbPage) b.setAttribute("aria-current", "page");
+    b.addEventListener("click", () => go(p));
+    return b;
+  });
+  pager.replaceChildren(
+    tag("rb-range", `${from + 1}–${from + count} of ${total}`),
+    arrow("Previous page", "‹", rbPage - 1, rbPage === 0),
+    ...numbers,
+    arrow("Next page", "›", rbPage + 1, rbPage === pages - 1)
+  );
+}
+
+async function sendTo(r, button, state) {
+  const profileId = RB_SEND_AS ? rbProfileEl.value : undefined;
+  if (RB_SEND_AS && !profileId) return rbStatus("Pick the profile to send as first.", "warning");
+  button.disabled = true;
+  state.className = "rb-state";
+  state.textContent = "Sending…";
+  rbStatus(`Sending ${r.email_address} an email from Gmail…`, "info", { stay: true });
+  const reply = await send({ type: "RECRUITER_SEND", email: r.email_address, profileId });
+  button.disabled = false;
+  if (reply.ok) {
+    r.sentAt = reply.sentAt; // so it still shows after a page turn
+    state.className = "rb-state done";
+    state.textContent = `✓ Sent ${rbWhen(reply.sentAt)}`;
+    rbStatus(
+      `Sent to ${r.email_address} as ${reply.sentAs}.` +
+        (reply.saved ? "" : ` Not in the database yet (${reply.saveError}) — it is saved with the next send.`),
+      reply.saved ? "success" : "warning"
+    );
+  } else {
+    state.className = "rb-state err";
+    state.textContent = reply.unconfirmed ? "Check Gmail" : "Not sent";
+    rbStatus(reply.unconfirmed ? reply.error : `Not sent: ${reply.error}`, reply.unconfirmed ? "warning" : "danger");
+  }
+}
+
+// "Send as" (extension): the dashboard's profiles, the pick remembered in this panel's
+// own storage. Said beside it when the profile has no Summary to send yet.
+const rbProfileEl = $("rbProfile");
+const RB_PROFILE_KEY = "rbProfile";
+// The desktop app has no "Send as": it sends as the bid profile linked to the
+// browser profile connected.
+const RB_SEND_AS = !window.bidbotDesktop;
+if (!RB_SEND_AS) document.querySelector(".rb-from").remove();
+let rbProfiles = [];
+
+function syncRbProfileNote() {
+  const profile = rbProfiles.find((p) => String(p.id) === rbProfileEl.value);
+  const note = $("rbProfileNote");
+  const empty = profile && !String(profile.resume?.summary || "").trim();
+  note.textContent = !profile ? "" : empty ? "No Summary yet — add it in User Settings" : "";
+  note.className = `rb-note${empty ? " warn" : ""}`;
+}
+
+async function loadRbProfiles() {
+  if (!RB_SEND_AS) return;
+  const reply = await send({ type: "GET_PROFILES" });
+  if (!reply.ok) {
+    rbProfileEl.replaceChildren(new Option("Profiles not loaded", ""));
+    $("rbProfileNote").textContent = "";
+    return;
+  }
+  rbProfiles = reply.profiles;
+  let saved = null;
+  try {
+    saved = localStorage.getItem(RB_PROFILE_KEY);
+  } catch {
+    // not remembered
+  }
+  rbProfileEl.replaceChildren(
+    new Option("Pick a profile…", ""),
+    ...rbProfiles.map((p) => new Option(p.sheet?.applicant ? `${p.name} · ${p.sheet.applicant}` : p.name, String(p.id)))
+  );
+  if (rbProfiles.some((p) => String(p.id) === saved)) rbProfileEl.value = saved;
+  syncRbProfileNote();
+}
+
+rbProfileEl.addEventListener("change", () => {
+  try {
+    localStorage.setItem(RB_PROFILE_KEY, rbProfileEl.value);
+  } catch {
+    // applies until the panel closes
+  }
+  syncRbProfileNote();
+  loadRecruiters(); // each profile has its own list
 });
 
-closeSettingsEl.addEventListener("click", () => {
-  showSettings(false);
-  openSettingsEl.focus();
+// The file as JSON: an array, one object, or a list of objects copied out
+// of one with a comma left at its end.
+function parseRecruiterFile(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return JSON.parse(`[${text.trim().replace(/,\s*$/, "")}]`);
+  }
+}
+
+$("rbImport").addEventListener("click", () => rbFileEl.click());
+rbFileEl.addEventListener("change", async () => {
+  const file = rbFileEl.files?.[0];
+  rbFileEl.value = "";
+  if (!file) return;
+  if (rbOffline()) return rbStatus("Connect to a browser first.", "warning");
+  let entries;
+  try {
+    entries = parseRecruiterFile(await file.text());
+  } catch (err) {
+    rbStatus(`${file.name} is not valid JSON: ${err.message}`, "danger");
+    return;
+  }
+  const reply = await send({ type: "RECRUITERS_IMPORT", entries, profileId: rbProfileId() });
+  if (!reply.ok) return rbStatus(reply.error, reply.noProfile ? "warning" : "danger");
+  renderRecruiters(reply.recruiters);
+  const { existing, sent, invalid } = reply.skipped;
+  const skipped = [
+    existing && `${existing} already in the list`,
+    sent && `${sent} already emailed`,
+    invalid && `${invalid} without a valid address`
+  ].filter(Boolean);
+  rbStatus(
+    `Added ${reply.added} recruiter${reply.added === 1 ? "" : "s"} from ${file.name}` +
+      (skipped.length ? ` · skipped ${skipped.join(", ")}` : "") +
+      (reply.databaseError ? ` · the database could not be checked (${reply.databaseError})` : ""),
+    reply.databaseError ? "warning" : reply.added ? "success" : "info"
+  );
 });
+
+// Two presses, as for the captured jobs.
+let rbClearArmed = null;
+$("rbClear").addEventListener("click", async () => {
+  const el = $("rbClear");
+  if (!rbClearArmed) {
+    el.textContent = "Press again to clear";
+    rbClearArmed = setTimeout(() => {
+      rbClearArmed = null;
+      el.textContent = "Clear";
+    }, 4000);
+    return;
+  }
+  clearTimeout(rbClearArmed);
+  rbClearArmed = null;
+  el.textContent = "Clear";
+  await send({ type: "RECRUITERS_CLEAR", profileId: rbProfileId() });
+  renderRecruiters([]);
+  rbStatus("");
+});
+
+// The list belongs to bid profiles: this one's, and those sharing its country
+// and role. Without one there is no list to show.
+const rbProfileId = () => (RB_SEND_AS ? rbProfileEl.value : undefined);
+const rbOffline = () => !!window.bidbotDesktop && !window.bidbotDesktop.connected;
+
+async function loadRecruiters() {
+  // The desktop app shows the list while connected to a browser; it is kept,
+  // and back on connecting.
+  if (rbOffline()) {
+    renderRecruiters([]);
+    rbStatus("");
+    return;
+  }
+  await loadRbProfiles(); // a Summary just saved in Settings is picked up
+  const reply = await send({ type: "RECRUITERS_GET", profileId: rbProfileId() });
+  renderRecruiters(reply.ok ? reply.recruiters : []);
+  if (!reply.ok) rbStatus(RB_SEND_AS && reply.noProfile ? "Pick a profile under Send as." : reply.error, reply.noProfile ? "warning" : "danger");
+}
+
+// The desktop app's browser profile changed, or it connected or disconnected:
+// another bid profile's list, or none.
+window.addEventListener("bidbot-profile-changed", () => {
+  if (!$("pane-recruiter").hidden) loadRecruiters();
+});
+
+// ---------------------------------------------------------------------------
+// User Settings
+//
+// The bid profiles, in a panel beneath their button, as ChatGPT Settings is:
+// the button opens and closes it, its Save stores them and closes it. Closing
+// only hides: the feed keeps streaming, and unsaved edits are kept.
+// ---------------------------------------------------------------------------
+
+const userPanelEl = $("userPanel");
+const openUserSettingsEl = $("openUserSettings");
+
+function showUserPanel(open) {
+  userPanelEl.hidden = !open;
+  openUserSettingsEl.setAttribute("aria-expanded", String(open));
+  if (!open) return;
+  showGptPanel(false); // one panel at a time
+  showSearchPanel(false);
+  // Fresh each time, so a profile just added or changed on the dashboard is
+  // listed as it is now — and folded, so the list reads as a list of names.
+  openCards.clear();
+  for (const card of profileListEl.querySelectorAll("details.profile-card")) card.open = false;
+  loadProfiles();
+}
+
+openUserSettingsEl.addEventListener("click", () => showUserPanel(userPanelEl.hidden));
 
 // ---------------------------------------------------------------------------
 // Theme
 //
-// Light by default; dark is an explicit, saved choice, not a system-preference
-// follow — the panel should not flip on you just because the OS theme does.
-// Applying is nothing but a data-theme attribute on <html>: sidepanel.css
-// holds both palettes as custom properties, so nothing here touches a color.
+// Light by default; a theme saved earlier stays. Applying is nothing but a
+// data-theme attribute on <html>: sidepanel.css holds both palettes as custom
+// properties, so nothing here touches a color.
 // ---------------------------------------------------------------------------
-
-const themeToggleEl = $("themeToggle");
-const iconMoonEl = $("iconMoon");
-const iconSunEl = $("iconSun");
-
-function applyTheme(theme) {
-  const dark = theme === "dark";
-  document.documentElement.dataset.theme = dark ? "dark" : "light";
-  themeToggleEl.setAttribute("aria-pressed", String(dark));
-  const label = dark ? "Switch to light mode" : "Switch to dark mode";
-  themeToggleEl.setAttribute("aria-label", label);
-  themeToggleEl.title = label;
-  // The icon shown is the mode a click would switch TO, matching the label.
-  iconMoonEl.hidden = dark;
-  iconSunEl.hidden = !dark;
-}
-
-themeToggleEl.addEventListener("click", async () => {
-  const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
-  applyTheme(next); // instant — do not wait on the storage round trip to flip
-  await send({ type: "SET_THEME", theme: next });
-});
 
 async function loadTheme() {
   const reply = await send({ type: "GET_THEME" });
-  applyTheme(reply.ok && reply.theme === "dark" ? "dark" : "light");
+  document.documentElement.dataset.theme = reply.ok && reply.theme === "dark" ? "dark" : "light";
 }
 
 loadTheme();
@@ -947,11 +2606,16 @@ async function init() {
   }
 
   for (const job of state.jobs) addJob(job, { animate: false });
-  await loadProfile();
-  updateCount();
+  const captured = await send({ type: "GET_CAPTURES" });
+  if (captured.ok) showCaptureCount(captured.captures.length);
+  await loadSettings();
+  loadProfiles(); // reports its own failure beside the list; nothing waits on it
 
   if (rendered.size) setStatus(`${rendered.size} from the last run · press Start to resume`);
   else setStatus("Idle.");
+
+  // Opened while a run waits on a human check.
+  if (state.verifyPause) showVerify(state.verifyPause);
 }
 
 init();

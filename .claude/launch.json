@@ -4,8 +4,31 @@
     {
       "name": "frontend",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev", "--prefix", "frontend"],
+      "runtimeArgs": [
+        "run",
+        "dev",
+        "--prefix",
+        "frontend"
+      ],
       "port": 5175
+    },
+    {
+      "name": "backend",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "start",
+        "--prefix",
+        "backend"
+      ],
+      "port": 4500
+    },
+    {
+      "name": "jobright-monitor-verify",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "jobright-monitor/.claude/skills/verify/harness-server.js"
+      ],
+      "port": 5759
     }
   ]
 }

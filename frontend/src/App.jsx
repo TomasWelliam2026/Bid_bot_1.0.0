@@ -9,6 +9,15 @@ import { API, useArchive } from './hooks/useArchive.js';
 import { useActiveUser } from './hooks/useActiveUser.js';
 import { useSheetSync } from './hooks/useSheetSync.js';
 
+// A tab's Country (C) and Role as tabs are matched on them -- ignoring case
+// and surrounding spaces, the way the archive already matches tab names.
+// Blank when either is unset: a tab without both shares with nothing.
+const groupKey = (user) => {
+  const country = String(user?.sheet?.country ?? '').trim().toLowerCase();
+  const role = String(user?.sheet?.role ?? '').trim().toLowerCase();
+  return country && role ? JSON.stringify([country, role]) : '';
+};
+
 export default function App() {
   const {
     dataRoot,
@@ -30,21 +39,51 @@ export default function App() {
   const [activeId, setActiveId, activeUser] = useActiveUser(users);
 
   // Everything below the tab strip is scoped to whichever tab is open --
-  // the tiles, the review queue, the table. `activeId` is only ever `null`
-  // when no tab exists at all, so there is nothing yet to show.
-  const visibleRecords = useMemo(
+  // the tiles, the review queue, the table (which also lists the rows of tabs
+  // sharing its country and role, see `sharedTabs` below). `activeId` is only ever `null` when
+  // no tab exists at all, so there is nothing yet to show.
+  const ownRecords = useMemo(
     () => (activeId == null ? [] : records.filter((record) => record.user_id === activeId)),
     [records, activeId],
   );
-  const pending = visibleRecords.filter((record) => record.status === 'pending');
+  const pending = ownRecords.filter((record) => record.status === 'pending');
   const tileCounts = useMemo(() => {
     const counts = { total: 0, pending: 0, saved: 0, rejected: 0, failed: 0 };
-    for (const record of visibleRecords) {
+    for (const record of ownRecords) {
       counts.total += 1;
       if (record.status in counts) counts[record.status] += 1;
     }
     return counts;
-  }, [visibleRecords]);
+  }, [ownRecords]);
+
+  // The other tabs with this one's Country (C) and Role -- the same country and
+  // job function, applied to under a different Profile (D). Their applications
+  // are listed in this tab's table too, so what has already gone in for that
+  // country and role is in one place. Any of them can be sent to the sheet from
+  // here: the row is written with this tab's own Country (C) and Profile (D),
+  // and that send is this tab's sheet status, separate from the row's own tab's.
+  // Deleting one here deletes only this tab's part of it -- it leaves this list
+  // and this tab's sheet status for it goes -- and it stays on its own tab. A
+  // blank Country (C) or Role groups nothing.
+  const sharedTabs = useMemo(() => {
+    const group = groupKey(activeUser);
+    if (!group) return new Map();
+    return new Map(
+      users.filter((user) => user.id !== activeId && groupKey(user) === group).map((user) => [user.id, user]),
+    );
+  }, [users, activeUser, activeId]);
+
+  const tableRecords = useMemo(
+    () =>
+      sharedTabs.size
+        ? records.filter(
+            (record) =>
+              record.user_id === activeId ||
+              (sharedTabs.has(record.user_id) && !(record.hidden_for ?? []).includes(activeId)),
+          )
+        : ownRecords,
+    [records, activeId, sharedTabs, ownRecords],
+  );
 
   // Unfiltered, so a tab you are not currently looking at can still show a
   // pending count on its own button -- without this, a submission waiting on
@@ -62,9 +101,16 @@ export default function App() {
   // Owns "sent to sheet" for the whole app -- the manual button in
   // RecordsTable is the only thing that sends a row. Where each row stands is
   // on the record itself; this only carries the send in flight and its error.
-  // `sheetSettings` is shared by every tab; `tabName` and Profile (D) are the
-  // active one's own, for Column C and D on the row.
-  const sheetSync = useSheetSync(markSent, sheetSettings, activeUser?.name ?? '', activeUser?.sheet?.applicant ?? '');
+  // `sheetSettings` is shared by every tab; Country (C) and Profile (D) are
+  // the active one's own, for Column C and D on the row -- a row shared in
+  // from another tab included -- and the send is the active tab's own.
+  const sheetSync = useSheetSync(
+    markSent,
+    sheetSettings,
+    activeUser?.id ?? null,
+    activeUser?.sheet?.country ?? '',
+    activeUser?.sheet?.applicant ?? '',
+  );
 
   // Which floating panel is on screen, if any. Escape closes it, and so does a
   // click anywhere outside the toolbar -- the way a menu behaves, so it never
@@ -274,7 +320,9 @@ export default function App() {
       <ReviewQueue records={pending} onApprove={approve} onReject={reject} />
 
       <RecordsTable
-        records={visibleRecords}
+        records={tableRecords}
+        ownerId={activeId}
+        sharedTabs={sharedTabs}
         connected={connected}
         onDelete={remove}
         sheetSending={sheetSync.sending}

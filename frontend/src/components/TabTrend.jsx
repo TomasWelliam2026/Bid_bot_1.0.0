@@ -4,10 +4,15 @@ import { buildTabTrend, niceMax } from '../lib/tabTrend.js';
 // How many days are comfortably visible at once before the rest is reached
 // by scrolling -- a day's width is derived from this and the panel's own
 // measured width (see viewportWidth below), not a fixed pixel constant, so
-// "5 days" keeps meaning five days at any panel width.
-const VISIBLE_DAYS = 5;
-const HEIGHT = 220; // px -- fixed regardless of width; only the x-axis scrolls
-const PAD = { top: 12, right: 16, bottom: 28, left: 40 };
+// "20 days" keeps meaning twenty days at any panel width.
+const VISIBLE_DAYS = 20;
+const HEIGHT = 140; // px -- fixed regardless of width; only the x-axis scrolls
+// Padding inside the scrolling plot. Left and right leave room for half a
+// date label at either end; the top holds each day's change label.
+const PAD = { top: 20, right: 24, bottom: 24, left: 24 };
+// The y-axis labels sit in their own SVG beside the scrolling plot, so they
+// stay in view however far back the reader scrolls.
+const AXIS_W = 32;
 
 const shortDate = (key) => {
   const [y, m, d] = key.split('-').map(Number);
@@ -24,24 +29,24 @@ const fullDate = (key) => {
  * not by row position) `styles.css` defines as --series-1..8 -- a tab keeps
  * its color as other tabs are added or removed.
  *
- * Each day takes a fixed share of the panel's own width (a fifth of it, so
- * five days fill the panel exactly) rather than the usual squeeze-everything-in
- * scaling -- a history longer than five days makes the chart wider than the
- * panel instead of thinner lines, and the panel scrolls to it horizontally.
- * Opens scrolled to the newest day, and stays there across live updates
- * unless the reader has scrolled away to look at older days -- the same
- * "stick to the end unless you've scrolled up" rule a chat log uses.
+ * Each day takes a fixed share of the plot's own width (twenty days fill it
+ * exactly, and the axis always has at least twenty) rather than the usual
+ * squeeze-everything-in scaling -- a history longer than that makes the
+ * chart wider than the panel instead of
+ * thinner lines, and the panel scrolls to it horizontally. Opens scrolled to
+ * the newest day, and stays there across live updates unless the reader has
+ * scrolled away to look at older days -- the same "stick to the end unless
+ * you've scrolled up" rule a chat log uses.
  *
- * Hovering (or, with the chart focused, the arrow keys) snaps a crosshair to
- * the nearest day and opens one tooltip listing every tab's running total
- * there, rather than making the reader land the pointer on a 2px line. Every
- * value the tooltip can show is also in the table view behind the toggle --
- * the tooltip is a shortcut to it, not the only way to read it.
+ * Every day has a vertical line with that day's change across every tab on
+ * top of it. Hovering (or, with the chart focused, the arrow keys) snaps a
+ * crosshair to the nearest day and opens one tooltip listing every tab's
+ * running total and change there, rather than making the reader land the
+ * pointer on a 2px line.
  */
 export default function TabTrend({ users, records, activeId }) {
-  const { days, series } = useMemo(() => buildTabTrend(records, users), [records, users]);
+  const { days, series } = useMemo(() => buildTabTrend(records, users, { minDays: VISIBLE_DAYS }), [records, users]);
   const [hoverIndex, setHoverIndex] = useState(null);
-  const [tableView, setTableView] = useState(false);
   const [viewportWidth, setViewportWidth] = useState(0);
   const svgRef = useRef(null);
   // A callback ref, not a plain useRef: the scrollable div doesn't exist on
@@ -57,15 +62,15 @@ export default function TabTrend({ users, records, activeId }) {
   const stickToEndRef = useRef(true);
 
   useEffect(() => {
-    if (!scrollEl || tableView) return undefined;
+    if (!scrollEl) return undefined;
     const measure = () => setViewportWidth(scrollEl.clientWidth);
     measure();
     const observer = new ResizeObserver(measure);
     observer.observe(scrollEl);
     return () => observer.disconnect();
-  }, [scrollEl, tableView]);
+  }, [scrollEl]);
 
-  const dayGap = viewportWidth > 0 ? viewportWidth / (VISIBLE_DAYS - 1) : 0;
+  const dayGap = viewportWidth > 0 ? Math.max(1, viewportWidth - PAD.left - PAD.right) / (VISIBLE_DAYS - 1) : 0;
   const plotW = dayGap * Math.max(1, days.length - 1);
   const width = PAD.left + PAD.right + plotW;
 
@@ -73,9 +78,9 @@ export default function TabTrend({ users, records, activeId }) {
   // there -- scrolled left to look at history, a live update never yanks
   // the view back out from under them.
   useEffect(() => {
-    if (!scrollEl || tableView || viewportWidth === 0) return;
+    if (!scrollEl || viewportWidth === 0) return;
     if (stickToEndRef.current) scrollEl.scrollLeft = scrollEl.scrollWidth;
-  }, [scrollEl, days.length, viewportWidth, tableView]);
+  }, [scrollEl, days.length, viewportWidth]);
 
   const onScroll = () => {
     if (!scrollEl) return;
@@ -116,6 +121,17 @@ export default function TabTrend({ users, records, activeId }) {
   };
 
   const yTicks = [0, maxCount / 2, maxCount];
+  // What each day added, per tab and across every tab: the running total's
+  // step from the day before (the first day's step is its whole total).
+  const deltaAt = (points, index) => points[index] - (index > 0 ? points[index - 1] : 0);
+  const dayChanges = days.map((_, index) => series.reduce((sum, { points }) => sum + deltaAt(points, index), 0));
+  // Twenty days to a width leaves too little room to label every one on a
+  // narrow panel, so labels go on every nth day, counted back from the newest
+  // so today always has one. Every day keeps its line, and the tooltip.
+  const labelEvery = (room) => (dayGap > 0 ? Math.max(1, Math.ceil(room / dayGap)) : 1);
+  const dateEvery = labelEvery(46);
+  const changeEvery = labelEvery(24);
+  const labelled = (index, every) => (days.length - 1 - index) % every === 0;
   // Keeps the tooltip's own box from overhanging the scrollable plot at
   // either edge -- half its min-width, not a measurement of the rendered
   // box, but enough to keep it from clipping into .tab-trend-scroll's
@@ -130,40 +146,25 @@ export default function TabTrend({ users, records, activeId }) {
           <span className="tile-detail">
             running total, by day{days.length > VISIBLE_DAYS ? ` · newest ${VISIBLE_DAYS} shown, scroll for more` : ''}
           </span>
-          <button type="button" className="btn" onClick={() => setTableView((v) => !v)}>
-            {tableView ? 'Chart' : 'Table'}
-          </button>
+          <div className="tab-trend-legend">
+            {series.map(({ user }) => (
+              <span key={user.id} className="tab-trend-legend-item">
+                <span className="tab-trend-key" style={{ background: colorFor(user) }} />
+                {user.name}
+              </span>
+            ))}
+          </div>
         </div>
       </div>
 
-      {tableView ? (
-        <div className="tab-trend-table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th scope="col">Date</th>
-                {series.map(({ user }) => (
-                  <th scope="col" key={user.id}>
-                    {user.name}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {days.map((day, i) => (
-                <tr key={day}>
-                  <td className="nowrap">{fullDate(day)}</td>
-                  {series.map(({ user, points }) => (
-                    <td className="num" key={user.id}>
-                      {points[i]}
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ) : (
+      <div className="tab-trend-body">
+        <svg className="tab-trend-yaxis" width={AXIS_W} height={HEIGHT} viewBox={`0 0 ${AXIS_W} ${HEIGHT}`} aria-hidden="true">
+          {yTicks.map((value) => (
+            <text key={value} className="tab-trend-axis" x={AXIS_W - 6} y={yAt(value)} textAnchor="end" dominantBaseline="middle">
+              {Math.round(value)}
+            </text>
+          ))}
+        </svg>
         <div className="tab-trend-scroll" ref={setScrollEl} onScroll={onScroll}>
           <div className="tab-trend-plot" style={{ width: `${width}px` }}>
             <svg
@@ -174,24 +175,35 @@ export default function TabTrend({ users, records, activeId }) {
               viewBox={`0 0 ${width} ${HEIGHT}`}
               role="img"
               tabIndex={0}
-              aria-label={`Running total of applications per tab, ${fullDate(days[0])} to ${fullDate(days[days.length - 1])}. Use the Table button for the same numbers as a table.`}
+              aria-label={`Running total of applications per tab, ${fullDate(days[0])} to ${fullDate(days[days.length - 1])}. Hover or use the arrow keys for each day's numbers.`}
               onPointerMove={(event) => setHoverIndex(indexFromClientX(event.clientX))}
               onPointerLeave={() => setHoverIndex(null)}
               onKeyDown={onKeyDown}
             >
               {yTicks.map((value) => (
-                <g key={value}>
-                  <line className="tab-trend-grid" x1={PAD.left} x2={width - PAD.right} y1={yAt(value)} y2={yAt(value)} />
-                  <text className="tab-trend-axis" x={PAD.left - 8} y={yAt(value)} textAnchor="end" dominantBaseline="middle">
-                    {Math.round(value)}
-                  </text>
-                </g>
+                <line key={value} className="tab-trend-grid" x1={0} x2={width} y1={yAt(value)} y2={yAt(value)} />
               ))}
 
+              {/* One vertical line per day, with that day's change across every tab on top of it. */}
               {days.map((day, index) => (
-                <text key={day} className="tab-trend-axis" x={xAt(index)} y={HEIGHT - PAD.bottom + 18} textAnchor="middle">
-                  {shortDate(day)}
-                </text>
+                <g key={day}>
+                  <line className="tab-trend-grid" x1={xAt(index)} x2={xAt(index)} y1={PAD.top} y2={HEIGHT - PAD.bottom} />
+                  {labelled(index, changeEvery) ? (
+                    <text
+                      className={dayChanges[index] > 0 ? 'tab-trend-change' : 'tab-trend-change zero'}
+                      x={xAt(index)}
+                      y={PAD.top - 6}
+                      textAnchor="middle"
+                    >
+                      +{dayChanges[index]}
+                    </text>
+                  ) : null}
+                  {labelled(index, dateEvery) ? (
+                    <text className="tab-trend-axis" x={xAt(index)} y={HEIGHT - PAD.bottom + 16} textAnchor="middle">
+                      {shortDate(day)}
+                    </text>
+                  ) : null}
+                </g>
               ))}
 
               {hoverIndex !== null ? (
@@ -222,30 +234,22 @@ export default function TabTrend({ users, records, activeId }) {
 
             {hoverIndex !== null ? (
               <div className="tab-trend-tooltip" style={{ left: `${tooltipLeft}px` }}>
-                <div className="tab-trend-tooltip-date">{fullDate(days[hoverIndex])}</div>
+                <div className="tab-trend-tooltip-date">
+                  {fullDate(days[hoverIndex])} · +{dayChanges[hoverIndex]}
+                </div>
                 {series.map(({ user, points }) => (
                   <div key={user.id} className="tab-trend-tooltip-row">
                     <span className="tab-trend-key" style={{ background: colorFor(user) }} />
                     <span className="tab-trend-tooltip-name">{user.name}</span>
                     <span className="tab-trend-tooltip-value">{points[hoverIndex]}</span>
+                    <span className="tab-trend-tooltip-delta">+{deltaAt(points, hoverIndex)}</span>
                   </div>
                 ))}
               </div>
             ) : null}
           </div>
         </div>
-      )}
-
-      {!tableView ? (
-        <div className="tab-trend-legend">
-          {series.map(({ user }) => (
-            <span key={user.id} className="tab-trend-legend-item">
-              <span className="tab-trend-key" style={{ background: colorFor(user) }} />
-              {user.name}
-            </span>
-          ))}
-        </div>
-      ) : null}
+      </div>
     </section>
   );
 }

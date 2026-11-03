@@ -28,10 +28,13 @@ export function eachDay(startKey, endKey) {
 }
 
 /**
- * One running total per user, over the shared `days` axis. `days` is empty
- * when there is nothing dated yet to plot.
+ * One running total per user, over the shared `days` axis: every calendar day
+ * from the first record through today (or the last record, if that is later).
+ * `minDays` reaches further back when that is shorter, so the axis always has
+ * at least that many days (the ones before the first record at zero). `days`
+ * is empty when there is nothing dated yet to plot.
  */
-export function buildTabTrend(records, users) {
+export function buildTabTrend(records, users, { minDays = 1 } = {}) {
   const newPerDay = new Map(users.map((user) => [user.id, new Map()]));
   let minDate = null;
   let maxDate = null;
@@ -46,7 +49,11 @@ export function buildTabTrend(records, users) {
   }
 
   if (minDate === null) return { days: [], series: [] };
-  const days = eachDay(minDate, maxDate);
+  const today = dateKey(new Date());
+  const end = maxDate > today ? maxDate : today;
+  const earliest = new Date(`${end}T00:00:00`);
+  earliest.setDate(earliest.getDate() - (minDays - 1));
+  const days = eachDay(dateKey(earliest) < minDate ? dateKey(earliest) : minDate, end);
 
   const series = users.map((user) => {
     const perDay = newPerDay.get(user.id);

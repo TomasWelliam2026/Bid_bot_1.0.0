@@ -3,11 +3,13 @@ import { EXPECTED_SCRIPT_VERSION } from '../lib/sheetSync.js';
 import { buildScript } from '../lib/sheetSyncTemplate.js';
 
 // Web App URL, Sheet URL and Sheet tab are one setting shared by every tab;
-// Profile (D) is still this tab's own. Both live in one draft/save/discard
-// below -- there is no reason to make a human learn two forms -- but Save
-// routes each half to whichever of onUpdateSheetSettings/onUpdate it belongs to.
+// Profile (D), Country (C) and Role are still this tab's own. Both live in one
+// draft/save/discard below -- there is no reason to make a human learn two
+// forms -- but Save routes each half to whichever of onUpdateSheetSettings/
+// onUpdate it belongs to.
 const SHARED_FIELDS = ['webAppUrl', 'sheetUrl', 'sheetTabName'];
-const FIELDS = [...SHARED_FIELDS, 'applicant'];
+const TAB_FIELDS = ['applicant', 'country', 'role'];
+const FIELDS = [...SHARED_FIELDS, ...TAB_FIELDS];
 
 const sameValues = (a, b) => FIELDS.every((name) => (a[name] ?? '') === (b[name] ?? ''));
 const sameSharedValues = (a, b) => SHARED_FIELDS.every((name) => (a[name] ?? '') === (b[name] ?? ''));
@@ -18,24 +20,29 @@ const cleaned = (draft) => Object.fromEntries(FIELDS.map((name) => [name, String
 /**
  * One tab's settings -- its name, whether it still exists, its Automatic/
  * Human-check preference (which used to be a separate global switch in the
- * header), and its Profile (D) value -- plus, shared with every other tab
- * rather than its own, where "Send to sheet" sends a row.
+ * header), and its Profile (D), Country (C) and Role values -- plus, shared
+ * with every other tab rather than its own, where "Send to sheet" sends a row.
  *
  * The Web App URL, Sheet URL and Sheet tab name are one setting for the whole
  * archive (`sheetSettings`, from useArchive): every tab writes to the same
  * Google Sheet, so editing them here changes them on every other tab's panel
- * too. Profile (D) is still saved to this tab's own record on the server.
+ * too. Profile (D), Country (C) and Role are still saved to this tab's own
+ * record on the server.
  * The shared secret is generated once and never shown here as an editable
  * field, the same way SHARED_SECRET is set once at the top of sheet-sync.gs
  * itself -- editing it here would just as quickly break the deployment it
  * needs to match.
  *
- * There is no Category field: column C is always this tab's own name, sent
- * with every row and baked into a generated script's default, so it can never
- * drift out of sync with which tab a record actually lives on the way a
- * separately-typed value could.
+ * Country (C) is column C on the sheet, set on its own rather than taken
+ * from the tab's name: the tab is how the dashboard and the extension file a
+ * record, column C is what the sheet shows, and the two need not match. It is
+ * sent with every row and baked into a generated script's default.
  *
- * Sheet-field edits (shared and Profile alike) are a draft until Save;
+ * Role is the tab's job function, and is not sent to the sheet at all: it is
+ * what, together with Country (C), decides which tabs list each other's
+ * applications -- see `sharedTabs` in App.jsx.
+ *
+ * Sheet-field edits (shared and per-tab alike) are a draft until Save;
  * half-typed values -- a tab name a letter short, a URL being pasted -- are
  * never what a row is sent with, only what was saved is. Automatic/
  * Human-check and the tab's own name apply immediately on click/submit,
@@ -50,7 +57,12 @@ export default function SheetSettings({
   onClose,
   scriptStatus,
 }) {
-  const settings = { ...sheetSettings, applicant: activeUser.sheet.applicant };
+  const settings = {
+    ...sheetSettings,
+    applicant: activeUser.sheet.applicant,
+    country: activeUser.sheet.country ?? '',
+    role: activeUser.sheet.role ?? '',
+  };
   const [draft, setDraft] = useState(settings);
   const [saveState, setSaveState] = useState('idle'); // idle | saved
   const [copyState, setCopyState] = useState('idle'); // idle | copied | failed
@@ -111,16 +123,23 @@ export default function SheetSettings({
   const dirty = !sameValues(cleaned(draft), settings);
 
   // The saved settings can change without this panel -- the shared fields
-  // from another browser on any tab's panel, Profile from another browser on
-  // this one. Take the new values unless there are edits here that would be
-  // lost.
+  // from another browser on any tab's panel, Profile, Country and Role from
+  // another browser on this one. Take the new values unless there are edits
+  // here that would be lost.
   const baseline = useRef(settings);
   useEffect(() => {
     if (sameValues(settings, baseline.current)) return;
     const before = baseline.current;
     setDraft((current) => (sameValues(current, before) ? settings : current));
     baseline.current = settings;
-  }, [settings.webAppUrl, settings.sheetUrl, settings.sheetTabName, settings.applicant]);
+  }, [
+    settings.webAppUrl,
+    settings.sheetUrl,
+    settings.sheetTabName,
+    settings.applicant,
+    settings.country,
+    settings.role,
+  ]);
 
   const save = (event) => {
     event?.preventDefault();
@@ -131,12 +150,13 @@ export default function SheetSettings({
     // to find and press a second Save -- but only the half that actually
     // changed is sent to each.
     if (!sameSharedValues(next, settings)) {
-      const { applicant: _applicant, ...sharedPatch } = next;
+      const sharedPatch = Object.fromEntries(SHARED_FIELDS.map((name) => [name, next[name]]));
       onUpdateSheetSettings(sharedPatch);
     }
-    if (next.applicant !== settings.applicant) {
-      onUpdate(activeUser.id, { applicant: next.applicant });
-    }
+    const tabPatch = Object.fromEntries(
+      TAB_FIELDS.filter((name) => next[name] !== settings[name]).map((name) => [name, next[name]]),
+    );
+    if (Object.keys(tabPatch).length) onUpdate(activeUser.id, tabPatch);
     setDraft(next);
     setSaveState('saved');
     setTimeout(() => setSaveState('idle'), 2500);
@@ -157,15 +177,13 @@ export default function SheetSettings({
 
   // Everything the script needs from this panel, written into it: the
   // worksheet tab it writes to by default, and the Category and Profile a row
-  // gets whenever the request does not carry its own. Category is this tab's
-  // own name -- always current, so this never describes a value someone typed
-  // into a field and forgot about. Sheet tab and Profile come from the saved
-  // settings -- the ones rows are actually sent with -- so the script can
-  // never describe a value that is still being typed.
+  // gets whenever the request does not carry its own. All of them come from
+  // the saved settings -- the ones rows are actually sent with -- so the
+  // script can never describe a value that is still being typed.
   const script = buildScript({
     sheetTabName: settings.sheetTabName,
     secret: settings.secret,
-    category: activeUser.name,
+    category: settings.country,
     profile: settings.applicant,
   });
 
@@ -204,8 +222,8 @@ export default function SheetSettings({
           click before it does anything, and switching to another tab's
           settings mid-confirm never carries the armed state over to it. */}
       <form onSubmit={renameTab}>
-        <div className="field-grid">
-          <label className="field wide">
+        <div className="tab-rename-row">
+          <label className="field">
             <span>Tab name</span>
             <input
               type="text"
@@ -216,27 +234,26 @@ export default function SheetSettings({
               }}
             />
           </label>
-        </div>
-        <div className="save-row">
           <button type="submit" className="btn btn-primary" disabled={!nameDirty || nameBusy}>
             {nameBusy ? 'Renaming…' : 'Rename tab'}
           </button>
-          {confirmingDelete ? (
-            <>
-              <span className="tile-detail">Delete “{activeUser.name}” for good?</span>
-              <button type="button" className="btn" disabled={deleteBusy} onClick={() => setConfirmingDelete(false)}>
-                Cancel
-              </button>
-              <button type="button" className="btn danger solid" disabled={deleteBusy} onClick={confirmDelete}>
-                {deleteBusy ? 'Deleting…' : 'Confirm delete'}
-              </button>
-            </>
-          ) : (
+          {!confirmingDelete ? (
             <button type="button" className="btn danger" onClick={() => setConfirmingDelete(true)}>
               Delete tab
             </button>
-          )}
+          ) : null}
         </div>
+        {confirmingDelete ? (
+          <div className="save-row">
+            <span className="tile-detail">Delete “{activeUser.name}” for good?</span>
+            <button type="button" className="btn" disabled={deleteBusy} onClick={() => setConfirmingDelete(false)}>
+              Cancel
+            </button>
+            <button type="button" className="btn danger solid" disabled={deleteBusy} onClick={confirmDelete}>
+              {deleteBusy ? 'Deleting…' : 'Confirm delete'}
+            </button>
+          </div>
+        ) : null}
         {nameError ? <div className="note critical">{nameError}</div> : null}
         {deleteError ? <div className="note critical">{deleteError}</div> : null}
       </form>
@@ -295,8 +312,8 @@ export default function SheetSettings({
             the two fields that need more say it in a tooltip. */}
         <form onSubmit={save}>
           <p className="tile-detail">
-            Web App URL, Sheet URL and Sheet tab are shared by every tab. Profile (D) is just{' '}
-            {activeUser.name}'s own.
+            Web App URL, Sheet URL and Sheet tab are shared by every tab. Profile (D), Country (C) and
+            Role are just {activeUser.name}'s own.
           </p>
           <div className="field-grid">
             <label className="field wide">
@@ -329,9 +346,29 @@ export default function SheetSettings({
               />
             </label>
 
-            <label className="field wide">
+            <label className="field">
               <span>Profile (D)</span>
               <input type="text" placeholder="e.g. your name" {...field('applicant')} />
+            </label>
+
+            <label className="field">
+              <span>Country (C)</span>
+              <input
+                type="text"
+                placeholder="e.g. US"
+                title="Written to column C of every row this tab sends. Separate from the tab's name — changing one never changes the other. Tabs with the same Country (C) and Role list each other's applications, and any of them sent from this tab is written with this tab's Country (C) and Profile (D)."
+                {...field('country')}
+              />
+            </label>
+
+            <label className="field wide">
+              <span>Role</span>
+              <input
+                type="text"
+                placeholder="e.g. Data Engineer"
+                title="This tab's job function. Tabs with the same Country (C) and the same Role list each other's applications, and can send them to the sheet as their own. Not written to the sheet. Left blank, this tab lists only its own."
+                {...field('role')}
+              />
             </label>
           </div>
 
@@ -361,7 +398,7 @@ export default function SheetSettings({
             title={
               dirty
                 ? 'Save first — the script is built from the saved settings'
-                : 'Builds the Apps Script with the saved Sheet tab, Category and Profile written in, copies it, and shows it below'
+                : 'Builds the Apps Script with the saved Sheet tab, Country and Profile written in, copies it, and shows it below'
             }
           >
             {copyState === 'copied'
