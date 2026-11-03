@@ -4,7 +4,12 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const http = require("node:http");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const { spawn } = require("node:child_process");
 const { listOctoProfiles, listFolderProfiles } = require("../src/octo-profiles");
+const { findChromes } = require("../src/chrome-finder");
 
 async function fakeOcto(t, answer) {
   const api = http.createServer((_req, res) => res.end(answer));
@@ -22,6 +27,35 @@ test("Octo profiles: a window's title names one, its id stands in with no window
     { uuid: "692510ee15464dab", name: "Profile 692510", wsEndpoint: null },
     { uuid: "aaaaaa11", name: "Profile aaaaaa", wsEndpoint: "ws://127.0.0.1:55880/devtools/browser/x" }
   ]);
+});
+
+// A profile opened from Octo's window, its remote debugging switched on by
+// hand: found by the DevToolsActivePort file in its data folder, which sits
+// under a path with a space, as Octo's does.
+test("Octo profiles: an open profile is connected to once its remote debugging is on", { timeout: 60000 }, async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "Octo Browser "));
+  const start = (args) => {
+    const child = spawn(findChromes()[0].exe, ["--headless=new", "--no-first-run", `--user-data-dir=${dir}`, ...args, "about:blank"], { stdio: "ignore" });
+    t.after(() => child.kill());
+    return child;
+  };
+  const portFile = path.join(dir, "DevToolsActivePort");
+
+  // Debugging off: listed, with no address.
+  const off = start([]);
+  await new Promise((r) => setTimeout(r, 2500));
+  const api = await fakeOcto(t, JSON.stringify([{ uuid: "u1", ws_endpoint: null, browser_pid: off.pid }]));
+  assert.deepEqual(await listOctoProfiles({ api }), [{ uuid: "u1", name: "Profile u1", wsEndpoint: null }]);
+  off.kill();
+  await new Promise((r) => setTimeout(r, 1500));
+
+  // Debugging on: the file's address.
+  const on = start(["--remote-debugging-port=0"]);
+  for (let i = 0; i < 100 && !fs.existsSync(portFile); i++) await new Promise((r) => setTimeout(r, 100));
+  const [port, wsPath] = fs.readFileSync(portFile, "utf8").split(/\r?\n/);
+  const api2 = await fakeOcto(t, JSON.stringify([{ uuid: "u1", ws_endpoint: null, browser_pid: on.pid }]));
+  const [found] = await listOctoProfiles({ api: api2 });
+  assert.equal(found.wsEndpoint, `ws://127.0.0.1:${port}${wsPath.trim()}`);
 });
 
 test("Octo folders: only the named folders' profiles, across pages, with the token", async (t) => {

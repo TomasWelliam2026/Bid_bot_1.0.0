@@ -229,4 +229,4 @@ function manifestName(entry, profileDir, id) {
   return null;
 }
 
-module.exports = { findRunningBrowsers, openDebugSetting, profileArgs, findExtensionCopies };
+module.exports = { findRunningBrowsers, openDebugSetting, profileArgs, findExtensionCopies, readDebugEndpoint };

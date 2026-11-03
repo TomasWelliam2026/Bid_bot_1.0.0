@@ -565,7 +565,7 @@ function buildBar() {
           key: keyOf(c.id, p.dir),
           c,
           name: p.name,
-          tip: !c.octo ? p.name : `${p.name} · Octo Browser${c.closed ? " · ready" : c.debug ? "" : " · no debug port"}`
+          tip: !c.octo ? p.name : `${p.name} · Octo Browser${c.closed ? " · not running" : c.debug ? "" : " · debugging off"}`
         });
       }
     }
@@ -696,14 +696,16 @@ function buildBar() {
         ? note || ""
         : s.state === "connecting"
           ? "" // the pulsing dot and "Connecting…" say it
+          : state === "waiting" && c?.octo
+            ? `In ${c.profile.name}, open chrome://inspect/#remote-debugging and switch on “Allow remote debugging for this browser instance”. Bid Bot connects as soon as it is on.`
           : state === "waiting"
             ? `In ${name}, on the page that just opened, switch on “Allow remote debugging for this browser instance”. Bid Bot connects as soon as it is on.`
             : s.error
               ? `Not connected — ${s.error}`
               : needsDebug && c.octo
                 ? c.closed
-                  ? `${c.profile.name} is ready. Click Connect to start it.`
-                  : `${c.profile.name} has no debug port. Click Connect to see what to do.`
+                  ? `${c.profile.name} is not running. Start it in Octo Browser, then click Connect.`
+                  : `${c.profile.name} is open, but its remote debugging is off. Click Connect to see how to turn it on.`
               : needsDebug
                 ? `${name} is running, but its remote debugging is off. Click “Turn on debugging”.`
                 : needsProfile

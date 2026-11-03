@@ -15,7 +15,7 @@ const { findChromes } = require("./chrome-finder");
 const { findRunningBrowsers, openDebugSetting, profileArgs } = require("./running-browsers");
 const { importFromExtension: importExt } = require("./extension-import");
 const { startEngine } = require("./engine");
-const { listOctoProfiles, startOctoProfile, listFolderProfiles } = require("./octo-profiles");
+const { listOctoProfiles, listFolderProfiles } = require("./octo-profiles");
 const { EXT_ORIGIN } = require("./chrome-api");
 
 // The extension sits beside this app in the repo; a packaged build carries a
@@ -109,7 +109,6 @@ function scanRunning() {
 }
 
 let octoProfiles = []; // running now
-let octoToReopen = null; // { uuid, name }: closed by hand, to start with a debug port
 let octoReady = null; // the profiles in the folders named; null: none are named
 
 // The one profile picked to work in, per running browser — kept while that
@@ -164,8 +163,9 @@ async function refreshOctoFolders() {
   }
 }
 
-// An Octo Browser profile. One ready to launch, or one with no debug port that
-// was closed by hand, is started by the app on Connect.
+// An Octo Browser profile. The app connects only to one already open, with its
+// remote debugging on (see octo-profiles.js); one in the folders named but not
+// running is listed, to be started in Octo Browser.
 function octoChoice({ uuid, name, wsEndpoint, closed = false }) {
   const profile = { dir: uuid, name, open: true };
   return {
@@ -191,9 +191,7 @@ function octoChoices() {
       return octoChoice(running ? { ...running, name: p.name } : { ...p, closed: true });
     });
   }
-  const list = [...octoProfiles];
-  if (octoToReopen && !list.some((p) => p.uuid === octoToReopen.uuid)) list.push({ ...octoToReopen, closed: true });
-  return list.map(octoChoice);
+  return octoProfiles.map(octoChoice);
 }
 
 function browserChoices() {
@@ -509,21 +507,14 @@ app.whenReady().then(async () => {
     return { choices: browserChoices(), choice: currentChoice().id };
   });
 
-  // A profile with no debug port is never restarted from here while it is
-  // open: it is asked to be closed, and the next Connect starts it.
-  async function reopenOcto(choice) {
-    const { dir: uuid, name } = choice.profile;
-    if (!choice.closed) {
-      octoToReopen = { uuid, name };
-      return { ok: false, error: `${name} has no debug port. Close it in Octo Browser, then click Connect: the bot starts it again with one, and its tabs come back.` };
-    }
-    try {
-      await startOctoProfile(uuid);
-    } catch (err) {
-      return { ok: false, error: `could not start ${name}: ${err.message}` };
-    }
-    octoToReopen = null;
-    return { ok: true, already: true };
+  // An Octo profile is never started or restarted from here. One open with its
+  // remote debugging off is watched until it is switched on in the profile,
+  // then connected to, as Chrome is; the app does not open the setting page,
+  // since that would start Octo's browser outside Octo.
+  function waitForOcto(choice) {
+    if (choice.closed) return { ok: false, error: `${choice.profile.name} is not running — start it in Octo Browser, then click Connect` };
+    watchForDebugging(choice.id);
+    return { ok: true, octo: true, browser: choice.profile.name };
   }
 
   ipcMain.handle("app:enableDebug", async () => {
@@ -531,7 +522,7 @@ app.whenReady().then(async () => {
     const choice = currentChoice();
     if (choice.mode !== "attach") return { ok: false, error: "pick a running browser first" };
     if (choice.debug) return { ok: true, already: true };
-    if (choice.octo) return reopenOcto(choice);
+    if (choice.octo) return waitForOcto(choice);
     openDebugSetting(choice.running, choice.profile?.dir);
     watchForDebugging(choice.id);
     return { ok: true, browser: choice.browser };
