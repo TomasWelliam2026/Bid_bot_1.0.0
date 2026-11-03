@@ -19,6 +19,13 @@ second computer gets you a second, independent archive, with its own tabs,
 settings and history, unless you deliberately point both at one shared
 backend over the network.
 
+**Both servers answer this machine only by default.** The API has no login,
+so anything that can reach it can read, edit or delete the archive. To share
+one backend on a network you trust, start it with `HOST=0.0.0.0` and
+`CORS_ORIGIN=http://<this machine's address>:5175`, and the dashboard with
+`npm run dev -- --host 0.0.0.0`. Never do that on a machine with a public
+address.
+
 ## Sheet sync
 
 Each archive tab can send its own rows to a Google Sheet via a small Apps

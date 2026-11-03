@@ -60,22 +60,21 @@ export default defineConfig(() => {
       __API_ORIGIN__: JSON.stringify(api),
     },
 
-    // `0.0.0.0` rather than the default 'localhost': the dashboard is opened
-    // from other machines on the network, and a server bound to loopback only
-    // answers the machine it runs on. Bound explicitly to the IPv4 wildcard
-    // because 'localhost' resolves to ::1 only on Windows, which some browsers
-    // then refuse to reach. Either way the page is reachable at
-    // http://172.20.1.125:5175 -- and still at 127.0.0.1 from here.
+    // Loopback by default, like the backend: this machine alone. `127.0.0.1`
+    // rather than 'localhost', because 'localhost' resolves to ::1 only on
+    // Windows, which some browsers then refuse to reach. To open the dashboard
+    // from other machines on the network, run `npm run dev -- --host 0.0.0.0`
+    // (and start the backend with HOST=0.0.0.0 and CORS_ORIGIN set).
     server: {
       port: 5175,
-      host: '0.0.0.0',
+      host: '127.0.0.1',
       allowedHosts: HOST_NAMES,
     },
 
     // `npm run preview` serves the built dist/; same reasoning.
     preview: {
       port: 5176,
-      host: '0.0.0.0',
+      host: '127.0.0.1',
       allowedHosts: HOST_NAMES,
     },
   };
