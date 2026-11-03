@@ -637,6 +637,13 @@ tr.row-picked td { background: color-mix(in srgb, var(--accent) 10%, transparent
 
 .field { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; color: var(--text-2); }
 
+/* Tab name field and its two actions, in one line -- the field grows, the
+   buttons stay their own size, and only a genuinely narrow panel wraps them. */
+.tab-rename-row { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; margin: 12px 0; }
+.tab-rename-row .field { flex: 1 1 0%; min-width: 0; }
+.tab-rename-row .field input { width: 100%; min-width: 0; }
+.tab-rename-row .btn { flex: none; }
+
 /* Two even columns, and the one field nothing works without spanning both --
    auto-fit would give three uneven columns at this width and leave the last
    field stranded on a row of its own. */

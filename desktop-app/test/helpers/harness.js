@@ -37,7 +37,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // sites: options for startFakeSites. isNew(job_title) says which jobs the
 // collector does not have yet (default: all of them). collectorUp: false makes
 // every collector call fail as a dead port would.
-async function startHarness({ sites = {}, isNew = () => true, collectorUp = true, connect = true, users = [PROFILE], answer = RESUME_ANSWER } = {}) {
+async function startHarness({ sites = {}, isNew = () => true, collectorUp = true, connect = true, users = [PROFILE], answer = RESUME_ANSWER, himalayas = null } = {}) {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "bidbot-test-"));
   const fake = await startFakeSites(sites);
   const events = [];
@@ -60,6 +60,7 @@ async function startHarness({ sites = {}, isNew = () => true, collectorUp = true
   const realFetch = globalThis.fetch;
   globalThis.fetch = async (url, opts = {}) => {
     const s = String(url);
+    if (himalayas && s.startsWith("https://himalayas.app/")) return himalayas(new URL(s));
     if (s.startsWith("http://localhost:4500")) {
       if (!state.collectorUp) throw new TypeError("fetch failed");
       if (s.includes("/api/users")) {

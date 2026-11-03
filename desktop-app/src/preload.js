@@ -99,7 +99,9 @@ window.chrome = {
 // browser is connected, or can be when the run starts.
 window.bidbotDesktop = {
   connected: false, // to a browser: the Recruiter Bid list shows only then
-  checkBrowser: () => ipcRenderer.invoke("app:checkBrowser")
+  octo: false, // to an Octo Browser profile: Manual only, with Catch Job
+  checkBrowser: () => ipcRenderer.invoke("app:checkBrowser"),
+  catchJob: () => ipcRenderer.invoke("app:catchJob")
 };
 
 // ---------------------------------------------------------------------------
@@ -122,9 +124,9 @@ const BAR_CSS = `
   flex: none;
   display: flex;
   align-items: center;
-  gap: 11px;
-  height: 60px;
-  padding: 0 10px 0 12px;
+  gap: var(--gap, 8px);
+  height: 56px;
+  padding: 0 var(--gutter, 8px);
   background: linear-gradient(180deg, color-mix(in srgb, var(--bt-teal) 9%, var(--surface, #fff)), var(--surface, #fff));
   color: var(--fg, #1d1d27);
   font-family: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
@@ -133,8 +135,8 @@ const BAR_CSS = `
 }
 #bidbot-titlebar .bt-logo {
   flex: none;
-  width: 46px;
-  height: 46px;
+  width: 40px;
+  height: 40px;
   filter: drop-shadow(0 1px 2px color-mix(in srgb, var(--bt-teal) 35%, transparent));
 }
 /* One logo per theme, shown as the panel's own theme switches. */
@@ -187,6 +189,14 @@ const BAR_CSS = `
    replaces the one beside its gear. */
 #openChatgpt,
 #openUserSettings { display: none; }
+/* The window is one column of three equal parts: Auto and Manual take two, so
+   they end where Stop ends, and the run's status takes the third. */
+.titlebar {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+#modeSwitch { grid-column: span 2; }
+.mode { flex: 1 1 0; width: auto; }
 /* Browser Profile: each browser profile in use, and the bid profile it is
    linked to. */
 #linkPanel .lp-head,
@@ -198,6 +208,10 @@ const BAR_CSS = `
 }
 #linkPanel .lp-head { margin-bottom: 6px; }
 #linkPanel .lp-head .field-label { margin: 0; }
+#linkPanel .lp-section { margin: 8px 0 4px; font-size: 12px; font-weight: 700; color: var(--text, inherit); }
+#linkPanel .lp-octo { display: grid; gap: var(--gap, 8px); margin-bottom: var(--gap, 8px); }
+#linkPanel .lp-octo input { display: block; width: 100%; margin: 3px 0 0; box-sizing: border-box; }
+#linkPanel .lp-octo button { height: var(--control, 32px); }
 #linkPanel .lp-row { padding: 5px 0; border-top: 1px solid var(--line-soft, #e6e6ee); }
 #linkPanel .lp-name { min-width: 0; font-size: 12.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #linkPanel .lp-browser { display: block; font-size: 11px; font-weight: 400; color: var(--muted, #767685); }
@@ -208,7 +222,7 @@ body > .gpt-panel {
   max-height: 70vh;
   overflow-y: auto;
   margin: 0;
-  padding: 12px;
+  padding: var(--gutter, 8px);
   border: 0;
   border-bottom: 1px solid var(--panel-line);
   border-radius: 0;
@@ -216,14 +230,12 @@ body > .gpt-panel {
 #bidbot-titlebar .bt-buttons {
   flex: none;
   display: flex;
-  gap: 2px;
-  align-self: flex-start;
-  margin-top: 8px;
+  gap: 4px;
 }
 #bidbot-titlebar .bt-btn {
-  width: 30px;
+  width: 28px;
   min-width: 0;
-  height: 30px;
+  height: 28px;
   min-height: 0;
   padding: 0;
   margin: 0;
@@ -246,15 +258,27 @@ body > .gpt-panel {
 
 #bidbot-bar {
   flex: none;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  padding: 7px 10px;
+  display: grid;
+  gap: var(--gap, 8px);
+  padding: 0 var(--gutter, 8px) var(--gutter, 8px);
   background: var(--surface, #fff);
   border-bottom: 1px solid var(--line, #dcdce6);
   font: 12px/1.4 system-ui, "Segoe UI", sans-serif;
   color: var(--fg, #1d1d27);
+}
+/* Who the bot is working as, with the way to connect at the row's end. */
+#bidbot-bar .bb-who {
+  display: flex;
+  align-items: center;
+  gap: var(--gap, 8px);
+  min-width: 0;
+  height: var(--control, 32px);
+}
+/* The tools, five equal parts of the column. */
+#bidbot-bar .bb-tools {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: var(--gap, 8px);
 }
 #bidbot-bar .bb-dot {
   flex: none;
@@ -275,7 +299,7 @@ body > .gpt-panel {
   flex: none;
   display: flex;
   align-items: center;
-  padding: 3px 2px 3px 9px; /* room for the first circle's overlap and the ring */
+  padding: 0 0 0 6px; /* the first circle's overlap */
 }
 #bidbot-bar .bb-avatar {
   position: relative;
@@ -305,6 +329,8 @@ body > .gpt-panel {
   box-shadow: 0 0 0 2px var(--accent, #6a5fdb);
 }
 #bidbot-bar .bb-avatar:disabled { cursor: default; opacity: 1; }
+/* An Octo Browser profile: square, to tell it from a Chrome one. */
+#bidbot-bar .bb-avatar.bb-octo { border-radius: 7px; cursor: default; }
 /* The profile's name and its browser, under the circle the pointer is on. Lives on the page
    itself, not in the bar, so nothing in the bar can cover it. */
 #bidbot-tip {
@@ -332,14 +358,14 @@ body > .gpt-panel {
 }
 #bidbot-bar button {
   flex: none;
-  height: 28px;
-  padding: 0 10px;
+  height: var(--control, 32px);
+  padding: 0 12px;
   font: inherit;
   font-weight: 600;
   color: var(--fg, #1d1d27);
   background: var(--bg, #f6f6fa);
   border: 1px solid var(--line, #dcdce6);
-  border-radius: 6px;
+  border-radius: 8px;
   cursor: pointer;
 }
 #bidbot-bar button:hover:not(:disabled) { border-color: var(--accent, #6a5fdb); }
@@ -358,7 +384,7 @@ body > .gpt-panel {
 #bidbot-bar .bb-user,
 #bidbot-bar .bb-gpt,
 #bidbot-bar .bb-link,
-#bidbot-bar .bb-pin { width: 28px; min-width: 0; padding: 0; font-size: 14px; }
+#bidbot-bar .bb-pin { width: 100%; min-width: 0; padding: 0; font-size: 14px; }
 #bidbot-bar .bb-pin svg,
 #bidbot-bar .bb-user svg,
 #bidbot-bar .bb-gpt svg,
@@ -376,8 +402,9 @@ body > .gpt-panel {
   border-color: var(--accent-line, #c7bff3);
 }
 #bidbot-bar .bb-status {
-  flex: 1 0 100%;
   min-width: 0;
+  font-family: var(--log-font, monospace);
+  font-size: 10.5px;
   color: var(--muted, #767685);
   overflow-wrap: anywhere;
 }
@@ -425,17 +452,20 @@ function buildBar() {
   };
   ipcRenderer.on("win:maximized", (_e, on) => showMaximized(on));
 
-  // The logo and wordmark follow the panel's theme (data-theme on <html>,
-  // set by its light/dark switch).
+  // The logo and wordmark follow the panel's theme (data-theme on <html>).
   const followTheme = () => (titlebar.dataset.theme = document.documentElement.dataset.theme === "dark" ? "dark" : "light");
   followTheme();
   new MutationObserver(followTheme).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
   ipcRenderer.invoke("win:isMaximized").then(showMaximized, () => {});
 
   bar.innerHTML = `
+    <div class="bb-who">
     <span class="bb-dot" aria-hidden="true"></span>
     <div class="bb-browsers" role="radiogroup" aria-label="Browser profile to work in"></div>
     <span class="bb-browser-name"></span>
+    <button type="button" class="bb-connect bb-primary">Connect</button>
+    </div>
+    <div class="bb-tools">
     <button type="button" class="bb-rescan" title="Look for running browsers again" aria-label="Look for running browsers again">↻</button>
     <button type="button" class="bb-user" title="User Settings" aria-label="User Settings" aria-expanded="false" aria-controls="userPanel">
       <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false" fill="none"
@@ -455,7 +485,6 @@ function buildBar() {
         <path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/>
       </svg>
     </button>
-    <button type="button" class="bb-connect bb-primary">Connect</button>
     <button type="button" class="bb-pin" aria-pressed="true" title="Keep this window above other windows" aria-label="Pin on top">
       <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false" fill="none"
            stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -463,6 +492,7 @@ function buildBar() {
         <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/>
       </svg>
     </button>
+    </div>
     <div class="bb-status" role="status">Looking for running browsers…</div>`;
   document.body.prepend(bar);
   document.body.prepend(titlebar);
@@ -513,12 +543,19 @@ function buildBar() {
   // A circle's key is its browser's id and the profile's folder.
   const SEP = "\u0001";
   const keyOf = (id, dir = "") => `${id}${SEP}${dir}`;
-  // Browser profile -> bid profile, by circle key. With any link saved, only
-  // linked profiles get a circle.
+  // Browser profile -> bid profile, by circle key. With any profile linked,
+  // only linked ones get a circle, within Chrome and within Octo Browser each:
+  // a folder can hold many profiles. A running Octo profile always has one.
   let links = {};
   const profileItems = (list) => {
     const items = allProfileItems(list);
-    return Object.keys(links).length ? items.filter((item) => links[item.key] != null) : items;
+    const keys = Object.keys(links);
+    const narrowed = keys.some((key) => !key.startsWith("octo:"));
+    const octoNarrowed = keys.some((key) => key.startsWith("octo:"));
+    return items.filter((item) => {
+      const linked = links[item.key] != null;
+      return item.c.octo ? !octoNarrowed || linked || !item.c.closed : !narrowed || linked;
+    });
   };
   function allProfileItems(list) {
     const items = [];
@@ -528,7 +565,7 @@ function buildBar() {
           key: keyOf(c.id, p.dir),
           c,
           name: p.name,
-          tip: p.name
+          tip: !c.octo ? p.name : `${p.name} · Octo Browser${c.closed ? " · ready" : c.debug ? "" : " · no debug port"}`
         });
       }
     }
@@ -567,6 +604,7 @@ function buildBar() {
       b.dataset.key = item.key;
       b.textContent = item.mark || letterOf(item.name);
       if (item.mark) b.classList.add("bb-new");
+      if (item.c.octo) b.classList.add("bb-octo");
       b.style.background = colourOf(item.key);
       b.setAttribute("role", "radio");
       b.setAttribute("aria-checked", String(item.key === picked));
@@ -619,6 +657,11 @@ function buildBar() {
       window.bidbotDesktop.connected = connected;
       profileChanged();
     }
+    const octo = connected && !!s.octo;
+    if (octo !== window.bidbotDesktop.octo) {
+      window.bidbotDesktop.octo = octo;
+      window.dispatchEvent(new Event("bidbot-octo-changed"));
+    }
     const c = choice();
     const attach = c?.mode === "attach";
     const needsDebug = attach && !c.debug;
@@ -638,7 +681,7 @@ function buildBar() {
     connectEl.textContent =
       s.state === "connected" ? "Disconnect"
         : stoppable ? "Stop"
-          : needsDebug ? "Turn on debugging"
+          : needsDebug && !c.octo ? "Turn on debugging"
             : "Connect";
     connectEl.classList.toggle("bb-primary", s.state !== "connected" && !stoppable);
     connectEl.classList.toggle("bb-stop", stoppable);
@@ -657,12 +700,16 @@ function buildBar() {
             ? `In ${name}, on the page that just opened, switch on “Allow remote debugging for this browser instance”. Bid Bot connects as soon as it is on.`
             : s.error
               ? `Not connected — ${s.error}`
+              : needsDebug && c.octo
+                ? c.closed
+                  ? `${c.profile.name} is ready. Click Connect to start it.`
+                  : `${c.profile.name} has no debug port. Click Connect to see what to do.`
               : needsDebug
                 ? `${name} is running, but its remote debugging is off. Click “Turn on debugging”.`
                 : needsProfile
                   ? `Pick the ${name} profile Bid Bot should work in — click its circle.`
                   : attach
-                  ? `Ready to work in ${c.profile.name}. Click Connect, or just press Start.`
+                  ? ""
                   : !choices.length
                     ? "No Google Chrome found on this PC. Install it from google.com/chrome."
                     : "Not connected. Pick a profile and click Connect, or just press Start.";
@@ -709,12 +756,56 @@ function buildBar() {
     return p;
   }
 
+  // The API token and folder names. Load saves them and reads the list again.
+  function octoSettings(octo) {
+    const form = document.createElement("div");
+    form.className = "lp-octo";
+    const field = (text, input) => {
+      const label = document.createElement("label");
+      label.className = "field-label";
+      label.textContent = text;
+      label.append(input);
+      form.append(label);
+    };
+    const token = document.createElement("input");
+    token.type = "password";
+    token.autocomplete = "off";
+    token.placeholder = octo.hasToken ? "Saved — leave blank to keep it" : "From Octo Browser's settings";
+    field("Octo API token", token);
+    const folders = document.createElement("input");
+    folders.type = "text";
+    folders.autocomplete = "off";
+    folders.placeholder = "e.g. Brazil, US";
+    folders.value = octo.folders || "";
+    field("Folder names, separated by commas", folders);
+
+    const load = document.createElement("button");
+    load.type = "button";
+    load.textContent = "Load profiles";
+    load.addEventListener("click", async () => {
+      load.disabled = true;
+      load.textContent = "Loading…";
+      await ipcRenderer.invoke("app:saveOcto", { token: token.value.trim(), folders: folders.value.trim() });
+      await fillLinkPanel();
+    });
+    form.append(load);
+
+    if (octo.error) form.append(linkMessage(octo.error));
+    if (octo.missing?.length) form.append(linkMessage(`No folder named ${octo.missing.join(", ")}.`));
+    return form;
+  }
+
   async function fillLinkPanel() {
     linkPanel.replaceChildren();
+    // What is running now, and what Octo has ready, Octo's profiles first.
+    const octo = await ipcRenderer.invoke("app:octoRefresh");
+    const scan = await ipcRenderer.invoke("app:scan");
+    fillChoices(scan.choices, chosen && scan.choices.some((c) => c.id === chosen) ? chosen : scan.choice);
     const rows = allProfileItems(choices).filter((item) => item.c.mode === "attach");
+    const octoRows = rows.filter((item) => item.c.octo);
+    const browserRows = rows.filter((item) => !item.c.octo);
     const reply = await ipcRenderer.invoke("rt:send", { type: "GET_PROFILES" }).catch((err) => ({ ok: false, error: err.message }));
     if (!reply?.ok) return linkPanel.append(linkMessage(`Could not load the bid profiles: ${reply?.error || "no answer"}`));
-    if (!rows.length) return linkPanel.append(linkMessage("No browser profile is open."));
 
     const head = document.createElement("div");
     head.className = "lp-head";
@@ -724,10 +815,14 @@ function buildBar() {
       label.textContent = text;
       head.append(label);
     }
-    linkPanel.append(head);
-
     const selects = new Map();
-    for (const item of rows) {
+    const section = (text) => {
+      const title = document.createElement("p");
+      title.className = "lp-section";
+      title.textContent = text;
+      linkPanel.append(title);
+    };
+    const addRow = (item) => {
       const row = document.createElement("div");
       row.className = "lp-row";
       const name = document.createElement("span");
@@ -744,7 +839,16 @@ function buildBar() {
       selects.set(item.key, select);
       row.append(name, select);
       linkPanel.append(row);
-    }
+    };
+
+    section("Octo Browser");
+    linkPanel.append(octoSettings(octo));
+    if (octoRows.length || browserRows.length) linkPanel.append(head);
+    if (octoRows.length) octoRows.forEach(addRow);
+    else linkPanel.append(linkMessage(octo.count === 0 ? "Those folders have no profiles." : "No Octo Browser profile to show."));
+    section("Chrome");
+    if (browserRows.length) browserRows.forEach(addRow);
+    else linkPanel.append(linkMessage("No browser profile is open."));
 
     const actions = document.createElement("div");
     actions.className = "controls form-actions";
@@ -775,7 +879,7 @@ function buildBar() {
     linkPanel.hidden = !open;
     linkButton.setAttribute("aria-expanded", String(open));
     if (!open) return;
-    for (const [panelId, panelButton] of [["gptPanel", "openChatgpt"], ["userPanel", "openUserSettings"]]) {
+    for (const [panelId, panelButton] of [["gptPanel", "openChatgpt"], ["userPanel", "openUserSettings"], ["searchPanel", "openSearch"]]) {
       const panel = document.getElementById(panelId);
       if (panel && !panel.hidden) document.getElementById(panelButton)?.click();
     }
@@ -786,6 +890,15 @@ function buildBar() {
 
   // The panel's Recruiter Bid list follows the bid profile.
   const profileChanged = () => window.dispatchEvent(new Event("bidbot-profile-changed"));
+
+  // Search Settings stays in the panel, by the job site menu: still one
+  // settings panel at a time.
+  const searchPanel = document.getElementById("searchPanel");
+  if (searchPanel) {
+    new MutationObserver(() => {
+      if (!searchPanel.hidden) showLinkPanel(false);
+    }).observe(searchPanel, { attributes: true, attributeFilter: ["hidden"] });
+  }
 
   let pickedByHand = false; // a pick made before the first scan has answered
   // A circle picks its browser and, in a running one, the profile to work in.

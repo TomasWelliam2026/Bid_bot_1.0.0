@@ -55,18 +55,22 @@ const SOURCE_NAMES = {
   jobright: "Jobright",
   dice: "Dice",
   glassdoor: "Glassdoor",
+  himalayas: "Himalayas",
   indeed: "Indeed",
   monster: "Monster",
   ziprecruiter: "ZipRecruiter"
 };
-const SUPPORTED_SOURCES = new Set(["jobright", "dice", "glassdoor", "indeed", "ziprecruiter"]);
+const SUPPORTED_SOURCES = new Set(["jobright", "dice", "glassdoor", "himalayas", "indeed", "ziprecruiter"]);
 // Boards the search form applies to. Jobright's feed is its own recommendations.
-const SEARCHABLE_SOURCES = new Set(["dice", "glassdoor", "indeed", "ziprecruiter"]);
+const SEARCHABLE_SOURCES = new Set(["dice", "glassdoor", "himalayas", "indeed", "ziprecruiter"]);
+// Boards searched through an API: no tab, so no browser needed.
+const API_SOURCES = new Set(["himalayas"]);
 // What the status line says while a run opens that board's page.
 const SOURCE_OPENING = {
   jobright: "Opening jobright.ai/jobs/recommend…",
   dice: "Opening the Dice job search…",
   glassdoor: "Opening the Glassdoor job search…",
+  himalayas: "Searching Himalayas…",
   indeed: "Opening the Indeed job search…",
   ziprecruiter: "Opening the ZipRecruiter job search…"
 };
@@ -101,6 +105,7 @@ async function send(msg) {
 
 function setStatus(text, kind = "") {
   statusEl.textContent = text;
+  statusEl.title = text; // the row is short: the whole of it on hover
   statusEl.className = kind;
 }
 
@@ -335,6 +340,34 @@ const whoOf = (result) => (result.profileName ? `${result.profileName} · ` : ""
 // so was not sent), one that built but not cleanly — wrong number of roles, an
 // empty job — and whether its save landed. Generation runs before the save, so
 // its outcome comes first. Answers how many were saved.
+// The outcomes that went well, as small icons at the card's right, what each
+// means in its tooltip.
+const svgIcon = (body) =>
+  `<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">${body}</svg>`;
+const BADGE_ICONS = {
+  // A gauge, for the score.
+  ats: svgIcon('<path d="M4 18a9 9 0 1 1 16 0"/><path d="M12 15l4-5"/><circle cx="12" cy="15" r="1"/>'),
+  // A tick in a circle, for saved.
+  saved: svgIcon('<circle cx="12" cy="12" r="9.5"/><path d="M8 12.5l2.7 2.7L16 9.5"/>')
+};
+
+function addBadge(container, kind, icon, label, text = "") {
+  let row = container.querySelector(":scope > .job-badges");
+  if (!row) {
+    row = document.createElement("div");
+    row.className = "job-badges";
+    container.appendChild(row);
+  }
+  const badge = document.createElement("span");
+  badge.className = `job-badge ${kind}`;
+  badge.title = label;
+  badge.setAttribute("aria-label", label);
+  badge.setAttribute("role", "img");
+  badge.innerHTML = icon;
+  if (text) badge.appendChild(document.createTextNode(text));
+  row.appendChild(badge);
+}
+
 function appendOutcomes(container, results) {
   let saved = 0;
   for (const r of results) {
@@ -350,12 +383,12 @@ function appendOutcomes(container, results) {
     }
     for (const w of r.resume.warnings || []) container.appendChild(tag("job-note warn", `${who}${w}`));
     if (r.save?.ok) saved++;
-    if (r.resume.data?.atsScore) container.appendChild(tag("job-note", `${who}ATS score: ${r.resume.data.atsScore}`));
-    container.appendChild(
-      r.save?.ok
-        ? tag("job-note saved", `${who}Saved with resume`)
-        : tag("job-note warn", `${who}Save failed: ${r.save?.error || "unknown"}`)
-    );
+    if (r.resume.data?.atsScore) {
+      const score = String(r.resume.data.atsScore);
+      addBadge(container, "ats", BADGE_ICONS.ats, `${who}ATS score: ${score}`, score.match(/\d+(?:\.\d+)?/)?.[0] ?? score);
+    }
+    if (r.save?.ok) addBadge(container, "saved", BADGE_ICONS.saved, `${who}Saved with resume`);
+    else container.appendChild(tag("job-note warn", `${who}Save failed: ${r.save?.error || "unknown"}`));
   }
   return saved;
 }
@@ -580,6 +613,12 @@ chrome.runtime.onMessage.addListener((msg) => {
 const preflightEl = $("preflight");
 const preflightSummaryEl = $("preflightSummary");
 const preflightListEl = $("preflightList");
+
+// The list sits on a row of its own, under the line that opens it.
+function showPreflightList() {
+  preflightListEl.hidden = preflightEl.hidden || !preflightEl.open;
+}
+preflightEl.addEventListener("toggle", showPreflightList);
 const CHECK_MARK = { ok: "✓", warn: "!", fail: "✕" };
 
 function showPreflight(checks) {
@@ -612,13 +651,15 @@ function showPreflight(checks) {
   // Open when something needs doing; folded to its one line when all is well.
   preflightEl.open = failed.length > 0 || warned.length > 0;
   preflightEl.hidden = false;
+  showPreflightList();
 }
 
 async function runPreflight(options) {
   const reply = await send({ type: "PREFLIGHT", options });
   const checks = reply.ok ? reply.checks : [{ key: "worker", label: "Bid Bot", state: "fail", detail: reply.error }];
-  // The desktop app adds the one thing only it knows: the browser.
-  if (window.bidbotDesktop?.checkBrowser) {
+  // The desktop app adds the one thing only it knows: the browser. An API
+  // board works without one.
+  if (window.bidbotDesktop?.checkBrowser && !API_SOURCES.has(options.source)) {
     try {
       checks.unshift(await window.bidbotDesktop.checkBrowser());
     } catch (err) {
@@ -643,7 +684,10 @@ startEl.addEventListener("click", async () => {
   syncButtons();
   if (!ready) {
     setStatus("Not started — fix the items marked ✕, then press Start again.", "err");
-    if (search && !search.role) $("searchRole").focus();
+    if (search && !search.role) {
+      showSearchPanel(true);
+      $("searchRole").focus();
+    }
     return;
   }
 
@@ -753,6 +797,8 @@ function selectMode(button) {
   // The feed's own controls belong to Auto: Start/Stop/Clear and the board
   // picker have nothing to act on when the job is being typed in.
   autoControlsEl.hidden = button.id === "mode-manual";
+  $("runInfo").hidden = autoControlsEl.hidden;
+  $("preflightRow").hidden = autoControlsEl.hidden;
 }
 
 for (const button of modeButtons) {
@@ -762,7 +808,8 @@ for (const button of modeButtons) {
     const step = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
     if (!step) return;
     e.preventDefault();
-    const next = modeButtons[(modeButtons.indexOf(button) + step + modeButtons.length) % modeButtons.length];
+    const open = modeButtons.filter((b) => !b.disabled);
+    const next = open[(open.indexOf(button) + step + open.length) % open.length];
     selectMode(next);
     next.focus();
   });
@@ -819,7 +866,7 @@ function restoreSearch() {
   } catch {
     // unreadable: the form starts blank
   }
-  if (!saved || typeof saved !== "object") return;
+  if (!saved || typeof saved !== "object") saved = {};
 
   const f = SEARCH_FIELDS;
   f.role.value = String(saved.role || "");
@@ -829,22 +876,44 @@ function restoreSearch() {
   const pick = (select, value) => {
     if ([...select.options].some((o) => o.value === value)) select.value = value;
   };
-  pick(f.country, String(saved.country || ""));
+  pick(f.country, String(saved.country || "US"));
   pick(f.jobType, String(saved.jobType || ""));
   pick(f.postedDays, saved.postedDays ? String(saved.postedDays) : "");
 }
 
 restoreSearch();
-for (const el of Object.values(SEARCH_FIELDS)) {
-  el.addEventListener(el.tagName === "INPUT" && el.type === "text" ? "input" : "change", saveSearch);
+
+// Search Settings: the icon opens and closes the panel, always on what is
+// saved; Save stores it and closes it. Only one settings panel is open at once.
+const searchPanelEl = $("searchPanel");
+const openSearchEl = $("openSearch");
+
+function showSearchPanel(open) {
+  searchPanelEl.hidden = !open;
+  openSearchEl.setAttribute("aria-expanded", String(open));
+  restoreSearch();
+  if (open) {
+    showGptPanel(false);
+    showUserPanel(false);
+  }
 }
+
+openSearchEl.addEventListener("click", () => showSearchPanel(searchPanelEl.hidden));
+$("searchSave").addEventListener("click", () => {
+  saveSearch();
+  showSearchPanel(false);
+});
 
 function selectSource(source) {
   jobSource = source;
   jobSourceEl.value = source;
   searchEl.hidden = !SEARCHABLE_SOURCES.has(source);
+  $("searchNote").hidden = !searchEl.hidden;
   $("searchLegend").textContent = `${SOURCE_NAMES[source]} search`;
-  $("searchCountryField").hidden = source !== "indeed";
+  // Himalayas goes by country, as Indeed does, and has only remote jobs.
+  $("searchCountryField").hidden = source !== "indeed" && source !== "himalayas";
+  // Glassdoor is searched across the United States; see glassdoorSearchUrl.
+  $("searchLocationField").hidden = source === "glassdoor" || source === "himalayas";
   const supported = SUPPORTED_SOURCES.has(source);
   sourceNoteEl.hidden = supported;
   sourceNoteEl.textContent = supported
@@ -1041,6 +1110,39 @@ manualGenerateEl.addEventListener("click", async () => {
   }
 
   renderManualResult(reply);
+});
+
+// Connected to an Octo Browser profile the app only reads a job from it, so
+// Auto is off and Manual gets Catch Job. It fills the form to look over before
+// Generate.
+const catchJobEl = $("catchJob");
+
+window.addEventListener("bidbot-octo-changed", () => {
+  const octo = window.bidbotDesktop.octo;
+  catchJobEl.hidden = !octo;
+  $("mode-auto").disabled = octo;
+  if (octo) selectMode($("mode-manual"));
+});
+
+catchJobEl.addEventListener("click", async () => {
+  catchJobEl.disabled = true;
+  manualResultEl.replaceChildren();
+  showManualStatus("Reading the LinkedIn tab in Octo Browser…");
+
+  const reply = await window.bidbotDesktop.catchJob();
+
+  catchJobEl.disabled = false;
+
+  if (!reply.ok) {
+    showManualStatus(reply.error, "warn");
+    return;
+  }
+
+  $("manualCompany").value = reply.job.company;
+  $("manualTitle").value = reply.job.title;
+  $("manualUrl").value = reply.job.url;
+  $("manualDescription").value = reply.job.description;
+  showManualStatus(`Caught ${reply.job.title} at ${reply.job.company}. Check it, then Generate.`);
 });
 
 // ---------------------------------------------------------------------------
@@ -2089,7 +2191,10 @@ function showGptPanel(open) {
   gptPanelEl.hidden = !open;
   openChatgptEl.setAttribute("aria-expanded", String(open));
   showGptStatus("");
-  if (open) showUserPanel(false); // one panel at a time
+  if (open) { // one panel at a time
+    showUserPanel(false);
+    showSearchPanel(false);
+  }
   if (open && savedSettings) fillGptForm(savedSettings);
 }
 
@@ -2463,6 +2568,7 @@ function showUserPanel(open) {
   openUserSettingsEl.setAttribute("aria-expanded", String(open));
   if (!open) return;
   showGptPanel(false); // one panel at a time
+  showSearchPanel(false);
   // Fresh each time, so a profile just added or changed on the dashboard is
   // listed as it is now — and folded, so the list reads as a list of names.
   openCards.clear();
@@ -2475,37 +2581,14 @@ openUserSettingsEl.addEventListener("click", () => showUserPanel(userPanelEl.hid
 // ---------------------------------------------------------------------------
 // Theme
 //
-// Light by default; dark is an explicit, saved choice, not a system-preference
-// follow — the panel should not flip on you just because the OS theme does.
-// Applying is nothing but a data-theme attribute on <html>: sidepanel.css
-// holds both palettes as custom properties, so nothing here touches a color.
+// Light by default; a theme saved earlier stays. Applying is nothing but a
+// data-theme attribute on <html>: sidepanel.css holds both palettes as custom
+// properties, so nothing here touches a color.
 // ---------------------------------------------------------------------------
-
-const themeToggleEl = $("themeToggle");
-const iconMoonEl = $("iconMoon");
-const iconSunEl = $("iconSun");
-
-function applyTheme(theme) {
-  const dark = theme === "dark";
-  document.documentElement.dataset.theme = dark ? "dark" : "light";
-  themeToggleEl.setAttribute("aria-pressed", String(dark));
-  const label = dark ? "Switch to light mode" : "Switch to dark mode";
-  themeToggleEl.setAttribute("aria-label", label);
-  themeToggleEl.title = label;
-  // The icon shown is the mode a click would switch TO, matching the label.
-  iconMoonEl.hidden = dark;
-  iconSunEl.hidden = !dark;
-}
-
-themeToggleEl.addEventListener("click", async () => {
-  const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
-  applyTheme(next); // instant — do not wait on the storage round trip to flip
-  await send({ type: "SET_THEME", theme: next });
-});
 
 async function loadTheme() {
   const reply = await send({ type: "GET_THEME" });
-  applyTheme(reply.ok && reply.theme === "dark" ? "dark" : "light");
+  document.documentElement.dataset.theme = reply.ok && reply.theme === "dark" ? "dark" : "light";
 }
 
 loadTheme();

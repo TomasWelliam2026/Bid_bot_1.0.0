@@ -9,7 +9,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const FIXTURES = path.join(__dirname, "..", "fixtures");
-const HOSTS = ["jobright.ai", "www.jobright.ai", "www.dice.com", "mail.google.com"];
+const HOSTS = ["jobright.ai", "www.jobright.ai", "www.dice.com", "www.glassdoor.com", "mail.google.com"];
 
 // jobright.ai/jobs/recommend: a react-window style list that renders more
 // cards as it nears its end.
@@ -190,11 +190,53 @@ const gmail = ({ autoCompose = true, lang = "en", folded = false, unfocused = fa
   }
 </script>`;
 
+// www.glassdoor.com/Job/…: the list on the left with the first job's details
+// showing on the right. As on the real site, only a card's job link fills the
+// pane: a click on the card itself does nothing, and the link, if not
+// cancelled, goes off to /partner/. `more` jobs wait behind "Show more jobs".
+function glassdoorSearch(term, { perSearch, moreFor }) {
+  const card = (id) => `<li data-test="jobListing" data-jobid="${id}">
+    <a data-test="job-link" href="/partner/jobListing.htm?jobListingId=${id}"></a>
+    <a data-test="job-title" id="job-title-${id}" href="/job-listing/${id}.htm?jl=${id}">${term} job ${id}</a>
+    <span class="EmployerProfile_compactEmployerName__ab1">${term} Co ${id}</span>
+  </li>`;
+  const ids = (from, count) => Array.from({ length: count }, (_, i) => `${term.replace(/-/g, "")}${from + i}`);
+  const more = moreFor(term);
+  return `<!doctype html><meta charset="utf-8"><title>${term} jobs</title>
+<ul id="list">${ids(1, perSearch).map(card).join("")}</ul>
+${more ? `<button data-test="load-more">Show more jobs</button>` : ""}
+<div id="pane"></div>
+<script>
+  const pane = document.getElementById("pane");
+  const fill = (id, title) => {
+    pane.innerHTML = '<div data-test="job-details-header"><h1 id="jd-job-title-' + id + '">' + title + "</h1></div>" +
+      '<div class="JobDetails_jobDescription__x JobDetails_blurDescription__y"><p>About ' + id + "</p><ul><li>Python</li></ul></div>";
+  };
+  const first = document.querySelector("li");
+  fill(first.dataset.jobid, first.querySelector('[data-test="job-title"]').textContent);
+  document.addEventListener("click", (e) => {
+    const link = e.target.closest('a[data-test="job-link"]');
+    if (link) {
+      const card = link.closest("li");
+      pane.innerHTML = "";
+      setTimeout(() => fill(card.dataset.jobid, card.querySelector('[data-test="job-title"]').textContent), 150);
+    }
+    if (e.target.matches('[data-test="load-more"]')) {
+      setTimeout(() => {
+        document.getElementById("list").insertAdjacentHTML("beforeend", ${JSON.stringify(ids(perSearch + 1, more).map(card).join(""))});
+        e.target.remove();
+      }, 150);
+    }
+  });
+</script>`;
+}
+
 // Starts the server. Every request is kept in `requests` as { host, path }.
-async function startFakeSites({ jobright = {}, dice = {}, gmail: gmailOptions = {} } = {}) {
+async function startFakeSites({ jobright = {}, dice = {}, glassdoor = {}, gmail: gmailOptions = {} } = {}) {
   const requests = [];
   const sentMail = [];
   const diceOptions = { perPage: 3, pagesFor: () => 3, ...dice };
+  const glassdoorOptions = { perSearch: 25, moreFor: () => 0, ...glassdoor };
   const server = https.createServer(
     {
       key: fs.readFileSync(path.join(FIXTURES, "test-key.pem")),
@@ -218,6 +260,10 @@ async function startFakeSites({ jobright = {}, dice = {}, gmail: gmailOptions = 
       if (host.endsWith("jobright.ai")) {
         if (url.pathname.startsWith("/jobs/info/")) return res.end(jobrightJob(url.pathname.split("/").pop()));
         return res.end(jobrightFeed({ total: 300, ...jobright }));
+      }
+      if (host === "www.glassdoor.com") {
+        const term = /united-states-(.*)-jobs-SRCH/.exec(url.pathname)?.[1] || "none";
+        return res.end(glassdoorSearch(term, glassdoorOptions));
       }
       if (url.pathname.startsWith("/job-detail/")) return res.end(diceJob(url.pathname.split("/").pop()));
       res.end(diceSearch(url.searchParams.get("q") || "none", Number(url.searchParams.get("page") || 1), diceOptions));

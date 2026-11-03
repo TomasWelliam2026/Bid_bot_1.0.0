@@ -222,8 +222,8 @@ export default function SheetSettings({
           click before it does anything, and switching to another tab's
           settings mid-confirm never carries the armed state over to it. */}
       <form onSubmit={renameTab}>
-        <div className="field-grid">
-          <label className="field wide">
+        <div className="tab-rename-row">
+          <label className="field">
             <span>Tab name</span>
             <input
               type="text"
@@ -234,27 +234,26 @@ export default function SheetSettings({
               }}
             />
           </label>
-        </div>
-        <div className="save-row">
           <button type="submit" className="btn btn-primary" disabled={!nameDirty || nameBusy}>
             {nameBusy ? 'Renaming…' : 'Rename tab'}
           </button>
-          {confirmingDelete ? (
-            <>
-              <span className="tile-detail">Delete “{activeUser.name}” for good?</span>
-              <button type="button" className="btn" disabled={deleteBusy} onClick={() => setConfirmingDelete(false)}>
-                Cancel
-              </button>
-              <button type="button" className="btn danger solid" disabled={deleteBusy} onClick={confirmDelete}>
-                {deleteBusy ? 'Deleting…' : 'Confirm delete'}
-              </button>
-            </>
-          ) : (
+          {!confirmingDelete ? (
             <button type="button" className="btn danger" onClick={() => setConfirmingDelete(true)}>
               Delete tab
             </button>
-          )}
+          ) : null}
         </div>
+        {confirmingDelete ? (
+          <div className="save-row">
+            <span className="tile-detail">Delete “{activeUser.name}” for good?</span>
+            <button type="button" className="btn" disabled={deleteBusy} onClick={() => setConfirmingDelete(false)}>
+              Cancel
+            </button>
+            <button type="button" className="btn danger solid" disabled={deleteBusy} onClick={confirmDelete}>
+              {deleteBusy ? 'Deleting…' : 'Confirm delete'}
+            </button>
+          </div>
+        ) : null}
         {nameError ? <div className="note critical">{nameError}</div> : null}
         {deleteError ? <div className="note critical">{deleteError}</div> : null}
       </form>

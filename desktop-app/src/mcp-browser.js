@@ -17,6 +17,7 @@ const { EventEmitter } = require("node:events");
 const { pathToFileURL } = require("node:url");
 const { spawn } = require("node:child_process");
 const { BRIDGE_SOURCE, POLL_FUNCTION, wrapContentScript, dispatchFunction } = require("./page-bridge");
+const { isLinkedInJobUrl, READ_JOB } = require("./linkedin-job");
 
 const POLL_MS = 500;
 const QUIET_EVERY = 8; // a tab nothing is happening in: every 8th poll, ~4s
@@ -113,7 +114,9 @@ class McpBrowser extends EventEmitter {
     this.error = null;
     this.tabs = new Map(); // id -> tab, as chrome.tabs would describe it
     this.docs = new Map(); // id -> docId of the bridge last seen in that page
-    this.ours = new Set(); // ids of the tabs the app opened — kept for the whole connection
+    this.ours = new Set(); // ids of the tabs the app works in — kept for the whole connection
+    this.opened = new Set(); // those of them it opened itself; the only ones it may close
+    this.firstListed = new Map(); // page id -> when it was first listed, this connection
     this.missing = new Map(); // id -> lists in a row it has been absent from
     this.byPage = new Map(); // MCP page id -> tab id
     this.markerChecked = new Map(); // tab id -> the URL its profile marker was last read at
@@ -139,7 +142,7 @@ class McpBrowser extends EventEmitter {
 
   status() {
     const tabs = [...this.tabs.keys()].filter((id) => this.visible(id)).length;
-    return { state: this.state, error: this.error, tabs, browser: this.browserLabel || null, profile: this.profileScope?.name || null };
+    return { state: this.state, error: this.error, tabs, browser: this.browserLabel || null, profile: this.profileScope?.name || null, octo: !!this.profileScope?.catchOnly };
   }
 
   setState(state, error = null) {
@@ -153,7 +156,9 @@ class McpBrowser extends EventEmitter {
   //          { mode: "attach", wsEndpoint, label, profile? } — a browser
   //          already open, with remote debugging on. With a profile —
   //          { dir, name, exe, args } — the app opens its tabs in that profile
-  //          and works only with the tabs it opened there.
+  //          and works only with the tabs it opened there. A profile with
+  //          catchOnly (Octo Browser) has no tab opened, taken over or
+  //          polled: catchJob reads it, and that is all.
   async connect(browser) {
     if (this.connecting) return this.connecting;
     if (this.state === "connected") await this.disconnect();
@@ -168,6 +173,8 @@ class McpBrowser extends EventEmitter {
     this.browserLabel = browser.label;
     // Page ids start again with every MCP session.
     this.ours.clear();
+    this.opened.clear();
+    this.firstListed.clear();
     this.missing.clear();
     this.byPage.clear();
     this.markerChecked.clear();
@@ -309,7 +316,9 @@ class McpBrowser extends EventEmitter {
     const tab = { id, pageId, windowId: 1, index: this.tabs.size, url: "", title: "", status: "loading", active: false };
     // When this page was first listed: a page seen only after one of the
     // app's tabs went to its current page can be that tab's page, swapped.
-    Object.defineProperty(tab, "seenAt", { value: Date.now(), writable: true });
+    // A page that left the list and came back keeps its first time.
+    if (!this.firstListed.has(pageId)) this.firstListed.set(pageId, Date.now());
+    Object.defineProperty(tab, "seenAt", { value: this.firstListed.get(pageId), writable: true });
     this.log(`[tabs] + ${id}`);
     this.tabs.set(id, tab);
     this.byPage.set(pageId, id);
@@ -365,7 +374,9 @@ class McpBrowser extends EventEmitter {
   syncList(listed) {
     const pages = parsePages(listed);
     const present = new Set(pages.map((p) => p.id));
-    const fresh = pages.filter((p) => !this.byPage.has(p.id));
+    // Only a page never listed before can be a tab's new page. One the person
+    // already had, back after dropping out of a list, is still theirs.
+    const fresh = pages.filter((p) => !this.byPage.has(p.id) && !this.firstListed.has(p.id));
 
     // A tab of the app's whose page has gone, and a new page on the site that
     // tab was opening: the same tab, its page swapped by Chrome.
@@ -411,7 +422,9 @@ class McpBrowser extends EventEmitter {
       this.missing.delete(tab.id);
       this.log(`[tabs] ${tab.id} is now page ${page.id} (${page.url.slice(0, 60)})`);
     }
-    for (const page of fresh) this.ensureTab(page.id);
+    for (const page of pages) {
+      if (!this.byPage.has(page.id)) this.ensureTab(page.id);
+    }
     for (const page of pages) {
       const tab = this.tabs.get(this.byPage.get(page.id));
       if (tab) tab.listedUrl = page.url;
@@ -580,7 +593,7 @@ class McpBrowser extends EventEmitter {
   }
 
   async adoptFromProfile() {
-    if (!this.profileScope) return;
+    if (!this.profileScope || this.profileScope.catchOnly) return;
     for (const tab of [...this.tabs.values()]) {
       if (this.ours.has(tab.id) || !tab.listedUrl || !this.isJobBoard(tab.listedUrl)) continue;
       // Asked once per page it shows: a tab that moves to another page is asked again.
@@ -597,6 +610,28 @@ class McpBrowser extends EventEmitter {
       this.claim(tab.pageId);
       this.log(`[tabs] ${tab.id} is the user's own ${this.profileScope.name} tab (${tab.listedUrl.slice(0, 60)}) — taken over`);
     }
+  }
+
+  // The job in the LinkedIn tab being looked at. Only LinkedIn job tabs are
+  // read, and a tab that is minimised or covered counts as long as it is the
+  // only one.
+  async catchJob() {
+    const pages = parsePages(await this.call("list_pages", {})).filter((p) => isLinkedInJobUrl(p.url));
+    if (!pages.length) throw new Error("No LinkedIn job is open in this profile — open the job and try again.");
+    const read = [];
+    for (const page of pages) {
+      const answer = await this.call("evaluate_script", { pageId: page.id, function: READ_JOB, format: "function", waitForStableDom: false })
+        .then(parseEvaluate)
+        .catch(() => null);
+      if (answer) read.push(answer);
+    }
+    const job = read.find((r) => r.visible) || (read.length === 1 ? read[0] : null);
+    if (!job) throw new Error("Several LinkedIn job tabs are open — bring the one you want to the front and try again.");
+    if (!job.company || !job.title || !job.description) {
+      throw new Error("That LinkedIn tab shows no job yet — open the job, so its description shows, and try again.");
+    }
+    const { visible, ...found } = job;
+    return found;
   }
 
   // -------------------------------------------------------------------------
@@ -660,9 +695,11 @@ class McpBrowser extends EventEmitter {
   // if the profile had none. The tab is then picked out of the MCP server's
   // page list as the one that was not there before.
   async createInProfile(url) {
-    const { name } = this.profileScope;
+    const { name, catchOnly } = this.profileScope;
+    if (catchOnly) throw new Error(`${name} is connected for Catch Job only — no tab is opened in it`);
     const page = await this.openInProfile(this.profileScope, url);
     const tab = this.claim(page.id);
+    this.opened.add(tab.id);
     tab.goingTo = hostOf(url);
     this.applyTabInfo(tab, { url: page.url || url, status: "loading" });
     this.markActive(tab.id);
@@ -755,8 +792,14 @@ class McpBrowser extends EventEmitter {
     return { ...this.tabs.get(id) };
   }
 
+  // In a profile, only a tab the app opened is ever closed. A tab of the
+  // person's that was taken over is worked in, but stays theirs.
   async remove(ids) {
     for (const id of [].concat(ids).map(Number)) {
+      if (this.profileScope && !this.opened.has(id)) {
+        this.log(`[tabs] ${id} was not opened by the app — left open`);
+        continue;
+      }
       try {
         await this.call("close_page", { pageId: this.pageOf(id) });
       } catch (err) {

@@ -14,6 +14,7 @@
     "https://www.glassdoor.com/*",
     "https://www.ziprecruiter.com/*",
     "https://*.indeed.com/*",
+    "https://himalayas.app/*",
     "http://localhost/*",
     "http://127.0.0.1/*",
     "https://api.openai.com/*",

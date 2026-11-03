@@ -20,10 +20,12 @@ test("preflight", { timeout: 60000 }, async (t) => {
     assert.equal(stateOf(r, "chatgpt"), "ok");
   });
 
-  await t.test("Indeed needs a search term; Dice does not", async () => {
-    assert.equal(stateOf(await check({ source: "indeed", search: { role: "" } }), "board"), "fail");
-    assert.equal(stateOf(await check({ source: "indeed", search: { role: "qa; dev" } }), "board"), "ok");
-    assert.equal(stateOf(await check({ source: "dice", search: { role: "" } }), "board"), "ok");
+  await t.test("every searched board needs the user's search term; the bot has none of its own", async () => {
+    for (const source of ["indeed", "dice", "glassdoor", "ziprecruiter"]) {
+      assert.equal(stateOf(await check({ source, search: { role: "" } }), "board"), "fail", source);
+      assert.equal(stateOf(await check({ source, search: { role: "qa; dev" } }), "board"), "ok", source);
+    }
+    assert.equal(stateOf(await check({ source: "jobright" }), "board"), "ok", "Jobright has its own feed");
   });
 
   await t.test("a board without a fetcher fails", async () => {
@@ -33,7 +35,7 @@ test("preflight", { timeout: 60000 }, async (t) => {
   await t.test("capture only needs nothing but the board", async () => {
     h.setCollectorUp(false);
     try {
-      const r = await check({ source: "dice", capture: true });
+      const r = await check({ source: "dice", search: { role: "qa" }, capture: true });
       assert.equal(r.ready, true);
       assert.equal(stateOf(r, "collector"), undefined);
     } finally {

@@ -26,18 +26,6 @@
   <section id="pane-generate" class="pane" role="tabpanel" aria-labelledby="tab-generate">
     <header>
       <div class="titlebar">
-        <button id="themeToggle" class="icon-btn" type="button"
-                aria-pressed="false" aria-label="Switch to dark mode" title="Switch to dark mode">
-          <svg id="iconMoon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false"
-               fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
-          </svg>
-          <svg id="iconSun" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false"
-               fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" hidden>
-            <circle cx="12" cy="12" r="4"/>
-            <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>
-          </svg>
-        </button>
         <button id="openUserSettings" class="icon-btn" type="button"
                 aria-controls="userPanel" aria-expanded="false"
                 aria-label="User Settings" title="User Settings">
@@ -68,6 +56,19 @@
             Manual
           </button>
         </div>
+        <!-- How the run is going, beside the switch. Auto's only: Manual has
+             no run. -->
+        <div id="runInfo" class="run-info">
+          <p id="status">Idle.</p>
+        </div>
+      </div>
+      <!-- What Start checked, under the switch, and item by item beneath
+           that: open when something is wrong. Auto's only too. -->
+      <div id="preflightRow" class="preflight-row">
+        <details id="preflight" class="preflight" hidden>
+          <summary id="preflightSummary"></summary>
+        </details>
+        <ul id="preflightList" class="preflight" hidden></ul>
       </div>
 
       <!-- ChatGPT Settings: opened by the GPT button above it (in the desktop
@@ -170,91 +171,113 @@
       <div id="auto-controls">
         <!-- Which job board Auto fetches from. Only Jobright is wired up; the
              others can be picked, and say so, but Start stays off for them. -->
-        <select id="jobSource" class="source-select" aria-label="Job board">
-          <option value="jobright">Jobright</option>
-          <option value="dice">Dice</option>
-          <option value="glassdoor">Glassdoor</option>
-          <option value="indeed">Indeed</option>
-          <option value="monster">Monster</option>
-          <option value="ziprecruiter">ZipRecruiter</option>
-        </select>
+        <div class="source-row">
+          <button id="openSearch" class="icon-btn" type="button"
+                  aria-controls="searchPanel" aria-expanded="false"
+                  aria-label="Search Settings" title="Search Settings">
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false"
+                 fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="10.5" cy="10.5" r="7"/>
+              <path d="M21 21l-5.5-5.5"/>
+              <path d="M7.5 9h6M7.5 12h3.5"/>
+            </svg>
+          </button>
+          <select id="jobSource" class="source-select" aria-label="Job board">
+            <option value="jobright">Jobright</option>
+            <option value="dice">Dice</option>
+            <option value="glassdoor">Glassdoor</option>
+            <option value="himalayas">Himalayas</option>
+            <option value="indeed">Indeed</option>
+            <option value="monster">Monster</option>
+            <option value="ziprecruiter">ZipRecruiter</option>
+          </select>
+        </div>
         <p id="sourceNote" class="hint warn source-note" hidden></p>
 
-        <!-- What to search for, on every board that can be searched (all but
-             Jobright). Several terms, separated by ";", are searched one after
-             the other. Country picks which country's Indeed site is searched,
-             by ISO code, and is shown for Indeed only. -->
-        <fieldset id="indeedSearch" class="search-form" hidden>
-          <legend id="searchLegend" class="field-label">Search</legend>
-
-          <!-- The board's own two search boxes, "What" and "Where". -->
-          <label class="field-label" for="searchRole">Search terms</label>
-          <input id="searchRole" type="text" autocomplete="off"
-                 placeholder="e.g. data engineer; python developer">
-          <p id="searchTermsHint" class="hint search-hint">Separate several with “;” — each is searched in turn.</p>
-
-          <label class="field-label" for="searchLocation">Where</label>
-          <input id="searchLocation" type="text" autocomplete="off" placeholder="City, state, zip code, or &quot;remote&quot;">
-
-          <div class="field-row">
-            <div id="searchCountryField">
-              <label class="field-label" for="searchCountry">Country</label>
-              <select id="searchCountry">
-                <option value="US">United States</option>
-                <option value="GB">United Kingdom</option>
-                <option value="CA">Canada</option>
-                <option value="AU">Australia</option>
-                <option value="IN">India</option>
-                <option value="DE">Germany</option>
-                <option value="FR">France</option>
-                <option value="IE">Ireland</option>
-                <option value="NL">Netherlands</option>
-                <option value="ES">Spain</option>
-                <option value="IT">Italy</option>
-                <option value="PL">Poland</option>
-                <option value="SE">Sweden</option>
-                <option value="CH">Switzerland</option>
-                <option value="BE">Belgium</option>
-                <option value="AT">Austria</option>
-                <option value="PT">Portugal</option>
-                <option value="SG">Singapore</option>
-                <option value="JP">Japan</option>
-                <option value="PH">Philippines</option>
-                <option value="AE">United Arab Emirates</option>
-                <option value="ZA">South Africa</option>
-                <option value="NZ">New Zealand</option>
-                <option value="BR">Brazil</option>
-                <option value="MX">Mexico</option>
-              </select>
+        <!-- Search Settings: what each job site is searched for, set by the
+             user; the bot has no search of its own. Several terms, separated by
+             ";", are searched one after the other. Country picks which
+             country's Indeed site is searched, by ISO code, and is shown for
+             Indeed only. Opened by the icon above, closed by its Save. -->
+        <div id="searchPanel" class="form gpt-panel search-panel" hidden>
+          <p id="searchNote" class="hint" hidden>Jobright lists its own recommendations, so it has nothing to search.</p>
+          <fieldset id="indeedSearch" class="search-form">
+            <legend id="searchLegend" class="field-label">Search</legend>
+  
+            <!-- The board's own two search boxes, "What" and "Where". -->
+            <label class="field-label" for="searchRole">Search terms</label>
+            <input id="searchRole" type="text" autocomplete="off"
+                   placeholder="e.g. data engineer; python developer">
+            <p id="searchTermsHint" class="hint search-hint">Separate several with “;” — each is searched in turn.</p>
+  
+            <div id="searchLocationField">
+              <label class="field-label" for="searchLocation">Where</label>
+              <input id="searchLocation" type="text" autocomplete="off" placeholder="City, state, zip code, or &quot;remote&quot;">
             </div>
-            <div>
-              <label class="field-label" for="searchJobType">Job type</label>
-              <select id="searchJobType">
-                <option value="">Any</option>
-                <option value="fulltime">Full-time</option>
-                <option value="parttime">Part-time</option>
-                <option value="contract">Contract</option>
-                <option value="internship">Internship</option>
-              </select>
+  
+            <div class="field-row">
+              <div id="searchCountryField">
+                <label class="field-label" for="searchCountry">Country</label>
+                <select id="searchCountry">
+                  <option value="US">United States</option>
+                  <option value="GB">United Kingdom</option>
+                  <option value="CA">Canada</option>
+                  <option value="AU">Australia</option>
+                  <option value="IN">India</option>
+                  <option value="DE">Germany</option>
+                  <option value="FR">France</option>
+                  <option value="IE">Ireland</option>
+                  <option value="NL">Netherlands</option>
+                  <option value="ES">Spain</option>
+                  <option value="IT">Italy</option>
+                  <option value="PL">Poland</option>
+                  <option value="SE">Sweden</option>
+                  <option value="CH">Switzerland</option>
+                  <option value="BE">Belgium</option>
+                  <option value="AT">Austria</option>
+                  <option value="PT">Portugal</option>
+                  <option value="SG">Singapore</option>
+                  <option value="JP">Japan</option>
+                  <option value="PH">Philippines</option>
+                  <option value="AE">United Arab Emirates</option>
+                  <option value="ZA">South Africa</option>
+                  <option value="NZ">New Zealand</option>
+                  <option value="BR">Brazil</option>
+                  <option value="MX">Mexico</option>
+                </select>
+              </div>
+              <div>
+                <label class="field-label" for="searchJobType">Job type</label>
+                <select id="searchJobType">
+                  <option value="">Any</option>
+                  <option value="fulltime">Full-time</option>
+                  <option value="parttime">Part-time</option>
+                  <option value="contract">Contract</option>
+                  <option value="internship">Internship</option>
+                </select>
+              </div>
+              <div>
+                <label class="field-label" for="searchPosted">Posted</label>
+                <select id="searchPosted">
+                  <option value="">Any time</option>
+                  <option value="1">Last 24 hours</option>
+                  <option value="3">Last 3 days</option>
+                  <option value="7">Last 7 days</option>
+                  <option value="14">Last 14 days</option>
+                </select>
+              </div>
             </div>
-            <div>
-              <label class="field-label" for="searchPosted">Posted</label>
-              <select id="searchPosted">
-                <option value="">Any time</option>
-                <option value="1">Last 24 hours</option>
-                <option value="3">Last 3 days</option>
-                <option value="7">Last 7 days</option>
-                <option value="14">Last 14 days</option>
-              </select>
-            </div>
+  
+            <label class="switch-row" for="searchRemote">
+              <input id="searchRemote" class="switch-input" type="checkbox">
+              <span class="switch" aria-hidden="true"><span class="switch-knob"></span></span>
+              Remote only
+            </label>
+          </fieldset>
+          <div class="controls form-actions">
+            <button id="searchSave" class="primary" type="button">Save</button>
           </div>
-
-          <label class="switch-row" for="searchRemote">
-            <input id="searchRemote" class="switch-input" type="checkbox">
-            <span class="switch" aria-hidden="true"><span class="switch-knob"></span></span>
-            Remote only
-          </label>
-        </fieldset>
+        </div>
 
         <!-- Capture only: each job's company, title, link and description is
              kept for export, and no resume is written or sent. -->
@@ -273,14 +296,7 @@
     </header>
 
     <div id="auto-body" class="mode-body">
-      <p id="status">Idle.</p>
       <p id="queue" hidden></p>
-
-      <!-- What Start checked before the run: open when something is wrong. -->
-      <details id="preflight" class="preflight" hidden>
-        <summary id="preflightSummary"></summary>
-        <ul id="preflightList"></ul>
-      </details>
 
       <!-- The jobs captured so far, across runs, and their export. -->
       <div id="captures" class="captures" hidden>
@@ -308,6 +324,9 @@
     <!-- The same generate-and-save pass the queue runs, with the two things it
          would have read off the page typed in instead. -->
     <div id="manual-body" class="form" hidden>
+      <!-- Desktop app, connected to Octo Browser: fills the form from its tab. -->
+      <button id="catchJob" type="button" hidden>Catch Job</button>
+
       <label class="field-label" for="manualCompany">Company name</label>
       <input id="manualCompany" type="text" autocomplete="off" placeholder="e.g. Acme Robotics">
 

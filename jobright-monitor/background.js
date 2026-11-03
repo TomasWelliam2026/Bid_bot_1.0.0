@@ -10,22 +10,6 @@ const RECOMMEND_PATTERNS = ORIGINS.map((o) => `${o}/jobs/recommend*`);
 // a run opens, the tabs that count as that page, and the content script that
 // reads it — both scripts answer the same messages, so everything after the
 // feed tab is shared.
-const DICE_SEARCH_URL =
-  "https://www.dice.com/jobs?countryCode=US&filters.employmentType=FULLTIME" +
-  "&filters.workplaceTypes=Remote&latitude=38.7945952&location=United+States" +
-  "&locationPrecision=Country&longitude=-106.5348379&q=data+engineer";
-
-const ZIPRECRUITER_SEARCH_URL =
-  "https://www.ziprecruiter.com/jobs-search?search=Full-time+Data+Engineer&location=United+States" +
-  "&location_explicitly_set=true&radius=25&days=&refine_by_employment=employment_type%3Afull_time" +
-  "&refine_by_location_type=only_remote&refine_by_salary=&refine_by_salary_ceil=" +
-  "&refine_by_apply_type=has_zipapply&refine_by_experience_level=&apply_types_explicitly_set=true" +
-  "&employment_types_explicitly_set=true&location_types_explicitly_set=true&lk=pM--mREKRcWpgbzqqaJUgQ";
-
-const GLASSDOOR_SEARCH_URL =
-  "https://www.glassdoor.com/Job/remote-data-engineer-jobs-SRCH_IL.0,6_IS11047_KO7,20.htm" +
-  "?locId=11047&locT=S&remoteWorkType=1";
-
 // `nextPage` boards are read one search page at a time, the pager's Next
 // clicked once a page is done (see "the next page" below). A `scrollBatches`
 // board is one long list: once a full list is done it is cleared and the
@@ -34,7 +18,7 @@ const SOURCES = {
   jobright: { name: "Jobright", url: TARGET, patterns: RECOMMEND_PATTERNS, script: "content.js", scrollBatches: true },
   dice: {
     name: "Dice",
-    url: DICE_SEARCH_URL,
+    searched: true,
     patterns: ["https://www.dice.com/jobs*"],
     script: "content-dice.js",
     searchUrl: (search) => diceSearchUrl(search),
@@ -42,14 +26,19 @@ const SOURCES = {
   },
   glassdoor: {
     name: "Glassdoor",
-    url: GLASSDOOR_SEARCH_URL,
+    searched: true,
     patterns: ["https://www.glassdoor.com/Job/*"],
     script: "content-glassdoor.js",
-    searchUrl: (search) => glassdoorSearchUrl(search)
+    searchUrl: (search) => glassdoorSearchUrl(search),
+    // Two-pane layout: clicking a card fills the right-hand pane in place, so
+    // the job is read there — no tab of its own.
+    readsInPane: true,
+    // A search shows one list, finished before any "Show more jobs" is pressed.
+    nextPage: true
   },
   ziprecruiter: {
     name: "ZipRecruiter",
-    url: ZIPRECRUITER_SEARCH_URL,
+    searched: true,
     patterns: ["https://www.ziprecruiter.com/jobs-search*"],
     script: "content-ziprecruiter.js",
     searchUrl: (search) => zipRecruiterSearchUrl(search),
@@ -59,6 +48,17 @@ const SOURCES = {
     // Each page's cards are finished before [aria-label="Next page"] is
     // clicked for the next one — see nextPageWhenDone.
     nextPage: true
+  },
+  // Himalayas' public jobs API: no tab, no page and no browser. Each job comes
+  // whole, description included — see readApiPage.
+  himalayas: {
+    name: "Himalayas",
+    searched: true,
+    patterns: [],
+    searchUrl: (search, page) => himalayasSearchUrl(search, page),
+    api: true,
+    nextPage: true,
+    maxPages: 5 // 20 jobs a page; a term can match thousands
   },
   // No fixed page: the search opened is the one the panel's search form asks
   // for, on that country's Indeed site — see indeedSearchUrl.
@@ -74,6 +74,9 @@ const SOURCES = {
     readsInPane: true
   }
 };
+
+// No list tab to work in: it has closed. An API board never has one.
+const feedGone = () => feedTabId === null && !SOURCES[runSource]?.api;
 
 // Every board's list page — Stop and Clear reach whichever one is open.
 const FEED_PATTERNS = Object.values(SOURCES).flatMap((s) => s.patterns);
@@ -834,7 +837,7 @@ async function nextPageWhenDone() {
     // flight calls back here when it finishes; a full list is built and then
     // the batch step's to clear (nextBatchWhenDone).
     if (!signal || signal.aborted || !visitEnabled || switchingTerm || !searchIdle()) return;
-    if (feedTabId === null || acceptedCount >= MAX_STORED) return;
+    if (feedGone() || acceptedCount >= MAX_STORED) return;
     // A board that reads each job beside its list (Indeed, ZipRecruiter) can
     // only read it while its page is showing: that page's jobs are built
     // before the next page is searched.
@@ -845,21 +848,26 @@ async function nextPageWhenDone() {
     await pageCardsArrived(signal);
     if (signal.aborted || !searchIdle()) return;
     if (SOURCES[runSource].readsInPane && queue.length) return buildNow();
-    if (pagesTurned >= MAX_PAGES) return endTerm();
+    if (SOURCES[runSource].api) {
+      if (!apiMore) return endTerm();
+      await readApiPage(SOURCES[runSource], signal);
+    } else {
+      if (pagesTurned >= MAX_PAGES) return endTerm();
 
-    const reply = await chrome.tabs
-      .sendMessage(feedTabId, { type: "NEXT_PAGE" })
-      .catch(() => null);
-    if (!reply?.clicked) return endTerm(); // the last page, or the tab is gone
+      const reply = await chrome.tabs
+        .sendMessage(feedTabId, { type: "NEXT_PAGE" })
+        .catch(() => null);
+      if (!reply?.clicked) return endTerm(); // the last page, or the tab is gone
 
-    pagesTurned++;
-    await waitForPageChange(feedTabId, reply.url, signal);
-    if (signal.aborted) return;
+      pagesTurned++;
+      await waitForPageChange(feedTabId, reply.url, signal);
+      if (signal.aborted) return;
 
-    // Either a new document (the script is re-injected and starts fresh) or
-    // the same one re-rendered (its dedupe keeps what was already seen) — or
-    // a human check, waited out first.
-    await streamFeed(feedTabId, SOURCES[runSource], {}, signal);
+      // Either a new document (the script is re-injected and starts fresh) or
+      // the same one re-rendered (its dedupe keeps what was already seen) — or
+      // a human check, waited out first.
+      await streamFeed(feedTabId, SOURCES[runSource], {}, signal);
+    }
     turned = true;
   } catch (err) {
     if (!wasStopped(err)) {
@@ -881,6 +889,7 @@ async function nextPageWhenDone() {
 // found has been handed to the duplicate check.
 const PAGE_ARRIVAL_MS = 10000;
 async function pageCardsArrived(signal) {
+  if (feedTabId === null) return true; // an API board: its jobs arrive here at once
   const deadline = Date.now() + PAGE_ARRIVAL_MS;
   while (Date.now() < deadline && !signal?.aborted) {
     const ping = await chrome.tabs.sendMessage(feedTabId, { type: "PING" }).catch(() => null);
@@ -968,8 +977,8 @@ function noteFeedStatus(status, tabId) {
   // Jobright's feed has run out: the search is over, and what it caught is built.
   if (status.harvestComplete && status.endReason === "bottom") buildNow();
   const source = SOURCES[runSource];
-  // Glassdoor's list is read to its end unless it stopped at a full list,
-  // which the batch step goes on from.
+  // A list read to its end, unless it stopped at a full list, which the batch
+  // step goes on from.
   if (status.harvestComplete && !status.atLimit && source && !source.nextPage && !source.scrollBatches && !termOver) {
     endTerm();
   }
@@ -990,7 +999,7 @@ async function nextBatchWhenDone() {
     await sleep(PAGE_SETTLE_MS);
     const signal = runSignal();
     if (!signal || signal.aborted || !visitEnabled || acceptedCount < MAX_STORED || !batchDone()) return;
-    if (feedTabId === null) return;
+    if (feedGone()) return;
 
     batchesDone++;
     acceptedCount = 0;
@@ -1003,8 +1012,7 @@ async function nextBatchWhenDone() {
 
     // The held-over candidates first, then more from the board: Jobright
     // scrolls on, a paged board turns its page once this one's cards are all
-    // through (nextPageWhenDone, called as the checks finish), and Glassdoor
-    // loads more.
+    // through (nextPageWhenDone, called as the checks finish).
     tellFeed({ type: "ACCEPTED", count: 0 });
     drainChecks();
     if (next === "scroll") await tell(feedTabId, { type: "NEXT_BATCH" }, source.script);
@@ -1127,11 +1135,10 @@ function indeedSearchUrl(search) {
 // ---------------------------------------------------------------------------
 // Search terms, on every board that can be searched
 //
-// The panel's search form goes to Dice, Glassdoor and ZipRecruiter as well as
-// Indeed. Its search box can hold several terms, separated by ";" or new
-// lines: a run searches for each in turn, one after the other, on the same
-// tab (see nextTermWhenDone). Indeed needs at least one term; on the other
-// boards an empty box opens the board's fixed search, as before.
+// What is searched for is the user's, set in the panel's Search Settings: the
+// bot has no search of its own, so these boards need at least one term.
+// Several, separated by ";" or new lines, are searched in turn, one after the
+// other, on the same tab (see nextTermWhenDone).
 // ---------------------------------------------------------------------------
 
 const MAX_TERMS = 20;
@@ -1172,18 +1179,94 @@ function zipRecruiterSearchUrl(search) {
   return url.href;
 }
 
-// Glassdoor's keyword search; it forwards to its own /Job/…SRCH… address.
+// Glassdoor's own search address, across the United States. Its jobs.htm form
+// forwards here too, but loses the filters on the way. The numbers are where
+// the location and the keyword sit in the path. A city would need Glassdoor's
+// own code for it, so the panel's Where is not used here.
+const GLASSDOOR_LOCATION = "united-states";
 function glassdoorSearchUrl(search) {
-  const url = new URL("https://www.glassdoor.com/Job/jobs.htm");
-  url.searchParams.set("sc.keyword", search.role);
-  if (search.location) url.searchParams.set("locKeyword", search.location);
+  const keyword = search.role.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  const start = GLASSDOOR_LOCATION.length + 1;
+  const url = new URL(
+    `https://www.glassdoor.com/Job/${GLASSDOOR_LOCATION}-${keyword}-jobs-SRCH_IL.0,${GLASSDOOR_LOCATION.length}_KO${start},${start + keyword.length}.htm`
+  );
   if (search.postedDays) url.searchParams.set("fromAge", String(search.postedDays));
   if (search.remote) url.searchParams.set("remoteWorkType", "1");
   return url.href;
 }
 
-// The page a run opens for one term — the board's fixed page when there is
-// no term and the board has one.
+// Himalayas' search, as its API documents it. Every job there is remote, so
+// Remote says nothing, and it searches by country rather than by place. It
+// has no Posted filter: readApiPage goes by each job's own date.
+const HIMALAYAS_API = "https://himalayas.app/jobs/api/search";
+const HIMALAYAS_JOB_TYPES = { fulltime: "Full Time", parttime: "Part Time", contract: "Contractor", internship: "Intern" };
+function himalayasSearchUrl(search, page = 1) {
+  const url = new URL(HIMALAYAS_API);
+  url.searchParams.set("q", search.role);
+  url.searchParams.set("country", search.country || "US");
+  if (HIMALAYAS_JOB_TYPES[search.jobType]) url.searchParams.set("employment_type", HIMALAYAS_JOB_TYPES[search.jobType]);
+  if (page > 1) url.searchParams.set("page", String(page));
+  return url.href;
+}
+
+// One page of the API. Going over the public rate limit answers 429: waited
+// out a few times, then said on the panel like any other failure.
+const API_RETRIES = 3;
+const API_RETRY_MS = 30000;
+async function fetchApi(url, signal) {
+  for (let tries = 0; ; tries++) {
+    const res = await fetch(url, { signal });
+    if (res.ok) return res.json();
+    if (res.status !== 429 || tries >= API_RETRIES) throw new Error(`the job search answered ${res.status}`);
+    const wait = (Number(res.headers.get("retry-after")) || API_RETRY_MS / 1000) * 1000;
+    broadcast({ type: "FEED_STATUS", status: { ...apiStatus(), rateLimited: true } });
+    await stoppable(sleep(wait), signal);
+  }
+}
+
+// An API board's progress, in the shape a list page reports its own.
+let apiSeen = 0;
+let apiMore = false; // the current term has more pages to read
+const apiStatus = () => ({
+  streaming: true, total: apiSeen, accepted: acceptedCount, limit: MAX_STORED,
+  atLimit: acceptedCount >= MAX_STORED, url: "", onRecommendPage: true, signedOut: false
+});
+
+// A card, as a list page would send it, carrying the description with it: a
+// job on an API board is never opened (see visitJob).
+const himalayasCard = (job, index) => ({
+  index,
+  source: "himalayas",
+  title: String(job.title || "").trim(),
+  company: job.companyName || null,
+  href: job.applicationLink || job.guid,
+  key: job.guid || job.applicationLink,
+  descriptionHtml: job.description || "",
+  foundAt: new Date().toISOString()
+});
+
+// Reads the current term's next page and hands its jobs to the duplicate
+// check. Pages with nothing recent enough are read past. Sets apiMore.
+async function readApiPage(source, signal) {
+  const term = runTerms[termIndex];
+  const oldest = runSearch.postedDays ? Date.now() - runSearch.postedDays * 86400000 : 0;
+  for (;;) {
+    const page = pagesTurned + 1;
+    const { jobs = [] } = await fetchApi(source.searchUrl({ ...runSearch, role: term }, page), signal);
+    if (signal.aborted) return;
+    pagesTurned = page;
+    apiMore = jobs.length > 0 && page < source.maxPages;
+    const cards = jobs
+      .filter((job) => Number(job.pubDate) * 1000 >= oldest)
+      .map((job) => himalayasCard(job, ++apiSeen))
+      .filter((job) => job.title && job.href);
+    cards.forEach(enqueueCheck);
+    broadcast({ type: "FEED_STATUS", status: { ...apiStatus(), lastPage: !apiMore } });
+    if (cards.length || !apiMore) return;
+  }
+}
+
+// The page a run opens for one term; Jobright has no search, only its feed.
 function searchPageUrl(source, search, term) {
   if (term && source.searchUrl) return source.searchUrl({ ...search, role: term });
   return source.url;
@@ -1194,7 +1277,7 @@ let runSearch = null;
 let runTerms = [];
 let termIndex = 0;
 // The current term's results are all in: its last page is done (a paged
-// board), or its list has been read to the end (Glassdoor). "reported" once
+// board), or its list has been read to the end. "reported" once
 // the panel has been told the last term is finished.
 let termOver = false;
 let switchingTerm = false;
@@ -1222,10 +1305,10 @@ async function nextTermWhenDone() {
   try {
     await sleep(PAGE_SETTLE_MS);
     const signal = runSignal();
-    if (!signal || signal.aborted || !visitEnabled || !pipelineIdle() || feedTabId === null) return;
+    if (!signal || signal.aborted || !visitEnabled || !pipelineIdle() || feedGone()) return;
     const source = SOURCES[runSource];
-    const tab = await chrome.tabs.get(feedTabId).catch(() => null);
-    if (!tab) return;
+    const tab = source.api ? null : await chrome.tabs.get(feedTabId).catch(() => null);
+    if (!tab && !source.api) return;
 
     termIndex++;
     termOver = false;
@@ -1235,10 +1318,14 @@ async function nextTermWhenDone() {
     const term = runTerms[termIndex];
     broadcast({ type: "TERM_STARTED", term, index: termIndex, total: runTerms.length });
 
-    await chrome.tabs.update(feedTabId, { url: searchPageUrl(source, runSearch, term) });
-    await waitForPageChange(feedTabId, tab.url, signal);
-    if (signal.aborted) return;
-    await streamFeed(feedTabId, source, runOptions, signal);
+    if (source.api) {
+      await readApiPage(source, signal);
+    } else {
+      await chrome.tabs.update(feedTabId, { url: searchPageUrl(source, runSearch, term) });
+      await waitForPageChange(feedTabId, tab.url, signal);
+      if (signal.aborted) return;
+      await streamFeed(feedTabId, source, runOptions, signal);
+    }
   } catch (err) {
     if (!wasStopped(err)) {
       console.warn("[jobright] could not search for the next term:", err?.message || err);
@@ -1451,7 +1538,7 @@ async function drain() {
 
       // Politeness toward jobright.ai for having opened a page. Duplicates
       // never reach this queue, so every job here did open one.
-      if (queue.length && !signal?.aborted) await sleep(DETAIL_GAP_MS);
+      if (queue.length && !signal?.aborted && !sourceOf(job).api) await sleep(DETAIL_GAP_MS);
     }
   } finally {
     draining = false;
@@ -3020,10 +3107,11 @@ function stoppable(promise, signal) {
   ]);
 }
 
-// Indeed and ZipRecruiter: the job is read on the search page the run is on.
+// Indeed, ZipRecruiter and Glassdoor: the job is read on the search page the run is on.
 // The card is clicked in the list tab and the description it brings up read
-// from the right-hand pane (READ_PANE in content-indeed.js / content-
-// ziprecruiter.js); no tab is opened for the job, ever. A description that
+// from the right-hand pane (READ_PANE in content-indeed.js, content-
+// ziprecruiter.js and content-glassdoor.js); no tab is opened for the job,
+// ever. A description that
 // could not be read for it is a reading that failed, said on the job's row
 // like any other.
 //
@@ -3079,6 +3167,14 @@ async function readInPane(job, signal, onStage) {
 
 async function visitJob(job, signal, onStage = () => {}) {
   if (signal?.aborted) throw new Error(STOPPED);
+  // An API board: the job came with its description.
+  if (sourceOf(job).api) {
+    return {
+      ok: true, url: job.href, readFrom: "api", ready: true, isLinkedIn: false, originHref: null, originText: null,
+      descriptionHtml: job.descriptionHtml, descriptionText: htmlToText(job.descriptionHtml),
+      descriptionFound: !!job.descriptionHtml, staleDetailClass: false
+    };
+  }
   // Indeed: no tab of its own — the card is clicked and read beside the list.
   if (sourceOf(job).readsInPane) return readInPane(job, signal, onStage);
   return readJobPage(job, signal, onStage);
@@ -3687,9 +3783,9 @@ async function preflight(options = {}) {
   const sourceKey = options.source || "jobright";
   const source = SOURCES[sourceKey];
   if (!source) {
-    add("board", "Job board", "fail", `${sourceKey} has no fetcher yet — pick Jobright, Dice, Glassdoor, Indeed or ZipRecruiter`);
+    add("board", "Job board", "fail", `${sourceKey} has no fetcher yet — pick Jobright, Dice, Glassdoor, Himalayas, Indeed or ZipRecruiter`);
   } else if (source.searched && !searchTerms(options.search).length) {
-    add("board", "Job board", "fail", `${source.name}: type a search term`);
+    add("board", "Job board", "fail", `${source.name}: no search set — add one under Search Settings`);
   } else {
     const terms = source.searchUrl ? searchTerms(options.search) : [];
     add(
@@ -3797,15 +3893,13 @@ async function handle(msg) {
       const sourceKey = msg.options?.source || "jobright";
       const source = SOURCES[sourceKey];
       if (!source) {
-        return { ok: false, error: `${sourceKey} is not supported yet — only Jobright, Dice, Glassdoor, Indeed and ZipRecruiter` };
+        return { ok: false, error: `${sourceKey} is not supported yet — only Jobright, Dice, Glassdoor, Himalayas, Indeed and ZipRecruiter` };
       }
 
-      // The panel's search terms, searched one after the other. Indeed opens
-      // only a search, so it needs one; the other boards fall back on their
-      // fixed page without.
+      // The panel's search terms, searched one after the other.
       const search = source.searchUrl ? indeedSearchOf(msg.options?.search) : null;
       const terms = search ? searchTerms(msg.options?.search) : [];
-      if (source.searched && !terms.length) return { ok: false, error: `type a search term to search ${source.name} for` };
+      if (source.searched && !terms.length) return { ok: false, error: `no search set for ${source.name} — add one under Search Settings` };
 
       captureMode = !!msg.options?.capture;
 
@@ -3827,6 +3921,21 @@ async function handle(msg) {
       batchesDone = 0;
       resetFeedScroll();
       beginRun();
+
+      // An API board has no tab to open; its search goes on from here on its
+      // own, as each page's jobs are done.
+      if (source.api) {
+        feedTabId = null;
+        apiSeen = 0;
+        apiMore = false;
+        const signal = runSignal();
+        readApiPage(source, signal)
+          .then(() => nextPageWhenDone())
+          .catch((err) => wasStopped(err) || signal.aborted || reportFeedError(err));
+        drainChecks();
+        if (visitEnabled) buildNow();
+        return { ok: true, tabId: null, visitEnabled, saveEnabled, captureMode, terms, endpoint: SAVE_ENDPOINT };
+      }
 
       const tabId = await openFeedTab(source, searchPageUrl(source, search, terms[0]));
       const reply = await tell(tabId, { type: "START_STREAM", options: msg.options }, source.script);

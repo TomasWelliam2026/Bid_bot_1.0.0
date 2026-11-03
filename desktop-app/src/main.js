@@ -10,11 +10,12 @@
 const path = require("node:path");
 const fs = require("node:fs");
 const { pathToFileURL } = require("node:url");
-const { app, BrowserWindow, ipcMain, protocol, net, shell } = require("electron");
+const { app, BrowserWindow, ipcMain, protocol, net, shell, safeStorage } = require("electron");
 const { findChromes } = require("./chrome-finder");
 const { findRunningBrowsers, openDebugSetting, profileArgs } = require("./running-browsers");
 const { importFromExtension: importExt } = require("./extension-import");
 const { startEngine } = require("./engine");
+const { listOctoProfiles, startOctoProfile, listFolderProfiles } = require("./octo-profiles");
 const { EXT_ORIGIN } = require("./chrome-api");
 
 // The extension sits beside this app in the repo; a packaged build carries a
@@ -94,9 +95,10 @@ let scanning = null;
 // chrome.exe counts as installed wherever it was started from.
 function scanRunning() {
   if (!scanning) {
-    scanning = findRunningBrowsers({ ownDataDir: path.join(DATA_DIR, "chrome-profiles") })
-      .then((list) => {
+    scanning = Promise.all([findRunningBrowsers({ ownDataDir: path.join(DATA_DIR, "chrome-profiles") }), listOctoProfiles()])
+      .then(([list, octo]) => {
         running = list;
+        octoProfiles = octo;
         installed = findChromes(list.map((r) => r.exe).filter((exe) => /chrome\.exe$/i.test(exe)));
         return list;
       })
@@ -105,6 +107,10 @@ function scanRunning() {
   }
   return scanning;
 }
+
+let octoProfiles = []; // running now
+let octoToReopen = null; // { uuid, name }: closed by hand, to start with a debug port
+let octoReady = null; // the profiles in the folders named; null: none are named
 
 // The one profile picked to work in, per running browser — kept while that
 // profile still exists in it.
@@ -131,6 +137,65 @@ function runningChoice(r) {
   };
 }
 
+// The Octo API token is kept encrypted, and only this side ever reads it.
+function octoToken() {
+  try {
+    return settings.octoToken ? safeStorage.decryptString(Buffer.from(settings.octoToken, "base64")) : "";
+  } catch {
+    return "";
+  }
+}
+
+// Reads Octo's list again, for the folders named in the panel.
+async function refreshOctoFolders() {
+  const token = octoToken();
+  const folders = String(settings.octoFolders || "").split(",").map((f) => f.trim()).filter(Boolean);
+  const state = { ok: true, hasToken: !!token, folders: settings.octoFolders || "", count: null, missing: [] };
+  if (!token || !folders.length) {
+    octoReady = null;
+    return state;
+  }
+  try {
+    const { profiles, missing } = await listFolderProfiles({ token, folders });
+    octoReady = profiles;
+    return { ...state, count: profiles.length, missing };
+  } catch (err) {
+    return { ...state, ok: false, error: err.message };
+  }
+}
+
+// An Octo Browser profile. One ready to launch, or one with no debug port that
+// was closed by hand, is started by the app on Connect.
+function octoChoice({ uuid, name, wsEndpoint, closed = false }) {
+  const profile = { dir: uuid, name, open: true };
+  return {
+    id: `octo:${uuid}`,
+    group: "running",
+    label: `Octo Browser · ${name}`,
+    detail: uuid,
+    mode: "attach",
+    octo: true,
+    closed,
+    browser: "Octo Browser",
+    profiles: [profile],
+    openProfiles: [name],
+    debug: wsEndpoint ? { wsEndpoint } : null,
+    profile
+  };
+}
+
+function octoChoices() {
+  if (octoReady) {
+    return octoReady.map((p) => {
+      const running = octoProfiles.find((r) => r.uuid === p.uuid);
+      return octoChoice(running ? { ...running, name: p.name } : { ...p, closed: true });
+    });
+  }
+  const list = [...octoProfiles];
+  if (octoToReopen && !list.some((p) => p.uuid === octoToReopen.uuid)) list.push({ ...octoToReopen, closed: true });
+  return list.map(octoChoice);
+}
+
 function browserChoices() {
   // A Chrome installed for this Windows user only is offered only when there
   // is no Chrome installed for the whole computer: it is usually an old copy
@@ -148,7 +213,7 @@ function browserChoices() {
   if (settings.customExe) {
     starts.push({ id: CUSTOM_ID, group: "start", label: `Custom: ${path.basename(path.dirname(path.dirname(settings.customExe)))}`, detail: settings.customExe, mode: "launch", exe: settings.customExe });
   }
-  return [...running.map(runningChoice), ...starts];
+  return [...running.map(runningChoice), ...octoChoices(), ...starts];
 }
 
 // The choice still offered under the saved id; a running browser that has
@@ -166,6 +231,15 @@ class DebugOffError extends Error {}
 class NoProfileError extends Error {}
 
 function connectOptions(choice) {
+  if (choice.octo) {
+    if (!choice.debug) throw new DebugOffError(`${choice.profile.name} has no debug port`);
+    return {
+      mode: "attach",
+      wsEndpoint: choice.debug.wsEndpoint,
+      label: choice.label,
+      profile: { dir: choice.profile.dir, name: choice.profile.name, catchOnly: true }
+    };
+  }
   if (choice.mode === "attach") {
     if (!choice.debug) {
       throw new DebugOffError(`remote debugging is off in ${choice.browser} — click "Turn on debugging"`);
@@ -308,7 +382,7 @@ app.whenReady().then(async () => {
     const choice = currentChoice();
     await syncLinkedProfile();
     const status = await engine.browser.connect(connectOptions(choice));
-    if (choice.mode === "attach") await importFromExtension(choice).catch((err) => console.warn("[import]", err?.message || err));
+    if (choice.mode === "attach" && !choice.octo) await importFromExtension(choice).catch((err) => console.warn("[import]", err?.message || err));
     return status;
   }
 
@@ -390,6 +464,7 @@ app.whenReady().then(async () => {
   // --- the browser bar ------------------------------------------------------
   ipcMain.handle("app:state", async () => {
     await scanRunning();
+    refreshOctoFolders().then(pushChoices);
     await syncLinkedProfile();
     return {
       note: importNote,
@@ -404,6 +479,7 @@ app.whenReady().then(async () => {
   // able to connect when the run starts — or what is in the way.
   ipcMain.handle("app:checkBrowser", async () => {
     const label = "Browser";
+    if (currentChoice().octo) return { key: "browser", label, state: "fail", detail: "Octo Browser works in Manual, with Catch Job — pick a Chrome profile for Auto" };
     const s = browser.status();
     if (s.state === "connected") {
       return { key: "browser", label, state: "ok", detail: `connected to ${s.browser} through the Chrome DevTools MCP server` };
@@ -419,22 +495,59 @@ app.whenReady().then(async () => {
     }
     return { key: "browser", label, state: "ok", detail: `starts ${c.label.replace(/ — .*$/, "")} when the run starts` };
   });
+  ipcMain.handle("app:catchJob", async () => {
+    const s = browser.status();
+    if (s.state !== "connected" || !s.octo) return { ok: false, error: "Connect to an Octo Browser profile first." };
+    try {
+      return { ok: true, job: await browser.catchJob() };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
   ipcMain.handle("app:scan", async () => {
     await scanRunning();
     return { choices: browserChoices(), choice: currentChoice().id };
   });
+
+  // A profile with no debug port is never restarted from here while it is
+  // open: it is asked to be closed, and the next Connect starts it.
+  async function reopenOcto(choice) {
+    const { dir: uuid, name } = choice.profile;
+    if (!choice.closed) {
+      octoToReopen = { uuid, name };
+      return { ok: false, error: `${name} has no debug port. Close it in Octo Browser, then click Connect: the bot starts it again with one, and its tabs come back.` };
+    }
+    try {
+      await startOctoProfile(uuid);
+    } catch (err) {
+      return { ok: false, error: `could not start ${name}: ${err.message}` };
+    }
+    octoToReopen = null;
+    return { ok: true, already: true };
+  }
 
   ipcMain.handle("app:enableDebug", async () => {
     await scanRunning();
     const choice = currentChoice();
     if (choice.mode !== "attach") return { ok: false, error: "pick a running browser first" };
     if (choice.debug) return { ok: true, already: true };
+    if (choice.octo) return reopenOcto(choice);
     openDebugSetting(choice.running, choice.profile?.dir);
     watchForDebugging(choice.id);
     return { ok: true, browser: choice.browser };
   });
 
   ipcMain.handle("app:links", () => settings.profileLinks || {});
+  ipcMain.handle("app:octoRefresh", () => refreshOctoFolders());
+  // A blank token keeps the one saved.
+  ipcMain.handle("app:saveOcto", async (_e, { token, folders }) => {
+    if (token) {
+      if (!safeStorage.isEncryptionAvailable()) return { ok: false, error: "Windows could not protect the token, so it was not saved" };
+      saveSettings({ octoToken: safeStorage.encryptString(token).toString("base64") });
+    }
+    saveSettings({ octoFolders: folders });
+    return refreshOctoFolders();
+  });
   ipcMain.handle("app:saveLinks", async (_e, links) => {
     saveSettings({ profileLinks: links || {} });
     await syncLinkedProfile();

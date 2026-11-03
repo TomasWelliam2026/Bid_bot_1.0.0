@@ -227,6 +227,28 @@ export function points(value, variables, base = 0) {
   }
 }
 
+/**
+ * CSS `line-height` as a plain multiplier of the font size — the only form
+ * the renderer's own arithmetic uses (`size * lineHeight`). Unlike every
+ * other length in this file, the property is legitimately unitless (`1.45`),
+ * a length (`20px`), a percentage (`150%`) or the keyword `normal`, so a bare
+ * `Number(...)` on it silently becomes NaN for the last three — which then
+ * poisons every `state.y` added to after it, and eventually reaches jsPDF as
+ * a non-finite rect height ("Invalid arguments passed to jsPDF.rect").
+ * Falls back to 1.2 for anything it cannot read, the same as the property
+ * being absent.
+ */
+export function lineHeightOf(value, variables, size) {
+  const raw = resolveVar(value ?? '', variables).trim();
+  if (/^-?[\d.]+$/.test(raw)) return Number(raw);
+  if (raw.endsWith('%')) {
+    const pct = Number(raw.slice(0, -1));
+    return Number.isFinite(pct) && pct > 0 ? pct / 100 : 1.2;
+  }
+  const length = points(raw, variables, size);
+  return length > 0 && size > 0 ? length / size : 1.2;
+}
+
 /** "10px 14px" -> { top, right, bottom, left } in points. */
 export function box(value, variables, base) {
   const parts = resolveVar(value ?? '', variables).trim().split(/\s+/).filter(Boolean);
@@ -251,7 +273,14 @@ export function colour(value, variables) {
     return [0, 2, 4].map((at) => parseInt(digits.slice(at, at + 2), 16));
   }
   const rgb = /^rgba?\(([^)]+)\)$/.exec(raw);
-  if (rgb) return rgb[1].split(',').slice(0, 3).map((part) => Math.round(Number(part.trim())));
+  if (rgb) {
+    // CSS Color 4 allows "r g b" / "r g b / a" alongside the older
+    // "r, g, b", and both show up in generated CSS — split on either so a
+    // channel is never silently left stuck to its neighbour (which would
+    // parse as one non-numeric chunk and leave a NaN in the result).
+    const channels = rgb[1].split('/')[0].split(/[,\s]+/).filter(Boolean).slice(0, 3).map((part) => Math.round(Number(part)));
+    return channels.length === 3 && channels.every(Number.isFinite) ? channels : null;
+  }
   return null;
 }
 
@@ -404,8 +433,8 @@ export function renderHtmlToPdf(html, { url } = {}) {
    * of them by `gap`.
    */
   const inline = (list, x, width, style, trailing = null, gap = 0) => {
-    const lineHeight = Number(style['line-height'] || bodyStyle['line-height'] || 1.2);
     const size = points(style['font-size'] || `${baseSize}pt`, sheet.variables, baseSize) || baseSize;
+    const lineHeight = lineHeightOf(style['line-height'] || bodyStyle['line-height'], sheet.variables, size);
     const step = size * lineHeight * MM_PER_PT;
 
     const trailingWidth = trailing ? runsWidth(trailing) : 0;
@@ -566,7 +595,7 @@ export function renderHtmlToPdf(html, { url } = {}) {
       // page its sentence has just left.
       const marker = points('12px', sheet.variables);
       const size = points(style['font-size'] || `${baseSize}pt`, sheet.variables, baseSize) || baseSize;
-      const lineHeight = Number(style['line-height'] || bodyStyle['line-height'] || 1.2);
+      const lineHeight = lineHeightOf(style['line-height'] || bodyStyle['line-height'], sheet.variables, size);
       const step = size * lineHeight * MM_PER_PT;
       room(step);
       if (state.draw) {

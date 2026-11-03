@@ -96,7 +96,7 @@ function submittedDate(value) {
 }
 
 /** Render and file one submission, updating the record either way. */
-async function fileSubmission(id, { company, jobTitle, jobUrl, documents, date }) {
+async function fileSubmission(id, { company, jobTitle, jobUrl, documents, date, profile }) {
   try {
     const stored = await storeSubmission({
       root: config.dataRoot,
@@ -105,6 +105,7 @@ async function fileSubmission(id, { company, jobTitle, jobUrl, documents, date }
       jobUrl,
       documents,
       date,
+      profile,
     });
     store.dropDraft(id);
     const record = store.markSaved(id, stored);
@@ -196,7 +197,11 @@ app.post('/save-data', async (req, res) => {
   // Hold the markup until it is safely on disk: a render that fails can then be
   // retried from the dashboard instead of losing what was sent.
   store.saveDraft(id, documents);
-  const result = await fileSubmission(id, { company, jobTitle, jobUrl, documents, date });
+  // The applicant's own name, not the tab's -- Profile (D) in the Sheet sync
+  // panel (`sheet_applicant`), falling back to the tab's name only while that
+  // is still blank, so two unconfigured tabs still never collide.
+  const applicantName = user ? user.sheet_applicant || user.name : undefined;
+  const result = await fileSubmission(id, { company, jobTitle, jobUrl, documents, date, profile: applicantName });
   return res.status(result.ok ? 201 : 500).json({
     ok: result.ok,
     id,
@@ -294,6 +299,10 @@ app.post('/api/records/:id/approve', async (req, res) => {
   const draft = store.getDraft(id);
   if (!draft) return res.status(410).json({ ok: false, error: 'The submitted documents are no longer held' });
 
+  // The applicant's own name, not the tab's -- Profile (D), falling back to
+  // the tab's name only while that is still blank. See the matching comment
+  // in /save-data above.
+  const approvingUser = record.user_id ? store.getUser(record.user_id) : null;
   const result = await fileSubmission(id, {
     company: record.company,
     jobTitle: record.job_title,
@@ -301,6 +310,7 @@ app.post('/api/records/:id/approve', async (req, res) => {
     documents: draft,
     // The day the application was made, which for an imported row is not today.
     date: submittedDate(record.created_at),
+    profile: approvingUser ? approvingUser.sheet_applicant || approvingUser.name : undefined,
   });
   res.status(result.ok ? 200 : 500).json(result);
 });
