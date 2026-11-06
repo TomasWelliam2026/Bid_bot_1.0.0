@@ -65,8 +65,11 @@ export default defineConfig(() => {
     // Windows, which some browsers then refuse to reach. To open the dashboard
     // from other machines on the network, run `npm run dev -- --host 0.0.0.0`
     // (and start the backend with HOST=0.0.0.0 and CORS_ORIGIN set).
+    // strictPort: a second copy fails with "port in use" instead of quietly
+    // moving to 5176, where nothing points at it.
     server: {
       port: 5175,
+      strictPort: true,
       host: '127.0.0.1',
       allowedHosts: HOST_NAMES,
     },

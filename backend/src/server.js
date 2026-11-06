@@ -649,6 +649,20 @@ const server = app.listen(config.port, config.host, () => {
   console.log(`[users]  ${store.listUsers().length} tab(s)`);
 });
 
+// The usual way this fails is a second copy started while the first still
+// runs -- say that, rather than an unhandled-error stack trace.
+server.on('error', (error) => {
+  if (error.code === 'EADDRINUSE') {
+    console.error(`[server] port ${config.port} is already in use on ${config.host}.`);
+    console.error(`[server] The backend is probably already running in another window -- check`);
+    console.error(`[server] http://localhost:${config.port}/api/health, or close that window and start again.`);
+  } else {
+    console.error(`[server] could not start: ${error.message}`);
+  }
+  store.close();
+  process.exit(1);
+});
+
 const shutdown = () => {
   console.log('\n[server] shutting down');
   for (const client of clients) client.end();
