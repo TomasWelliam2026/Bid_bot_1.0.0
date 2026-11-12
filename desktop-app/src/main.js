@@ -15,8 +15,9 @@ const { findChromes } = require("./chrome-finder");
 const { findRunningBrowsers, openDebugSetting, profileArgs } = require("./running-browsers");
 const { importFromExtension: importExt } = require("./extension-import");
 const { startEngine } = require("./engine");
-const { listOctoProfiles, listFolderProfiles } = require("./octo-profiles");
+const { listOctoProfiles, listFolderProfiles, listAllFolders } = require("./octo-profiles");
 const { EXT_ORIGIN } = require("./chrome-api");
+const { pinToAllVirtualDesktops } = require("./virtual-desktop");
 
 // The extension sits beside this app in the repo; a packaged build carries a
 // copy under resources/extension.
@@ -136,7 +137,8 @@ function runningChoice(r) {
   };
 }
 
-// The Octo API token is kept encrypted, and only this side ever reads it.
+// The Octo API token is kept encrypted on disk. The panel shows it in a
+// password field, as it does the GPT key.
 function octoToken() {
   try {
     return settings.octoToken ? safeStorage.decryptString(Buffer.from(settings.octoToken, "base64")) : "";
@@ -145,12 +147,19 @@ function octoToken() {
   }
 }
 
-// Reads Octo's list again, for the folders named in the panel.
+// Reads Octo's list again, for the folders named in the panel — and, while
+// a token is set, the full list of folders Octo actually has, so the panel
+// can offer them to pick from rather than have their names typed by hand.
 async function refreshOctoFolders() {
   const token = octoToken();
   const folders = String(settings.octoFolders || "").split(",").map((f) => f.trim()).filter(Boolean);
-  const state = { ok: true, hasToken: !!token, folders: settings.octoFolders || "", count: null, missing: [] };
-  if (!token || !folders.length) {
+  const state = { ok: true, token, folders: settings.octoFolders || "", count: null, missing: [], allFolders: [] };
+  if (!token) {
+    octoReady = null;
+    return state;
+  }
+  state.allFolders = await listAllFolders({ token }).catch(() => []);
+  if (!folders.length) {
     octoReady = null;
     return state;
   }
@@ -307,6 +316,22 @@ function createWindow() {
   win.on("page-title-updated", (e) => e.preventDefault());
   // Above ordinary windows, but below the screen saver and system dialogs.
   if (settings.alwaysOnTop !== false) win.setAlwaysOnTop(true, "floating");
+
+  // Kept on every virtual desktop (Windows' "Task View"), not only the one
+  // it opened on — alwaysOnTop alone only keeps it above other windows on
+  // whichever desktop it is on. Tried once the window has actually painted
+  // (the shell has no view to pin before then), and again whenever it comes
+  // back from being minimized, since Windows has been seen to drop a pin
+  // across that. See virtual-desktop.js for what this does and why it can
+  // fail: the pin is best-effort, so a failure here only means the window
+  // behaves as it always has (pinned to the desktop it opened on) — logged,
+  // not surfaced to the person using the app.
+  const pinAcrossDesktops = () => {
+    if (!win) return;
+    pinToAllVirtualDesktops(win).catch((err) => console.error(`[virtual-desktop] could not pin across desktops: ${err.message}`));
+  };
+  win.once("ready-to-show", pinAcrossDesktops);
+  win.on("restore", pinAcrossDesktops);
 
   const remember = () => {
     if (!win || win.isMinimized() || win.isMaximized()) return;
@@ -530,14 +555,12 @@ app.whenReady().then(async () => {
 
   ipcMain.handle("app:links", () => settings.profileLinks || {});
   ipcMain.handle("app:octoRefresh", () => refreshOctoFolders());
-  // A blank token keeps the one saved.
+  // Saved only: Load profiles reads the list with what is saved. A blank
+  // token removes the one saved.
   ipcMain.handle("app:saveOcto", async (_e, { token, folders }) => {
-    if (token) {
-      if (!safeStorage.isEncryptionAvailable()) return { ok: false, error: "Windows could not protect the token, so it was not saved" };
-      saveSettings({ octoToken: safeStorage.encryptString(token).toString("base64") });
-    }
-    saveSettings({ octoFolders: folders });
-    return refreshOctoFolders();
+    if (token && !safeStorage.isEncryptionAvailable()) return { ok: false, error: "Windows could not protect the token, so it was not saved" };
+    saveSettings({ octoToken: token ? safeStorage.encryptString(token).toString("base64") : "", octoFolders: folders });
+    return { ok: true, token: octoToken(), folders: settings.octoFolders };
   });
   ipcMain.handle("app:saveLinks", async (_e, links) => {
     saveSettings({ profileLinks: links || {} });

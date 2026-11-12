@@ -164,36 +164,35 @@ const RESUME_STYLES = {
 
 const DEFAULT_RESUME_STYLE = "DE-1";
 
-// Styles added from the panel belong to the profile they were added under:
-// a name and the template's HTML, typed or pasted into that profile's editor
-// — not a file — and offered to that profile alone. The built-in
-// RESUME_STYLES are every profile's. An extension cannot write into its own
-// install directory at runtime, so the HTML is kept in chrome.storage.local
-// instead, by profile id and style name: { [profileId]: { [name]: { html } } }.
-async function getProfileStyles(profileId) {
-  const { profileStyles = {} } = await chrome.storage.local.get("profileStyles");
-  return profileStyles[profileId] || {};
+// Styles added from the panel are shared by every profile: a name and the
+// template's HTML, typed or pasted into any profile's editor — not a file —
+// and offered to every profile alike, the same as the built-in
+// RESUME_STYLES. An extension cannot write into its own install directory at
+// runtime, so the HTML is kept in chrome.storage.local instead, by style
+// name: { [name]: { html } }. `profileId` is accepted (and ignored) so every
+// caller — one style editor per profile — can keep passing it.
+async function getProfileStyles(_profileId) {
+  const { customStyles = {} } = await chrome.storage.local.get("customStyles");
+  return customStyles;
 }
 
-async function setProfileStyles(profileId, styles) {
-  const { profileStyles = {} } = await chrome.storage.local.get("profileStyles");
-  profileStyles[profileId] = styles;
-  await chrome.storage.local.set({ profileStyles });
+async function setProfileStyles(_profileId, styles) {
+  await chrome.storage.local.set({ customStyles: styles });
 }
 
 const listCustomStyles = (styles) => Object.keys(styles).map((name) => ({ name }));
 
-// Added styles used to be one list for the whole extension, under
-// "customStyles". Each profile there is now given its own copy of that list,
-// so every profile still has every style it could pick before; the shared
-// list is then emptied, so this happens once. Profiles added to the dashboard
-// later start with the built-in styles only.
+// Styles used to belong to the profile they were added under, kept per
+// profile id in "profileStyles". They are shared by every profile now, so
+// each profile's own list is folded into the one shared "customStyles" list
+// — a profile's own name wins over one added earlier under another profile
+// — and the per-profile list is then emptied, so this happens once.
 async function migrateLegacyStyles(profiles) {
-  const { customStyles } = await chrome.storage.local.get("customStyles");
-  if (!customStyles || !Object.keys(customStyles).length || !profiles.length) return;
-  const { profileStyles = {} } = await chrome.storage.local.get("profileStyles");
-  for (const p of profiles) profileStyles[p.id] = { ...customStyles, ...(profileStyles[p.id] || {}) };
-  await chrome.storage.local.set({ profileStyles, customStyles: {} });
+  const { profileStyles } = await chrome.storage.local.get("profileStyles");
+  if (!profileStyles || !Object.keys(profileStyles).length) return;
+  const { customStyles = {} } = await chrome.storage.local.get("customStyles");
+  for (const p of profiles) Object.assign(customStyles, profileStyles[p.id] || {});
+  await chrome.storage.local.set({ customStyles, profileStyles: {} });
 }
 
 // The holes buildResumeHtml cannot do without, matched the same way — a
@@ -211,8 +210,8 @@ function missingHoles(html) {
   return missing;
 }
 
-// A name already added to this profile replaces that style — the editor's
-// Update.
+// A name already added by any profile replaces that style — the editor's
+// Update — and the replacement is then shared by every profile too.
 async function addCustomStyle(profileId, name, html) {
   name = String(name || "").trim().slice(0, 40);
   if (!name) throw new Error("the style needs a name");
@@ -229,8 +228,8 @@ async function addCustomStyle(profileId, name, html) {
   return { name, replaced, styles: listCustomStyles(styles) };
 }
 
-// A style's template as text, built-in or one of this profile's — what the
-// profile's editor starts from when a listed style is copied into it.
+// A style's template as text, built-in or one added by any profile — what
+// the profile's editor starts from when a listed style is copied into it.
 async function getStyleHtml(profileId, name) {
   return { name, builtin: Object.hasOwn(RESUME_STYLES, name), html: await loadTemplate(name, profileId) };
 }
@@ -240,12 +239,16 @@ async function removeCustomStyle(profileId, name) {
   delete styles[name];
   await setProfileStyles(profileId, styles);
 
-  // The profile, if it was using it, goes back to the default rather than
-  // quietly falling back on every job. Best effort: with the collector
-  // unreachable, loadTemplate's own fallback still covers it.
+  // Every profile picking it, not just this one — the style is shared by
+  // all of them — goes back to the default rather than quietly falling back
+  // on every job. Best effort: with the collector unreachable, loadTemplate's
+  // own fallback still covers it.
   const list = await listProfiles();
-  const profile = list.ok && list.profiles.find((p) => p.id === profileId);
-  if (profile?.resume?.style === name) await updateProfile(profileId, { resumeStyle: "" });
+  if (list.ok) {
+    for (const profile of list.profiles) {
+      if (profile?.resume?.style === name) await updateProfile(profile.id, { resumeStyle: "" });
+    }
+  }
   return { styles: listCustomStyles(styles) };
 }
 
@@ -265,6 +268,16 @@ async function removeCustomStyle(profileId, name) {
 const SETTINGS_DEFAULTS = {
   apiKey: "",
   model: "gpt-4o-mini",
+
+  // "api" asks OpenAI's Chat Completions endpoint with apiKey/model, as
+  // always. "auto" instead drives ChatGPT itself in a browser tab, picking
+  // chatgptModel from ChatGPT's own model picker — see "ChatGPT, driven as a
+  // tab" below.
+  aiMethod: "api",
+  // Chat and Work are two different ways to start a new ChatGPT session,
+  // each with its own set of models (chatgptModel) to pick from.
+  chatgptSession: "chat",
+  chatgptModel: "",
 
   // Which profiles a caught job gets resumes for: every dashboard tab with
   // this Country (C) and this Role. Both are needed — blank picks none.
@@ -1742,6 +1755,9 @@ function writerFor(settings, profile) {
     profileId: profile.id,
     apiKey: settings.apiKey,
     model: settings.model,
+    aiMethod: settings.aiMethod === "auto" ? "auto" : "api",
+    chatgptSession: settings.chatgptSession === "work" ? "work" : "chat",
+    chatgptModel: settings.chatgptModel,
     prompt: String(own.prompt || "").trim() ? own.prompt : DEFAULT_PROMPT,
     masterResume: own.masterResume || "",
     masterResumeMode: own.masterResumeMode === "none" ? "none" : "use",
@@ -1807,17 +1823,26 @@ const templateCache = new Map();
 
 // An unknown style — a value stored by an older build, or one whose file was
 // removed — falls back to the default rather than failing the job. Losing the
-// chosen layout is a much smaller loss than losing the resume.
+// chosen layout is a much smaller loss than losing the resume. That fallback
+// used to be silent, which is exactly how a profile pointed at a style name
+// that was never actually saved (added but not "Add new"-d, or picked but the
+// profile never Saved) could preview correctly — a preview given its HTML
+// directly skips this lookup entirely — while every real build quietly came
+// out in the default style instead, with nothing in the job's own warnings
+// to say so. `onFallback`, when given, is told so the caller can surface it.
 //
 // An added style — one of `profileId`'s own — is read from storage every time
 // rather than cached, so replacing it takes effect on the very next job.
-async function loadTemplate(style, profileId) {
-  if (!Object.hasOwn(RESUME_STYLES, style)) {
+async function loadTemplate(style, profileId, onFallback = () => {}) {
+  if (style && !Object.hasOwn(RESUME_STYLES, style)) {
     const custom = (await getProfileStyles(profileId))[style];
     if (custom?.html) return custom.html;
   }
 
   const key = Object.hasOwn(RESUME_STYLES, style) ? style : DEFAULT_RESUME_STYLE;
+  if (style && key !== style) {
+    onFallback(`resume style "${style}" was not found — built with the default style (${DEFAULT_RESUME_STYLE}) instead`);
+  }
   if (templateCache.has(key)) return templateCache.get(key);
 
   const file = RESUME_STYLES[key];
@@ -2065,7 +2090,7 @@ function buildResumeHtml(template, data) {
   else warnings.push("no CONTACT in the answer — header kept from the template");
 
   const count = data.EXPERIENCE.length;
-  if (count < 3 || count > 7) warnings.push(`${count} role(s) in EXPERIENCE — expected 3 to 7`);
+  if (count < 3 || count > 12) warnings.push(`${count} role(s) in EXPERIENCE — expected 3 to 12`);
   data.EXPERIENCE.forEach((e, i) => {
     if (!e.company || !e.role || !e.location || !e.dates) {
       warnings.push(`role ${i + 1} is missing its company, title, location or dates`);
@@ -2638,7 +2663,9 @@ async function latestGenerated(profileId) {
 // document and what the builder had to say about the template: the holes Add
 // new would refuse it for, and the parts it had to leave as they were.
 async function previewStyle({ profileId, html, style }) {
-  const template = typeof html === "string" ? html : await loadTemplate(style, profileId);
+  const styleWarnings = [];
+  const template =
+    typeof html === "string" ? html : await loadTemplate(style, profileId, (msg) => styleWarnings.push(msg));
   const latest = await latestGenerated(profileId);
   const built = buildResumeHtml(template, latest?.data ?? parseModelAnswer(PREVIEW_SAMPLE_ANSWER));
   return {
@@ -2647,9 +2674,398 @@ async function previewStyle({ profileId, html, style }) {
     from: latest?.from ?? null,
     missing: missingHoles(template),
     // Only the warnings about the template: ones about the data — a role
-    // count, a role without bullets — say nothing about the layout.
-    warnings: built.warnings.filter((w) => /template/.test(w))
+    // count, a role without bullets — say nothing about the layout. The style
+    // ones go first — a wrong style is worth noticing before anything else.
+    warnings: [...styleWarnings, ...built.warnings.filter((w) => /template/.test(w))]
   };
+}
+
+// ---------------------------------------------------------------------------
+// ChatGPT, driven as a tab
+//
+// Auto's way of asking a question: instead of OpenAI's API, a chatgpt.com tab
+// — the one already open, or one opened for this — picks the model asked
+// for, types the prompt into the composer, sends it, waits for the answer to
+// finish streaming, and reads it back. No key, but that tab has to be open
+// (or openable) and signed in; nothing here signs it in.
+//
+// The typing, sending and waiting all happen inside the page itself
+// (CHATGPT_AUTOMATION_FN, run there by chrome.scripting.executeScript) rather
+// than as a back-and-forth with the service worker, since the service worker
+// can be killed for being idle while the page keeps running regardless.
+// ---------------------------------------------------------------------------
+
+const CHATGPT_URL = "https://chatgpt.com/";
+const CHATGPT_TAB_PATTERNS = ["https://chatgpt.com/*", "https://chat.openai.com/*"];
+
+function waitForTabLoad(tabId, timeoutMs = 20000) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(listener);
+      resolve();
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    const listener = (id, changes) => {
+      if (id === tabId && changes.status === "complete") finish();
+    };
+    chrome.tabs.onUpdated.addListener(listener);
+  });
+}
+
+// The tab asked of: one already on chatgpt.com (its active tab if more than
+// one is open — the one the person is actually looking at), or a new one.
+async function findOrOpenChatGptTab() {
+  const tabs = await chrome.tabs.query({ url: CHATGPT_TAB_PATTERNS });
+  if (tabs.length) return tabs.find((t) => t.active) || tabs[0];
+  const tab = await chrome.tabs.create({ url: CHATGPT_URL, active: false });
+  await waitForTabLoad(tab.id);
+  return tab;
+}
+
+// Resumes are asked for 10 in a row on the same ChatGPT chat, then handed to
+// a fresh one for the next 10 — rather than either one chat growing without
+// bound, or a brand new one every single time. The count survives a restart
+// (kept in storage, under the key below); the chat itself does not have to —
+// a tab closed, navigated away, or never opened just starts the count over.
+const CHATGPT_BATCH_SIZE = 10;
+const CHATGPT_BATCH_KEY = "chatgptAutoBatch";
+
+async function nextChatGptBatchTab() {
+  const { [CHATGPT_BATCH_KEY]: batch = null } = await chrome.storage.local.get(CHATGPT_BATCH_KEY);
+  let tab = null;
+  if (batch?.tabId && batch.count < CHATGPT_BATCH_SIZE) {
+    try {
+      const candidate = await chrome.tabs.get(batch.tabId);
+      if (/^https:\/\/(chat\.openai\.com|chatgpt\.com)\//.test(candidate.url || "")) tab = candidate;
+    } catch {
+      // that tab is gone — a fresh one starts the count over, below
+    }
+  }
+
+  const fresh = !tab;
+  const count = fresh ? 0 : batch.count;
+  if (fresh) {
+    tab = await findOrOpenChatGptTab();
+    await chrome.tabs.update(tab.id, { url: CHATGPT_URL });
+    await waitForTabLoad(tab.id);
+  }
+
+  await chrome.storage.local.set({ [CHATGPT_BATCH_KEY]: { tabId: tab.id, count: count + 1 } });
+  return { tab, fresh };
+}
+
+// Both run inside the ChatGPT tab itself — no closure over anything outside
+// either function, since chrome.scripting.executeScript serializes each one
+// to run there on its own. Split in two, rather than one function that waits
+// out the whole generation itself, because the MCP connection this app talks
+// to Chrome through has its own hard ceiling on how long any single call can
+// run (Puppeteer's protocolTimeout, 3 minutes, which chrome-devtools-mcp
+// does not expose a way to raise) — so no call this app makes can be allowed
+// to take that long itself. CHATGPT_SEND_FN does the one-off setup and
+// sends; CHATGPT_POLL_FN takes one quick look and reports what it sees, left
+// to askChatGptTab to call again every couple of seconds for as long as
+// generation is genuinely still underway — each call on its own finishes in
+// well under a second, so the 3-minute ceiling is never in reach regardless
+// of how long the generation as a whole takes.
+//
+// Selectors are ChatGPT's current markup (data-testid / role attributes);
+// where that markup may have moved on, picking the model is best-effort and
+// skipped rather than failing the whole run.
+
+async function CHATGPT_SEND_FN({ prompt, sessionMode, modelLabel }) {
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const qs = (sel) => document.querySelector(sel);
+  const qsa = (sel) => Array.from(document.querySelectorAll(sel));
+  const firstMatch = (...finders) => {
+    for (const find of finders) {
+      try {
+        const el = find();
+        if (el) return el;
+      } catch {
+        // that way of recognizing it does not apply here — try the next
+      }
+    }
+    return null;
+  };
+
+  async function waitFor(check, message, perTimeoutMs) {
+    const until = Date.now() + perTimeoutMs;
+    while (Date.now() < until) {
+      const value = check();
+      if (value) return value;
+      await sleep(250);
+    }
+    throw new Error(message);
+  }
+
+  const findModelButton = () =>
+    firstMatch(
+      () => qs('button[aria-label="Select ChatGPT model"]'),
+      () => qs('[data-testid="model-switcher-dropdown-button"]'),
+      () => qsa("button").find((b) => /\bgpt-?5|\bgpt-?4|\bo3\b|\bo4\b/i.test(b.textContent || ""))
+    );
+
+  const findComposer = () =>
+    firstMatch(
+      () => qs("#prompt-textarea"),
+      () => qs('[role="textbox"][aria-label="Ask ChatGPT"]'),
+      () => qs('form [contenteditable="true"]'),
+      () => qs('[contenteditable="true"]'),
+      () => qs('textarea[placeholder*="Message" i], textarea[placeholder*="Ask" i]')
+    );
+
+  const findSendButton = () =>
+    firstMatch(
+      () => qs('[data-testid="send-button"]'),
+      () => qs('button[aria-label="Send"], button[aria-label="Send message"], button[aria-label="Send prompt"]'),
+      () => qs('button[aria-label*="send" i]'),
+      () => qs('form button[type="submit"]')
+    );
+
+  const findAssistantTurns = () =>
+    firstMatch(
+      () => (qsa('[data-markdown-text-style="assistant-message"]').length ? qsa('[data-markdown-text-style="assistant-message"]') : null),
+      () => (qsa('[data-message-author-role="assistant"]').length ? qsa('[data-message-author-role="assistant"]') : null)
+    ) || [];
+
+  try {
+    // sessionMode is only ever passed when this is meant to land on a fresh
+    // chat (see askChatGptTab/nextChatGptBatchTab) — the first resume ever,
+    // or the first of each new batch of 10. Navigating the tab to CHATGPT_URL
+    // got it close, but a tab already sitting on that exact URL (nothing typed
+    // into it yet) does not reload for a same-URL navigation, so the SPA can
+    // still be showing whatever conversation was open before. Clicking New
+    // chat here is what actually guarantees a brand-new session regardless of
+    // what the tab already had on screen.
+    if (sessionMode) {
+      try {
+        const newChatButton = await waitFor(
+          () =>
+            firstMatch(
+              () => qs('[data-testid="create-new-chat-button"]'),
+              () => qs('a[aria-label="New chat"]'),
+              () => qs('button[aria-label="New chat"]'),
+              () => qsa("a, button").find((b) => b.textContent.trim() === "New chat")
+            ),
+          "New chat control not found",
+          6000
+        );
+        newChatButton.click();
+        await sleep(500);
+      } catch {
+        // no New chat control found — carry on with whatever chat is already open
+      }
+
+      try {
+        const wanted = sessionMode === "work" ? "Work" : "Chat";
+        const toggle = await waitFor(
+          () => qsa("button").find((b) => b.textContent.trim() === wanted),
+          "session toggle not found",
+          6000
+        );
+        if (toggle.getAttribute("aria-pressed") !== "true") toggle.click();
+        await sleep(300);
+      } catch {
+        // no Chat/Work toggle on this screen — carry on with whatever session it already is
+      }
+    }
+
+    if (modelLabel) {
+      try {
+        const button = await waitFor(findModelButton, "model picker not found", 8000);
+        button.click();
+        const items = await waitFor(() => {
+          const list = qsa('[role="menuitem"], [role="menuitemradio"], [role="option"]');
+          return list.length ? list : null;
+        }, "model menu did not open", 4000);
+        const target = items.find((el) => el.textContent.trim().toLowerCase().includes(modelLabel.trim().toLowerCase()));
+        if (target) target.click();
+        else button.click(); // nothing matched the name given — close the menu, keep the current model
+        await sleep(300);
+      } catch {
+        // the picker was not where expected — carry on with whatever model is already set
+      }
+    }
+
+    const box = await waitFor(findComposer, "ChatGPT's prompt box was not found on this tab", 10000);
+    box.focus();
+    document.execCommand("selectAll", false, null);
+    document.execCommand("delete", false, null);
+    const inserted = document.execCommand("insertText", false, prompt);
+    if (!inserted) {
+      box.textContent = prompt;
+      box.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: prompt }));
+    }
+    await sleep(200);
+
+    const sendButton = await waitFor(() => {
+      const b = findSendButton();
+      return b && !b.disabled ? b : null;
+    }, "the send button never became ready", 8000);
+    const turnsBefore = findAssistantTurns().length;
+    sendButton.click();
+
+    // Left on the page for CHATGPT_POLL_FN's later, separate calls to read —
+    // a plain property survives between them as long as the tab itself does.
+    window.__bidbotChatgpt = { turnsBefore, lastText: "", stableTicks: 0 };
+    return { ok: true };
+  } catch (err) {
+    return { error: err?.message || String(err) };
+  }
+}
+
+// One quick look at how the answer CHATGPT_SEND_FN started is doing —
+// no internal wait of its own, so this always returns almost immediately
+// regardless of how long generation itself is taking; askChatGptTab calls it
+// again every couple of seconds for as long as that takes.
+function CHATGPT_POLL_FN() {
+  const qs = (sel) => document.querySelector(sel);
+  const qsa = (sel) => Array.from(document.querySelectorAll(sel));
+  const firstMatch = (...finders) => {
+    for (const find of finders) {
+      try {
+        const el = find();
+        if (el) return el;
+      } catch {
+        // that way of recognizing it does not apply here — try the next
+      }
+    }
+    return null;
+  };
+
+  const findAssistantTurns = () =>
+    firstMatch(
+      () => (qsa('[data-markdown-text-style="assistant-message"]').length ? qsa('[data-markdown-text-style="assistant-message"]') : null),
+      () => (qsa('[data-message-author-role="assistant"]').length ? qsa('[data-message-author-role="assistant"]') : null)
+    ) || [];
+
+  // Whether the last turn is done streaming: its own wrapper says so
+  // directly and immediately where it carries that state; a visible
+  // stop/stop-generating button is the fallback where it does not (that
+  // button can briefly linger through a reveal animation after the text
+  // itself is already final, so it is tried second, not first).
+  const lastTurnState = (lastTurn) => lastTurn?.closest("[data-talvt-turn-state]")?.getAttribute("data-talvt-turn-state") || null;
+  const lastTurnIsStreaming = (lastTurn) => {
+    const state = lastTurnState(lastTurn);
+    return state ? state !== "complete" : !!firstMatch(() => qs('[data-testid="stop-button"]'), () => qs('button[aria-label*="stop" i]'));
+  };
+
+  // ChatGPT saying generation itself failed — as opposed to this script
+  // simply running out of patience, which is not the same thing and must
+  // not be reported as one. An alert region is the clean signal, checked
+  // page-wide; the phrases below are ChatGPT's own wording for the ways a
+  // turn can fail without one, but are only looked for inside the turn being
+  // answered — never page-wide, and never inside what we sent it — since a
+  // job description or a resume can easily use ordinary words like "network
+  // error" or "rate limit" without that being ChatGPT failing at all.
+  const findExplicitError = (lastTurn) =>
+    firstMatch(
+      () => qs('[role="alert"]')?.textContent?.trim() || null,
+      () => {
+        const scope = lastTurn?.closest("[data-turn-key]");
+        if (!scope) return null;
+        const m = /(something went wrong[^\n]{0,120}|an error occurred[^\n]{0,120}|network error[^\n]{0,120}|too many requests[^\n]{0,120}|rate limit exceeded[^\n]{0,120}|usage limit reached[^\n]{0,120})/i.exec(
+          scope.innerText || ""
+        );
+        return m ? m[0].trim() : null;
+      }
+    );
+
+  try {
+    const state = window.__bidbotChatgpt;
+    if (!state) return { error: "no generation was started in this tab" };
+
+    const turns = findAssistantTurns();
+    const lastTurn = turns.length > state.turnsBefore ? turns[turns.length - 1] : null;
+
+    const explicitError = findExplicitError(lastTurn);
+    if (explicitError) return { error: `ChatGPT reported: ${explicitError}` };
+
+    if (!lastTurn) return { done: false }; // no reply has started yet — still not a failure
+
+    const stillGenerating = lastTurnIsStreaming(lastTurn);
+    const text = (lastTurn.innerText || "").trim();
+    if (!stillGenerating && text && text === state.lastText) {
+      state.stableTicks += 1;
+      if (state.stableTicks >= 2) return { done: true, text };
+    } else {
+      state.stableTicks = 0;
+    }
+    state.lastText = text;
+    return { done: false };
+  } catch (err) {
+    return { error: err?.message || String(err) };
+  }
+}
+
+// `batch: true` (resume generation) reuses the same chat for up to
+// CHATGPT_BATCH_SIZE asks before starting a fresh one (nextChatGptBatchTab);
+// `batch: false` (Test connection) always starts its own fresh one and
+// never touches that count, since a one-off check is not one of the 10.
+async function askChatGptTab(prompt, { sessionMode = "", modelLabel = "", timeoutMs = 120000, batch = false } = {}) {
+  let tab;
+  let freshSession;
+  try {
+    if (batch) {
+      ({ tab, fresh: freshSession } = await nextChatGptBatchTab());
+    } else {
+      tab = await findOrOpenChatGptTab();
+      freshSession = !!sessionMode;
+      // The Chat/Work toggle only shows on ChatGPT's own new-chat screen, not
+      // once a conversation has started — so picking a session means landing
+      // on a fresh one first, in the tab found or opened above.
+      if (sessionMode) {
+        await chrome.tabs.update(tab.id, { url: CHATGPT_URL });
+        await waitForTabLoad(tab.id);
+      }
+    }
+  } catch (err) {
+    return { ok: false, error: `could not open ChatGPT (${err?.message || err})` };
+  }
+
+  let sendResults;
+  try {
+    sendResults = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: CHATGPT_SEND_FN,
+      // The Chat/Work toggle is only tried on a fresh chat — on a chat this
+      // batch is continuing, it is not there to find, so asking for it would
+      // only cost a few seconds finding out. The model is still picked every
+      // time: ChatGPT's own model picker stays reachable mid-conversation.
+      args: [{ prompt, sessionMode: freshSession ? sessionMode : "", modelLabel }]
+    });
+  } catch (err) {
+    return { ok: false, error: `could not run in the ChatGPT tab (${err?.message || err}) — is it open and loaded?` };
+  }
+  const sent = sendResults?.[0]?.result;
+  if (!sent) return { ok: false, error: "the ChatGPT tab gave no answer" };
+  if (sent.error) return { ok: false, error: sent.error };
+
+  // Checked every couple of seconds rather than awaited inside one call: see
+  // the comment above CHATGPT_SEND_FN/CHATGPT_POLL_FN for why no single call
+  // to the tab can be allowed to run as long as generation itself may.
+  // Generation can legitimately take minutes — that is not a failure, so
+  // nothing here times it out just for running long; timeoutMs is a sanity
+  // cap only (in case the tab itself has hung), not the normal way this ends.
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    await sleep(2000);
+    let pollResults;
+    try {
+      pollResults = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: CHATGPT_POLL_FN });
+    } catch (err) {
+      return { ok: false, error: `could not check the ChatGPT tab (${err?.message || err})` };
+    }
+    const poll = pollResults?.[0]?.result;
+    if (!poll) return { ok: false, error: "the ChatGPT tab gave no answer" };
+    if (poll.error) return { ok: false, error: poll.error };
+    if (poll.done) return poll.text ? { ok: true, text: poll.text } : { ok: false, error: "ChatGPT returned an empty answer" };
+  }
+  return { ok: false, error: `ChatGPT did not finish answering within the ${Math.round(timeoutMs / 1000)}s safety limit` };
 }
 
 // ---------------------------------------------------------------------------
@@ -2664,51 +3080,38 @@ const OPENAI_ENDPOINT = "https://api.openai.com/v1/chat/completions";
 // Generation is much slower than a localhost round trip, so it gets its own
 // budget rather than the 10s the collector calls use.
 const GENERATE_TIMEOUT_MS = 120000;
+// Auto's own budget is far larger: it is a sanity cap on a hung tab, not the
+// normal way a wait ends (see the loop in CHATGPT_AUTOMATION_FN) — ChatGPT
+// generating for longer than GENERATE_TIMEOUT_MS is routine, not a failure.
+const CHATGPT_GENERATE_TIMEOUT_MS = 10 * 60 * 1000;
 
-// `onStage` hears "waiting" as the request goes out and "building" once the
-// answer is back and being laid into the template — the two halves of the
-// wait the panel shows against the job.
-async function generateResume(writer, detail, signal, onStage = () => {}) {
+// What generateResume and testConnection both need: a system/user pair of
+// messages out, and the answer's text back — by the API with a key, or by
+// driving ChatGPT itself in a tab with "auto" (see "ChatGPT, driven as a
+// tab" above OPENAI_ENDPOINT below). Same shape back either way, so the rest
+// of generateResume does not need to know which one ran.
+async function completeChat(writer, messages, signal) {
+  if (writer.aiMethod === "auto") {
+    const prompt = messages.map((m) => m.content).join("\n\n");
+    console.log(`[jobright] → ChatGPT (auto) request · ${writer.chatgptSession}/${writer.chatgptModel || "(default model)"} · ${writer.name}`);
+    console.log("[jobright]   prompt:\n" + prompt);
+    const result = await askChatGptTab(prompt, {
+      sessionMode: writer.chatgptSession,
+      modelLabel: writer.chatgptModel,
+      timeoutMs: CHATGPT_GENERATE_TIMEOUT_MS,
+      batch: true
+    });
+    if (!result.ok) return { ok: false, error: result.error };
+    console.log("[jobright] ← ChatGPT (auto) answer:\n" + (result.text || "(empty)"));
+    return { ok: true, text: result.text, model: writer.chatgptModel || "chatgpt" };
+  }
+
   if (!writer.apiKey) {
-    return { ok: false, skipped: true, error: "no API key set — add it under ChatGPT Settings (the GPT button)" };
-  }
-  // The model is given the readable text, not the markup: the HTML is chrome
-  // it would have to pay tokens to ignore. The markup still goes to job_des.
-  const description = detail.descriptionText;
-  if (!description) {
-    return { ok: false, skipped: true, error: "no description was read from the page" };
-  }
-
-  let template;
-  try {
-    template = await loadTemplate(writer.resumeStyle, writer.profileId);
-  } catch (err) {
-    return { ok: false, error: err?.message || String(err) };
+    return { ok: false, error: "no API key set — add it under ChatGPT Settings (the GPT button)" };
   }
 
   const timeout = AbortSignal.timeout(GENERATE_TIMEOUT_MS);
   const abort = signal ? AbortSignal.any([timeout, signal]) : timeout;
-
-  // The prompt goes out exactly as it was typed — nothing is appended to it.
-  // The user message carries the two inputs, each under its own heading so the
-  // model cannot mistake the candidate's resume for part of the job posting.
-  // With the profile's master resume switched off, or none set, the job
-  // description goes out on its own.
-  const useMaster = writer.masterResumeMode !== "none";
-  const masterResume = useMaster ? (writer.masterResume || "").trim() : "";
-  const userContent = masterResume
-    ? `=== JOB DESCRIPTION ===\n${description}\n\n=== MASTER RESUME ===\n${masterResume}`
-    : description;
-  if (!useMaster) {
-    console.log(`[jobright] ${writer.name}: master resume switched off — sending the job description only`);
-  } else if (!masterResume) {
-    console.warn(`[jobright] ${writer.name}: no master resume set in User Settings — sending the job description only`);
-  }
-
-  const messages = [
-    { role: "system", content: writer.prompt },
-    { role: "user", content: userContent }
-  ];
 
   // Every outgoing request, logged in full, every time.
   //
@@ -2723,10 +3126,8 @@ async function generateResume(writer, detail, signal, onStage = () => {}) {
   // it should be readable without expanding anything, and it survives a copy
   // out of the console.
   console.log(`[jobright] → OpenAI request · ${writer.model} · ${writer.name}`, { model: writer.model, profile: writer.name, messages });
-  console.log("[jobright]   system message:\n" + messages[0].content);
-  console.log("[jobright]   user message:\n" + messages[1].content);
+  for (const m of messages) console.log(`[jobright]   ${m.role} message:\n` + m.content);
 
-  onStage("waiting");
   try {
     const res = await fetch(OPENAI_ENDPOINT, {
       method: "POST",
@@ -2765,29 +3166,7 @@ async function generateResume(writer, detail, signal, onStage = () => {}) {
     console.log("[jobright] ← OpenAI answer:\n" + (text || "(empty)"));
 
     if (!text) return { ok: false, error: "the model returned an empty answer" };
-
-    onStage("building");
-    let parsed;
-    try {
-      parsed = parseModelAnswer(text);
-    } catch (err) {
-      // Keep the raw answer on the result so a malformed reply can be read in
-      // the panel instead of only being described.
-      return { ok: false, error: err.message, raw: text };
-    }
-
-    const { html, warnings } = buildResumeHtml(template, parsed);
-    if (!parsed.coverletter) warnings.push("no cover letter in the answer (cover_letter)");
-
-    return {
-      ok: true,
-      html,
-      coverletter: parsed.coverletter,
-      data: parsed,
-      raw: text,
-      warnings,
-      model: data?.model || writer.model
-    };
+    return { ok: true, text, model: data?.model || writer.model };
   } catch (err) {
     if (signal?.aborted) return { ok: false, stopped: true, error: STOPPED };
     return {
@@ -2800,6 +3179,79 @@ async function generateResume(writer, detail, signal, onStage = () => {}) {
             : `${err?.message || err}`
     };
   }
+}
+
+// `onStage` hears "waiting" as the request goes out and "building" once the
+// answer is back and being laid into the template — the two halves of the
+// wait the panel shows against the job.
+async function generateResume(writer, detail, signal, onStage = () => {}) {
+  if (writer.aiMethod !== "auto" && !writer.apiKey) {
+    return { ok: false, skipped: true, error: "no API key set — add it under ChatGPT Settings (the GPT button)" };
+  }
+  // The model is given the readable text, not the markup: the HTML is chrome
+  // it would have to pay tokens to ignore. The markup still goes to job_des.
+  const description = detail.descriptionText;
+  if (!description) {
+    return { ok: false, skipped: true, error: "no description was read from the page" };
+  }
+
+  let template;
+  const styleWarnings = [];
+  try {
+    template = await loadTemplate(writer.resumeStyle, writer.profileId, (msg) => styleWarnings.push(msg));
+  } catch (err) {
+    return { ok: false, error: err?.message || String(err) };
+  }
+
+  // The prompt goes out exactly as it was typed — nothing is appended to it.
+  // The user message carries the two inputs, each under its own heading so the
+  // model cannot mistake the candidate's resume for part of the job posting.
+  // With the profile's master resume switched off, or none set, the job
+  // description goes out on its own.
+  const useMaster = writer.masterResumeMode !== "none";
+  const masterResume = useMaster ? (writer.masterResume || "").trim() : "";
+  const userContent = masterResume
+    ? `=== JOB DESCRIPTION ===\n${description}\n\n=== MASTER RESUME ===\n${masterResume}`
+    : description;
+  if (!useMaster) {
+    console.log(`[jobright] ${writer.name}: master resume switched off — sending the job description only`);
+  } else if (!masterResume) {
+    console.warn(`[jobright] ${writer.name}: no master resume set in User Settings — sending the job description only`);
+  }
+
+  const messages = [
+    { role: "system", content: writer.prompt },
+    { role: "user", content: userContent }
+  ];
+
+  onStage("waiting");
+  const reply = await completeChat(writer, messages, signal);
+  if (!reply.ok) return reply;
+  const text = reply.text;
+
+  onStage("building");
+  let parsed;
+  try {
+    parsed = parseModelAnswer(text);
+  } catch (err) {
+    // Keep the raw answer on the result so a malformed reply can be read in
+    // the panel instead of only being described.
+    return { ok: false, error: err.message, raw: text };
+  }
+
+  const { html, warnings } = buildResumeHtml(template, parsed);
+  warnings.unshift(...styleWarnings);
+  if (!parsed.coverletter) warnings.push("no cover letter in the answer (cover_letter)");
+
+  return {
+    ok: true,
+    html,
+    coverletter: parsed.coverletter,
+    data: parsed,
+    raw: text,
+    warnings,
+    model: reply.model
+  };
 }
 
 // fetch() rejects with a bare TypeError when no response arrives at all —
@@ -2869,6 +3321,21 @@ async function testConnection(apiKey, model) {
           : `${err?.message || err}`
     };
   }
+}
+
+// Auto's Test connection: the same fixed message, but asked of ChatGPT in a
+// tab rather than the API — see askChatGptTab, under "ChatGPT, driven as a
+// tab" below.
+async function testAutoConnection(chatgptModel, chatgptSession) {
+  chatgptModel = String(chatgptModel || "").trim();
+  chatgptSession = chatgptSession === "work" ? "work" : "chat";
+  if (!chatgptModel) return { ok: false, error: "no model given" };
+
+  console.log(`[jobright] → ChatGPT (auto) test · ${chatgptSession}/${chatgptModel}`, { message: TEST_MESSAGE });
+  const result = await askChatGptTab(TEST_MESSAGE, { sessionMode: chatgptSession, modelLabel: chatgptModel, timeoutMs: TEST_TIMEOUT_MS });
+  if (!result.ok) return { ok: false, error: result.error };
+  console.log("[jobright] ← ChatGPT (auto) test reply:\n" + (result.text || "(empty)"));
+  return { ok: true, reply: result.text, model: chatgptModel };
 }
 
 // ---------------------------------------------------------------------------
@@ -2968,6 +3435,9 @@ async function saveJob(job, detail, resume, signal, user) {
     coverletter: wrapCoverLetter(resume?.coverletter),
     company: job.company,
     job_title: job.title,
+    // How well the model scored this resume against the job description —
+    // shown on the dashboard now too, not only on the feed card.
+    ats_score: resume?.data?.atsScore || null,
     user
   };
 
@@ -3848,13 +4318,15 @@ async function preflight(options = {}) {
   for (const profile of profiles) {
     const writer = writerFor(settings, profile);
     try {
-      await loadTemplate(writer.resumeStyle, profile.id);
+      let styleFallback = null;
+      await loadTemplate(writer.resumeStyle, profile.id, (msg) => (styleFallback = msg));
       const noMaster = writer.masterResumeMode !== "none" && !String(writer.masterResume || "").trim();
+      const problems = [styleFallback, noMaster ? "no master resume set — the job description goes out on its own" : null].filter(Boolean);
       add(
         `resume:${profile.id}`,
         `Resume · ${profile.name}`,
-        noMaster ? "warn" : "ok",
-        noMaster ? `style ${writer.resumeStyle} · no master resume set — the job description goes out on its own` : `style ${writer.resumeStyle}`
+        problems.length ? "warn" : "ok",
+        problems.length ? `style ${writer.resumeStyle} · ${problems.join(" · ")}` : `style ${writer.resumeStyle}`
       );
     } catch (err) {
       add(`resume:${profile.id}`, `Resume · ${profile.name}`, "fail", err?.message || String(err));
@@ -4001,12 +4473,14 @@ async function handle(msg) {
     case "SET_SETTINGS":
       return { ok: true, settings: await setSettings(msg.patch) };
 
-    // Every profile, and the styles each has added: { [profileId]: [{ name }] }.
+    // Every profile, and the styles added so far — the same list for every
+    // profile, since an added style is shared by all of them:
+    // { [profileId]: [{ name }] }.
     case "GET_PROFILES": {
       const list = await listProfiles();
       if (!list.ok) return list;
-      const { profileStyles = {} } = await chrome.storage.local.get("profileStyles");
-      const styles = Object.fromEntries(list.profiles.map((p) => [p.id, listCustomStyles(profileStyles[p.id] || {})]));
+      const shared = listCustomStyles(await getProfileStyles());
+      const styles = Object.fromEntries(list.profiles.map((p) => [p.id, shared]));
       return { ...list, styles };
     }
 
@@ -4026,7 +4500,9 @@ async function handle(msg) {
       return { ok: true, ...(await removeCustomStyle(msg.profileId, msg.name)) };
 
     case "TEST_CONNECTION":
-      return await testConnection(msg.apiKey, msg.model);
+      return msg.method === "auto"
+        ? await testAutoConnection(msg.chatgptModel, msg.chatgptSession)
+        : await testConnection(msg.apiKey, msg.model);
 
     // The models the given key can use, asked of OpenAI and kept.
     case "LIST_MODELS":

@@ -4,7 +4,7 @@ import { hintFor } from '../lib/sheetSyncHints.js';
 
 // Kept in sync with the <th> list in the table below -- an error banner
 // spans every column, so it needs to know how many there are.
-const COLUMN_COUNT = 9;
+const COLUMN_COUNT = 10;
 
 // The .docx is written beside the resume PDF and deleted with it, but it is not
 // offered here: the PDF is the copy to read, and a second link to the same
@@ -449,6 +449,7 @@ export default function RecordsTable({
                 <th scope="col">Received</th>
                 <th scope="col">Company</th>
                 <th scope="col">Job title</th>
+                <th scope="col">ATS</th>
                 <th scope="col">Documents</th>
                 <th scope="col">Stored in</th>
                 <th scope="col" />
@@ -549,6 +550,7 @@ export default function RecordsTable({
                         </div>
                         {record.error ? <div className="sub bad">{record.error}</div> : null}
                       </td>
+                      <td className="num">{record.ats_score ?? '—'}</td>
                       <td className="nowrap">
                         {docs.map(([kind, label]) => (
                           <a

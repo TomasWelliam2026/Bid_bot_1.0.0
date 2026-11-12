@@ -23,6 +23,16 @@ function logoUrl(file) {
 }
 const LOGO = logoUrl("logo.png");
 const LOGO_DARK = logoUrl("logo-dark.png") || LOGO;
+// Octo Browser's and Chrome's own icons — wherever the bar names one of them
+// (the Octo Settings button, and each profile row's browser label), rather
+// than a hand-drawn stand-in or the name alone.
+const OCTO_ICON = logoUrl("octo-browser-icon.png");
+const CHROME_ICON = logoUrl("chrome-icon.png");
+// A plain black silhouette of the same icon, for the Octo Settings button —
+// that button follows the other icon buttons' own look (a line glyph in
+// --muted, --accent once picked), so a full-colour image there would be the
+// odd one out; a CSS mask lets the one glyph still be recolored the same way.
+const OCTO_MASK = logoUrl("octo-browser-mask.png");
 
 // ---------------------------------------------------------------------------
 // chrome.*, as the panel calls it
@@ -132,6 +142,10 @@ const BAR_CSS = `
   font-family: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
   -webkit-app-region: drag;
   user-select: none;
+  /* Pinned at the top of the window, above whatever scrolls below it. */
+  position: sticky;
+  top: 0;
+  z-index: 21;
 }
 #bidbot-titlebar .bt-logo {
   flex: none;
@@ -208,15 +222,25 @@ const BAR_CSS = `
 }
 #linkPanel .lp-head { margin-bottom: 6px; }
 #linkPanel .lp-head .field-label { margin: 0; }
-#linkPanel .lp-section { margin: 8px 0 4px; font-size: 12px; font-weight: 700; color: var(--text, inherit); }
-#linkPanel .lp-octo { display: grid; gap: var(--gap, 8px); margin-bottom: var(--gap, 8px); }
-#linkPanel .lp-octo input { display: block; width: 100%; margin: 3px 0 0; box-sizing: border-box; }
-#linkPanel .lp-octo button { height: var(--control, 32px); }
 #linkPanel .lp-row { padding: 5px 0; border-top: 1px solid var(--line-soft, #e6e6ee); }
-#linkPanel .lp-name { min-width: 0; font-size: 12.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#linkPanel .lp-browser { display: block; font-size: 11px; font-weight: 400; color: var(--muted, #767685); }
+/* Octo Browser's or Chrome's own icon stands for the name now — no "Octo
+   Browser" / "Google Chrome" text label beneath the profile's own name. */
+#linkPanel .lp-name { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 12.5px; font-weight: 600; }
+#linkPanel .lp-name-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#linkPanel .lp-browser-icon { flex: none; width: 16px; height: 16px; border-radius: 3px; }
 #linkPanel select { width: 100%; min-width: 0; }
 #linkPanel .form-actions { margin-top: 10px; }
+/* Shown in linkPanel while it is still loading (fillLinkPanel's own awaits —
+   Octo's profiles, the running browsers, the bid profiles) — the panel is
+   otherwise simply blank for that stretch, which reads as broken rather
+   than as "still coming". */
+#linkPanel .lp-loading { display: flex; align-items: center; gap: 8px; padding: 14px 2px; color: var(--muted, #767685); font-size: 12.5px; }
+#linkPanel .lp-spinner { flex: none; width: 15px; height: 15px; border: 2px solid var(--line, #d8d8e2); border-top-color: var(--accent, #6b4eff); border-radius: 50%; animation: lp-spin 0.7s linear infinite; }
+@keyframes lp-spin { to { transform: rotate(360deg); } }
+/* Octo Settings' Save/Load row, as the two columns above it rather than
+   each button its own width. */
+.octo-actions { margin-top: 10px; }
+.octo-actions button { width: 100%; }
 body > .gpt-panel {
   flex: none;
   max-height: 70vh;
@@ -265,6 +289,11 @@ body > .gpt-panel {
   border-bottom: 1px solid var(--line, #dcdce6);
   font: 12px/1.4 system-ui, "Segoe UI", sans-serif;
   color: var(--fg, #1d1d27);
+  /* Pinned right below the title bar, so both stay in view as the panel
+     below scrolls. */
+  position: sticky;
+  top: 56px;
+  z-index: 20;
 }
 /* Who the bot is working as, with the way to connect at the row's end. */
 #bidbot-bar .bb-who {
@@ -380,21 +409,60 @@ body > .gpt-panel {
   background: var(--accent, #6a5fdb);
   border-color: var(--accent, #6a5fdb);
 }
-#bidbot-bar .bb-rescan,
+#bidbot-bar .bb-octo-settings,
 #bidbot-bar .bb-user,
 #bidbot-bar .bb-gpt,
 #bidbot-bar .bb-link,
-#bidbot-bar .bb-pin { width: 100%; min-width: 0; padding: 0; font-size: 14px; }
+#bidbot-bar .bb-pin {
+  width: 100%;
+  /* A bit taller than the row's other, text-labelled buttons — the bigger
+     icons below need the room, not just more icon crammed into the same
+     32px. */
+  height: 38px;
+  min-width: 0;
+  padding: 0;
+  font-size: 14px;
+}
 #bidbot-bar .bb-pin svg,
+#bidbot-bar .bb-octo-settings .bb-octo-mask,
 #bidbot-bar .bb-user svg,
 #bidbot-bar .bb-gpt svg,
 #bidbot-bar .bb-link svg { display: block; margin: auto; }
+/* The Octo mascot's own silhouette, as a CSS mask rather than a full-colour
+   image — a plain glyph in the same colour as the other icon buttons
+   (currentColor, via --fg), --accent once picked, the same as theirs (see
+   [aria-expanded="true"] below). */
+#bidbot-bar .bb-octo-mask {
+  width: 24px;
+  height: 24px;
+  background-color: var(--fg, #1d1d27);
+  -webkit-mask-image: var(--octo-mask-image);
+  mask-image: var(--octo-mask-image);
+  -webkit-mask-size: contain;
+  mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+}
+#bidbot-bar button.bb-octo-settings[aria-expanded="true"] .bb-octo-mask { background-color: var(--accent, #6a5fdb); }
+#bidbot-bar button.bb-octo-settings[aria-expanded="true"],
 #bidbot-bar button.bb-user[aria-expanded="true"],
 #bidbot-bar button.bb-link[aria-expanded="true"],
 #bidbot-bar button.bb-gpt[aria-expanded="true"] {
   color: var(--accent, #6a5fdb);
   background: var(--accent-soft, #ece9fb);
   border-color: var(--accent-line, #c7bff3);
+}
+/* Moved into .bb-who, left of Connect — a plain icon-sized square there,
+   same height as Connect beside it rather than .bb-tools' 1/5-column share. */
+#bidbot-bar .bb-who .bb-rescan {
+  flex: none;
+  width: var(--control, 32px);
+  height: var(--control, 32px);
+  min-width: 0;
+  padding: 0;
+  font-size: 14px;
 }
 #bidbot-bar button.bb-pin[aria-pressed="true"] {
   color: var(--accent, #6a5fdb);
@@ -463,30 +531,33 @@ function buildBar() {
     <span class="bb-dot" aria-hidden="true"></span>
     <div class="bb-browsers" role="radiogroup" aria-label="Browser profile to work in"></div>
     <span class="bb-browser-name"></span>
+    <button type="button" class="bb-rescan" title="Look for running browsers again" aria-label="Look for running browsers again">↻</button>
     <button type="button" class="bb-connect bb-primary">Connect</button>
     </div>
     <div class="bb-tools">
-    <button type="button" class="bb-rescan" title="Look for running browsers again" aria-label="Look for running browsers again">↻</button>
+    <button type="button" class="bb-octo-settings" title="Octo Browser Settings" aria-label="Octo Browser Settings" aria-expanded="false" aria-controls="octoPanel">
+      <span class="bb-octo-mask" aria-hidden="true" style="--octo-mask-image: url('${OCTO_MASK}')"></span>
+    </button>
     <button type="button" class="bb-user" title="User Settings" aria-label="User Settings" aria-expanded="false" aria-controls="userPanel">
-      <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false" fill="none"
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false" fill="none"
            stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <circle cx="9" cy="7" r="4"/><path d="M2 21v-1a6 6 0 0 1 6-6h3"/><circle cx="18" cy="17" r="2.5"/><path d="M18 12.5v2M18 19.5v2M13.5 17h2M20.5 17h2M14.8 13.8l1.4 1.4M19.8 18.8l1.4 1.4M14.8 20.2l1.4-1.4M19.8 15.2l1.4-1.4"/>
       </svg>
     </button>
     <button type="button" class="bb-gpt" title="ChatGPT Settings" aria-label="ChatGPT Settings" aria-expanded="false" aria-controls="gptPanel">
-      <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false" fill="currentColor">
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false" fill="currentColor">
         <path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z"/>
       </svg>
     </button>
     <button type="button" class="bb-link" title="Browser Profile" aria-label="Browser Profile" aria-expanded="false" aria-controls="linkPanel">
-      <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false" fill="none"
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false" fill="none"
            stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/>
         <path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/>
       </svg>
     </button>
     <button type="button" class="bb-pin" aria-pressed="true" title="Keep this window above other windows" aria-label="Pin on top">
-      <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false" fill="none"
+      <svg viewBox="0 0 24 24" width="19" height="19" aria-hidden="true" focusable="false" fill="none"
            stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M12 17v5"/>
         <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/>
@@ -508,7 +579,10 @@ function buildBar() {
     after = panel;
     new MutationObserver(() => {
       button.setAttribute("aria-expanded", String(!panel.hidden));
-      if (!panel.hidden) showLinkPanel(false); // one panel at a time
+      if (!panel.hidden) {
+        showLinkPanel(false); // one panel at a time
+        showOctoPanel(false);
+      }
     }).observe(panel, { attributes: true, attributeFilter: ["hidden"] });
   }
 
@@ -546,15 +620,17 @@ function buildBar() {
   // Browser profile -> bid profile, by circle key. With any profile linked,
   // only linked ones get a circle, within Chrome and within Octo Browser each:
   // a folder can hold many profiles. A running Octo profile always has one.
+  // An Octo profile that is not actually running has no real connection to
+  // pick, so it never gets a circle here, linked or not.
   let links = {};
   const profileItems = (list) => {
-    const items = allProfileItems(list);
+    const items = allProfileItems(list).filter((item) => !(item.c.octo && item.c.closed));
     const keys = Object.keys(links);
     const narrowed = keys.some((key) => !key.startsWith("octo:"));
     const octoNarrowed = keys.some((key) => key.startsWith("octo:"));
     return items.filter((item) => {
       const linked = links[item.key] != null;
-      return item.c.octo ? !octoNarrowed || linked || !item.c.closed : !narrowed || linked;
+      return item.c.octo ? !octoNarrowed || linked : !narrowed || linked;
     });
   };
   function allProfileItems(list) {
@@ -731,6 +807,17 @@ function buildBar() {
   linkPanel.hidden = true;
   (document.getElementById("gptPanel") || bar).after(linkPanel);
 
+  // Octo Browser Settings: its own panel, opened by the Octo button in the
+  // title bar — the API token and folder name used to live inside Browser
+  // Profile (linkPanel) itself; pulled out so each button opens exactly one
+  // thing, the way the others do.
+  const octoButton = bar.querySelector(".bb-octo-settings");
+  const octoPanel = document.createElement("div");
+  octoPanel.id = "octoPanel";
+  octoPanel.className = "form gpt-panel";
+  octoPanel.hidden = true;
+  linkPanel.after(octoPanel);
+
   // Bid profiles grouped by country, as a dropdown's options.
   function bidOptions(select, bidProfiles, current) {
     select.append(new Option("— Not linked —", ""));
@@ -758,55 +845,146 @@ function buildBar() {
     return p;
   }
 
-  // The API token and folder names. Load saves them and reads the list again.
-  function octoSettings(octo) {
+  function linkNote(text) {
+    const p = linkMessage(text);
+    p.className = "hint";
+    return p;
+  }
+
+  // A note confirming something actually succeeded — the green check mark
+  // .hint.saved carries everywhere else in the panel (Save on the other
+  // settings forms, Load models), not plain neutral text.
+  function linkSaved(text) {
+    const p = linkMessage(text);
+    p.className = "hint saved";
+    return p;
+  }
+
+  // The API token and folder names, side by side. Save Octo Settings keeps
+  // them; Load profiles reads the list again with what is saved. What is
+  // typed and not yet saved survives a Load.
+  function octoSettings(octo, draft = {}) {
     const form = document.createElement("div");
-    form.className = "lp-octo";
+    // The same two-column field-row every other settings panel uses (see
+    // #gptApiFields in sidepanel.html) — each field its own label-over-input
+    // column, not the plain inline pairing this form started with.
+    const row = (...children) => {
+      const div = document.createElement("div");
+      div.className = "field-row";
+      div.append(...children);
+      form.append(div);
+    };
     const field = (text, input) => {
+      const wrap = document.createElement("div");
       const label = document.createElement("label");
       label.className = "field-label";
+      label.htmlFor = input.id;
       label.textContent = text;
-      label.append(input);
-      form.append(label);
+      wrap.append(label, input);
+      return wrap;
     };
     const token = document.createElement("input");
+    token.id = "octoToken";
     token.type = "password";
     token.autocomplete = "off";
-    token.placeholder = octo.hasToken ? "Saved — leave blank to keep it" : "From Octo Browser's settings";
-    field("Octo API token", token);
-    const folders = document.createElement("input");
-    folders.type = "text";
-    folders.autocomplete = "off";
-    folders.placeholder = "e.g. Brazil, US";
-    folders.value = octo.folders || "";
-    field("Folder names, separated by commas", folders);
+    token.spellcheck = false;
+    token.placeholder = "From Octo's settings";
+    token.value = draft.token ?? (octo.token || "");
 
-    const load = document.createElement("button");
-    load.type = "button";
-    load.textContent = "Load profiles";
+    // The folders Octo's own API actually has for this token (loaded with
+    // it, in app:octoRefresh) — picked from, the same plain dropdown as the
+    // Bid profile field below, rather than typed and matched by hand. A
+    // saved name the list does not carry (the token changed, or the fetch
+    // failed) stays offered and picked, so it is not silently dropped out
+    // from under the saved setting.
+    const savedNames = String(draft.folders ?? (octo.folders || ""))
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const names = [...new Set([...(octo.allFolders || []).map((f) => f.name), ...savedNames])].sort((a, b) => a.localeCompare(b));
+    const folders = document.createElement("select");
+    folders.id = "octoFolder";
+    folders.append(new Option(names.length ? "— Select —" : "No folders found — save a token first", ""));
+    for (const name of names) folders.append(new Option(name, name));
+    if (savedNames[0] && names.includes(savedNames[0])) folders.value = savedNames[0];
+    const readFolders = () => folders.value;
+    row(field("Octo API token", token), field("Folder name", folders));
+
+    const button = (text, primary) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      if (primary) b.className = "primary";
+      b.textContent = text;
+      return b;
+    };
+    const save = button("Save Octo Settings", true);
+    const load = button("Load profiles");
+    // The same two columns as the token/folder fields above (field-row),
+    // not a flex row sized by each button's own text — so Save lines up
+    // under the token field and Load profiles under the folder field,
+    // rather than Save simply being wider because its label is longer.
+    const actions = document.createElement("div");
+    actions.className = "field-row octo-actions";
+    actions.append(save, load);
+    form.append(actions);
+    const note = document.createElement("div");
+    form.append(note);
+    const say = (...lines) => note.replaceChildren(...lines);
+
+    save.addEventListener("click", async () => {
+      save.disabled = true;
+      const reply = await ipcRenderer.invoke("app:saveOcto", { token: token.value.trim(), folders: readFolders() });
+      save.disabled = false;
+      if (!reply.ok) return say(linkMessage(reply.error));
+      say(linkSaved("Octo settings saved. Click Load profiles to see their profiles."));
+    });
     load.addEventListener("click", async () => {
       load.disabled = true;
       load.textContent = "Loading…";
-      await ipcRenderer.invoke("app:saveOcto", { token: token.value.trim(), folders: folders.value.trim() });
-      await fillLinkPanel();
+      await fillOctoPanel({ token: token.value, folders: readFolders() });
+      // Browser Profile's own table reads the saved folder too — kept in
+      // step if it is open; if not, it reads fresh next time it is.
+      if (!linkPanel.hidden) await fillLinkPanel();
     });
-    form.append(load);
 
-    if (octo.error) form.append(linkMessage(octo.error));
-    if (octo.missing?.length) form.append(linkMessage(`No folder named ${octo.missing.join(", ")}.`));
+    const unsaved =
+      (draft.token !== undefined && draft.token.trim() !== (octo.token || "")) ||
+      (draft.folders !== undefined && draft.folders.trim() !== (octo.folders || ""));
+    say(
+      ...[
+        octo.error && linkMessage(octo.error),
+        octo.missing?.length && linkMessage(`No folder named ${octo.missing.join(", ")}.`),
+        unsaved && linkMessage("Not saved yet — the list below uses the saved settings."),
+        octo.ok && octo.count === null && linkNote("Save a token and a folder name, then click Load profiles."),
+        octo.ok && octo.count !== null && linkSaved(`${octo.count} profile${octo.count === 1 ? "" : "s"} in ${octo.folders}.`)
+      ].filter(Boolean)
+    );
     return form;
   }
 
+  function loadingSpinner(text) {
+    const row = document.createElement("div");
+    row.className = "lp-loading";
+    const spinner = document.createElement("span");
+    spinner.className = "lp-spinner";
+    spinner.setAttribute("aria-hidden", "true");
+    row.append(spinner, document.createTextNode(text));
+    return row;
+  }
+
   async function fillLinkPanel() {
-    linkPanel.replaceChildren();
+    linkPanel.replaceChildren(loadingSpinner("Loading Octo and browser profiles…"));
     // What is running now, and what Octo has ready, Octo's profiles first.
     const octo = await ipcRenderer.invoke("app:octoRefresh");
     const scan = await ipcRenderer.invoke("app:scan");
     fillChoices(scan.choices, chosen && scan.choices.some((c) => c.id === chosen) ? chosen : scan.choice);
     const rows = allProfileItems(choices).filter((item) => item.c.mode === "attach");
-    const octoRows = rows.filter((item) => item.c.octo);
+    // Only the Octo profiles actually running now — one not open has no tab
+    // to link a bid profile to yet, and only clutters the list until it is.
+    const octoRows = rows.filter((item) => item.c.octo && !item.c.closed);
     const browserRows = rows.filter((item) => !item.c.octo);
     const reply = await ipcRenderer.invoke("rt:send", { type: "GET_PROFILES" }).catch((err) => ({ ok: false, error: err.message }));
+    linkPanel.replaceChildren(); // the loading spinner's done its job
     if (!reply?.ok) return linkPanel.append(linkMessage(`Could not load the bid profiles: ${reply?.error || "no answer"}`));
 
     const head = document.createElement("div");
@@ -818,23 +996,33 @@ function buildBar() {
       head.append(label);
     }
     const selects = new Map();
-    const section = (text) => {
-      const title = document.createElement("p");
-      title.className = "lp-section";
-      title.textContent = text;
-      linkPanel.append(title);
+    // The browser's own icon stands for "Octo Browser" / "Google Chrome"
+    // now — not Edge, Brave, or one of Chrome's own other channels
+    // (Beta/Dev/Canary), which still get the name itself, as before.
+    const browserIcon = (c) => {
+      const browserLabel = fullName(c);
+      return browserLabel === "Octo Browser" ? OCTO_ICON : browserLabel === "Google Chrome" ? CHROME_ICON : "";
     };
     const addRow = (item) => {
       const row = document.createElement("div");
       row.className = "lp-row";
       const name = document.createElement("span");
       name.className = "lp-name";
-      name.textContent = item.name;
       name.title = item.name;
-      const browserName = document.createElement("span");
-      browserName.className = "lp-browser";
-      browserName.textContent = fullName(item.c);
-      name.append(browserName);
+      const browserLabel = fullName(item.c);
+      const icon = browserIcon(item.c);
+      if (icon) {
+        const img = document.createElement("img");
+        img.src = icon;
+        img.alt = browserLabel;
+        img.title = browserLabel;
+        img.className = "lp-browser-icon";
+        name.append(img);
+      }
+      const nameText = document.createElement("span");
+      nameText.className = "lp-name-text";
+      nameText.textContent = item.name;
+      name.append(nameText);
       const select = document.createElement("select");
       select.setAttribute("aria-label", `Bid profile for ${item.name}`);
       bidOptions(select, reply.profiles, links[item.key]);
@@ -843,12 +1031,19 @@ function buildBar() {
       linkPanel.append(row);
     };
 
-    section("Octo Browser");
-    linkPanel.append(octoSettings(octo));
     if (octoRows.length || browserRows.length) linkPanel.append(head);
     if (octoRows.length) octoRows.forEach(addRow);
-    else linkPanel.append(linkMessage(octo.count === 0 ? "Those folders have no profiles." : "No Octo Browser profile to show."));
-    section("Chrome");
+    else {
+      linkPanel.append(
+        linkMessage(
+          octo.count === 0
+            ? "Those folders have no profiles."
+            : octo.folders
+              ? "No Octo Browser profile is running — start one in Octo Browser."
+              : "No folder set — open Octo Browser Settings (the Octo button) to pick one."
+        )
+      );
+    }
     if (browserRows.length) browserRows.forEach(addRow);
     else linkPanel.append(linkMessage("No browser profile is open."));
 
@@ -877,18 +1072,85 @@ function buildBar() {
     linkPanel.append(actions);
   }
 
+  // Same slide as the extension's own settings panels (sidepanel.js's
+  // setPanelVisible, duplicated here since this script and that one never
+  // share scope) — linkPanel carries the same .gpt-panel class, and so the
+  // same CSS transition, as gptPanel/userPanel/searchPanel.
+  function setPanelVisible(el, open) {
+    if (open) {
+      el.hidden = false;
+      el.classList.add("slide-animating");
+      el.style.maxHeight = "0px";
+      void el.offsetHeight;
+      const target = el.scrollHeight;
+      el.classList.add("slide-open");
+      el.style.maxHeight = `${target}px`;
+      el.addEventListener(
+        "transitionend",
+        () => {
+          el.classList.remove("slide-animating");
+          el.style.maxHeight = "none";
+        },
+        { once: true }
+      );
+    } else {
+      if (el.hidden) return;
+      el.classList.add("slide-animating");
+      el.style.maxHeight = `${el.scrollHeight}px`;
+      void el.offsetHeight;
+      el.classList.remove("slide-open");
+      el.style.maxHeight = "0px";
+      el.addEventListener(
+        "transitionend",
+        () => {
+          el.classList.remove("slide-animating");
+          el.hidden = true;
+          el.style.maxHeight = "";
+        },
+        { once: true }
+      );
+    }
+  }
+
   function showLinkPanel(open) {
-    linkPanel.hidden = !open;
     linkButton.setAttribute("aria-expanded", String(open));
-    if (!open) return;
+    if (!open) {
+      setPanelVisible(linkPanel, open);
+      return;
+    }
     for (const [panelId, panelButton] of [["gptPanel", "openChatgpt"], ["userPanel", "openUserSettings"], ["searchPanel", "openSearch"]]) {
       const panel = document.getElementById(panelId);
       if (panel && !panel.hidden) document.getElementById(panelButton)?.click();
     }
+    showOctoPanel(false);
     fillLinkPanel();
+    setPanelVisible(linkPanel, open);
   }
 
   linkButton.addEventListener("click", () => showLinkPanel(linkPanel.hidden));
+
+  async function fillOctoPanel(draft) {
+    octoPanel.replaceChildren(loadingSpinner("Loading Octo Browser settings…"));
+    const octo = await ipcRenderer.invoke("app:octoRefresh");
+    octoPanel.replaceChildren(octoSettings(octo, draft));
+  }
+
+  function showOctoPanel(open) {
+    octoButton.setAttribute("aria-expanded", String(open));
+    if (!open) {
+      setPanelVisible(octoPanel, open);
+      return;
+    }
+    for (const [panelId, panelButton] of [["gptPanel", "openChatgpt"], ["userPanel", "openUserSettings"], ["searchPanel", "openSearch"]]) {
+      const panel = document.getElementById(panelId);
+      if (panel && !panel.hidden) document.getElementById(panelButton)?.click();
+    }
+    showLinkPanel(false);
+    fillOctoPanel();
+    setPanelVisible(octoPanel, open);
+  }
+
+  octoButton.addEventListener("click", () => showOctoPanel(octoPanel.hidden));
 
   // The panel's Recruiter Bid list follows the bid profile.
   const profileChanged = () => window.dispatchEvent(new Event("bidbot-profile-changed"));
@@ -898,7 +1160,10 @@ function buildBar() {
   const searchPanel = document.getElementById("searchPanel");
   if (searchPanel) {
     new MutationObserver(() => {
-      if (!searchPanel.hidden) showLinkPanel(false);
+      if (!searchPanel.hidden) {
+        showLinkPanel(false);
+        showOctoPanel(false);
+      }
     }).observe(searchPanel, { attributes: true, attributeFilter: ["hidden"] });
   }
 

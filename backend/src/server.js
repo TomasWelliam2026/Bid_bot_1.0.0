@@ -125,6 +125,10 @@ app.post('/save-data', async (req, res) => {
   const company = String(body.company || '').trim();
   const jobTitle = String(body.job_title || '').trim();
   const jobUrl = String(body.job_url || '').trim();
+  // How well the model scored this resume against the job — the extension's
+  // own name for it; kept as the sender sent it (a bare number as a string),
+  // not parsed, since it is only ever displayed, never computed with.
+  const atsScore = String(body.ats_score ?? '').trim() || null;
   const documents = {
     job_des: body.job_des || '',
     // `coverletter` is what the sender calls it; `cover` is the older name for the
@@ -181,6 +185,7 @@ app.post('/save-data', async (req, res) => {
     mode,
     createdAt: date ? date.toISOString() : undefined,
     sent,
+    atsScore,
   });
 
   if (!auto) {

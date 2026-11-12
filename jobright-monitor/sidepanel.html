@@ -75,32 +75,87 @@
            app, by the one in its title bar, and shown beneath that), closed
            by its own Save. -->
       <div id="gptPanel" class="form gpt-panel" hidden>
-        <label class="field-label" for="apiKey">OpenAI API key</label>
-        <input id="apiKey" type="password" autocomplete="off" spellcheck="false"
-               placeholder="sk-…">
-        <!-- Until the key's own models are loaded, a built-in list; once they
-             are, exactly the models this key can use (sidepanel.js
-             renderModels replaces these options). -->
-        <label class="field-label" for="model">Model</label>
-        <select id="model">
-          <option value="gpt-4o-mini">gpt-4o-mini — fast and cheap</option>
-          <option value="gpt-4o">gpt-4o — stronger writing</option>
-          <option value="gpt-4.1-mini">gpt-4.1-mini</option>
-          <option value="gpt-4.1">gpt-4.1</option>
-          <option value="gpt-4-turbo">gpt-4-turbo</option>
-          <option value="gpt-5.6-sol">gpt-5.6-sol</option>
-          <option value="gpt-5.6-terra">gpt-5.6-terra</option>
-          <option value="__custom__">Custom…</option>
-        </select>
-        <input id="modelCustom" type="text" autocomplete="off" spellcheck="false"
-               placeholder="model id, e.g. gpt-4o-2024-11-20" hidden>
-        <div class="controls test-actions">
-          <button id="loadModels" type="button">Load models</button>
-          <p id="modelsStatus" class="hint" hidden></p>
+        <!-- API asks OpenAI's Chat Completions endpoint with a key, same as
+             always. Auto drives ChatGPT itself in a browser tab instead —
+             no key, but that tab has to be open and signed in. -->
+        <div id="gptMethodSwitch" class="mode-switch" role="radiogroup" aria-label="How Bid Bot asks ChatGPT">
+          <button id="gpt-method-api" class="mode" type="button" role="radio" aria-checked="true" tabindex="0">API</button>
+          <button id="gpt-method-auto" class="mode" type="button" role="radio" aria-checked="false" tabindex="-1">Auto</button>
         </div>
+
+        <div id="gptApiFields">
+          <div class="field-row">
+            <div>
+              <label class="field-label" for="apiKey">OpenAI API key</label>
+              <input id="apiKey" type="password" autocomplete="off" spellcheck="false"
+                     placeholder="sk-…">
+            </div>
+            <div>
+              <!-- Until the key's own models are loaded, a built-in list; once
+                   they are, exactly the models this key can use (sidepanel.js
+                   renderModels replaces these options). -->
+              <label class="field-label" for="model">Model</label>
+              <select id="model">
+                <option value="gpt-4o-mini">gpt-4o-mini — fast and cheap</option>
+                <option value="gpt-4o">gpt-4o — stronger writing</option>
+                <option value="gpt-4.1-mini">gpt-4.1-mini</option>
+                <option value="gpt-4.1">gpt-4.1</option>
+                <option value="gpt-4-turbo">gpt-4-turbo</option>
+                <option value="gpt-5.6-sol">gpt-5.6-sol</option>
+                <option value="gpt-5.6-terra">gpt-5.6-terra</option>
+                <option value="__custom__">Custom…</option>
+              </select>
+            </div>
+          </div>
+          <input id="modelCustom" type="text" autocomplete="off" spellcheck="false"
+                 placeholder="model id, e.g. gpt-4o-2024-11-20" hidden>
+        </div>
+
+        <div id="gptAutoFields" hidden>
+          <div class="field-row">
+            <div>
+              <label class="field-label" for="chatgptSession">ChatGPT session</label>
+              <select id="chatgptSession">
+                <option value="chat">Chat</option>
+                <option value="work">Work</option>
+              </select>
+            </div>
+            <div>
+              <!-- Each session offers a different set of models, picked from
+                   ChatGPT's own new-chat screen (sidepanel.js swaps the
+                   options below to match); Custom… always stays available
+                   since the account's own list can differ from what shipped
+                   here. -->
+              <label class="field-label" for="chatgptModel">ChatGPT model</label>
+              <select id="chatgptModel"></select>
+            </div>
+          </div>
+          <input id="chatgptModelCustom" type="text" autocomplete="off" spellcheck="false"
+                 placeholder="e.g. GPT-6.1 Terra — as ChatGPT's model picker shows it" hidden>
+        </div>
+
+        <!-- Each result's own line, left of the buttons that make it — Load
+             models (API only, hidden in Auto, see sidepanel.js's
+             setGptMethod) and Test connection (both) — so the row holding
+             them keeps its height however short or long either result is. -->
         <div class="controls test-actions">
-          <button id="testConnection" type="button">Test connection</button>
-          <p id="testStatus" class="hint" hidden></p>
+          <div class="test-status-col">
+            <p id="modelsStatus" class="hint" hidden></p>
+            <p id="testStatus" class="hint" hidden></p>
+          </div>
+          <button id="loadModels" class="icon-btn" type="button" aria-label="Load models" title="Load models">
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false"
+                 fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 12a9 9 0 1 1-2.64-6.36L21 8"/>
+              <path d="M21 3v5h-5"/>
+            </svg>
+          </button>
+          <button id="testConnection" class="icon-btn" type="button" aria-label="Test connection" title="Test connection">
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false"
+                 fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M13 2 4 14h7l-1 8 9-12h-7z"/>
+            </svg>
+          </button>
         </div>
         <div class="controls form-actions">
           <button id="gptSave" class="primary" type="button">Save</button>

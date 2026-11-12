@@ -82,12 +82,52 @@ const PORT = 5759;
 // so a test run never files, edits or deletes anything real.
 const COLLECTOR = process.env.HARNESS_COLLECTOR || "";
 
+// The exact PREVIEW_SAMPLE_ANSWER template literal from background.js — read
+// once at startup so "Bearer sample" (see the fetch stub below) can hand the
+// Manual-generate path the identical text PREVIEW_STYLE builds its preview
+// from, letting a test diff the two buildResumeHtml outputs for a genuine
+// preview-vs-build parity check.
+const PREVIEW_SAMPLE_ANSWER = (() => {
+  const src = fs.readFileSync(path.join(ROOT, "background.js"), "utf8");
+  const m = /const PREVIEW_SAMPLE_ANSWER = `([\s\S]*?)`;/.exec(src);
+  if (!m) throw new Error("PREVIEW_SAMPLE_ANSWER not found in background.js — has it moved or been renamed?");
+  return m[1];
+})();
+
+// A deliberately awkward answer, in the DEFAULT_PROMPT profile shape (not
+// PREVIEW_SAMPLE_ANSWER's already-converted array shape, so fromProfileShape
+// gets exercised too): no certifications key, 7 roles (the upper bound
+// buildResumeHtml warns past), an "&" and an em dash needing escaping, and
+// one bullet long enough to wrap to 2+ lines.
+const EDGE_CASE_ANSWER = `const resume = {
+  "name": "Jordan Lee",
+  "title": "Platform Engineer",
+  "contact": { "email": "jordan.lee@example.com", "phone": "555-0100", "linkedin": "https://linkedin.com/in/jordan-lee", "location": "Remote" },
+  "resume": {
+    "summary": "Platform engineer at Smith & Co, spanning build systems, release pipelines and the on-call rotation that keeps them honest.",
+    "skills": ["Tools: Terraform, Ansible, Jenkins"],
+    "experience": [
+      { "company": "Smith & Co", "position": "Platform Engineer", "location": "Remote", "duration": "2023 \\u2013 Present", "content": ["Rebuilt the deploy pipeline so a release that used to need a human babysitting it through six separate manual approval steps, one per environment, now goes out on its own and only pages someone when a real check fails.", "Cut CI time by 40%."] },
+      { "company": "Globex", "position": "SRE", "location": "Remote", "duration": "2021 \\u2013 2023", "content": ["On-call lead for payments."] },
+      { "company": "Initech", "position": "DevOps Engineer", "location": "Remote", "duration": "2019 \\u2013 2021", "content": ["Migrated to Kubernetes."] },
+      { "company": "Umbrella Corp", "position": "Build Engineer", "location": "Remote", "duration": "2017 \\u2013 2019", "content": ["Owned the Jenkins fleet."] },
+      { "company": "Soylent Corp", "position": "Systems Engineer", "location": "Remote", "duration": "2015 \\u2013 2017", "content": ["Ran the datacenter migration."] },
+      { "company": "Wayne Enterprises", "position": "Junior SRE", "location": "Remote", "duration": "2013 \\u2013 2015", "content": ["First on-call rotation."] },
+      { "company": "Stark Industries", "position": "Intern", "location": "Remote", "duration": "2012 \\u2013 2013", "content": ["Shadowed the infra team."] }
+    ],
+    "education": [{ "degree": "B.S.", "field": "Computer Science", "school": "State University", "year": "2012" }]
+  },
+  "cover_letter": "n/a",
+  "ATS_score": "80"
+};`;
+
 const TYPES = {
   ".html": "text/html",
   ".css": "text/css",
   ".js": "application/javascript",
   ".json": "application/json",
-  ".svg": "image/svg+xml"
+  ".svg": "image/svg+xml",
+  ".pdf": "application/pdf"
 };
 
 const STUB = `<script>
@@ -149,6 +189,12 @@ window.chrome = {
   scripting: { executeScript() { return Promise.reject(new Error("no pages to inject into in the harness")); } }
 };
 window.__tabListeners = { activated: [], updated: [] };
+window.__ALICE = {
+  id: "p1",
+  name: "Alice",
+  sheet: { country: "US", role: "Engineer", applicant: "Alice" },
+  resume: { prompt: "", masterResume: "", masterResumeMode: "use", style: "", summary: "" }
+};
 
 // Only api.openai.com is intercepted. EDIT THE RESPONSES BELOW per what
 // you're actually testing this session — this is a starting template, not a
@@ -158,6 +204,42 @@ const COLLECTOR_REDIRECT = ${JSON.stringify(COLLECTOR)};
 window.fetch = async (url, opts) => {
   if (COLLECTOR_REDIRECT && typeof url === "string" && url.startsWith("http://localhost:4500")) {
     url = COLLECTOR_REDIRECT + url.slice("http://localhost:4500".length);
+  }
+  if (typeof url === "string" && url.includes("/save-data")) {
+    // Never let a test's saveJob call actually write to the real archive at
+    // localhost:4500 — ok:true with no code/msg "already exist" is enough
+    // for saveJob to report success without a real collector involved.
+    return { ok: true, status: 200, statusText: "OK", json: async () => ({ ok: true }) };
+  }
+  if (typeof url === "string" && url.includes("/api/users/") && opts && opts.method === "PATCH") {
+    // UPDATE_PROFILE's target: merges the patch into window.__ALICE.resume
+    // and returns it the real collector's way ({ user: {...} }), so a test
+    // can actually change the profile's own prompt/style/masterResume mid-run
+    // (e.g. before Add a style's "pick it and Save") rather than only ever
+    // reading the one profile GET /api/users starts with.
+    //
+    // NOTE for anyone editing this STUB block: this whole block is itself
+    // embedded inside harness-server.js's own outer template literal (the
+    // STUB variable). A backslash-escaped "\/" inside a regex literal written
+    // here gets "cooked" away by that OUTER template literal's own escape
+    // processing before this code ever reaches the browser -- "/\/foo\//"
+    // silently becomes "//foo//", a line comment. Use url.includes(...) or
+    // new RegExp("...") (a plain string, no backslashes) instead of a regex
+    // literal with escaped slashes anywhere in this file's STUB section.
+    const patch = JSON.parse((opts && opts.body) || "{}");
+    Object.assign(window.__ALICE.resume, patch);
+    return { ok: true, status: 200, statusText: "OK", json: async () => ({ user: window.__ALICE }) };
+  }
+  if (typeof url === "string" && url.includes("/api/users") && (!opts || !opts.method || opts.method === "GET")) {
+    return {
+      ok: true, status: 200, statusText: "OK",
+      // Mirrors the real collector's row shape exactly (see server.js's own
+      // GET /api/users mapping) -- prompt/masterResume/style/summary all live
+      // nested under resume, never as top-level fields. A flatter stub here
+      // silently passes writerFor's profile.resume || {} as {}, which hides
+      // real bugs in anything that reads the profile's own style/prompt.
+      json: async () => ({ users: [window.__ALICE] })
+    };
   }
   if (typeof url === "string" && url.includes("api.openai.com")) {
     const auth = (opts && opts.headers && opts.headers.Authorization) || "";
@@ -179,6 +261,39 @@ window.fetch = async (url, opts) => {
       });
     }
 
+    if (auth === "Bearer edge") {
+      return {
+        ok: true, status: 200, statusText: "OK",
+        json: async () => ({
+          model: body.model,
+          choices: [{ message: { content: window.__EDGE_CASE_ANSWER } }]
+        })
+      };
+    }
+
+    if (auth === "Bearer custom") {
+      // Whatever a test set window.__CUSTOM_ANSWER to, in-page, right before
+      // the call — for trying one specific answer text against generateResume
+      // without hardcoding it into this file.
+      return {
+        ok: true, status: 200, statusText: "OK",
+        json: async () => ({
+          model: body.model,
+          choices: [{ message: { content: window.__CUSTOM_ANSWER || "" } }]
+        })
+      };
+    }
+
+    if (auth === "Bearer sample") {
+      return {
+        ok: true, status: 200, statusText: "OK",
+        json: async () => ({
+          model: body.model,
+          choices: [{ message: { content: window.__PREVIEW_SAMPLE_ANSWER } }]
+        })
+      };
+    }
+
     // Default: echo the model and a canned reply back in the real OpenAI
     // chat-completions response shape.
     return {
@@ -191,6 +306,8 @@ window.fetch = async (url, opts) => {
   }
   return REAL_FETCH(url, opts);
 };
+window.__PREVIEW_SAMPLE_ANSWER = ${JSON.stringify(PREVIEW_SAMPLE_ANSWER)};
+window.__EDGE_CASE_ANSWER = ${JSON.stringify(EDGE_CASE_ANSWER)};
 </script>
 `;
 

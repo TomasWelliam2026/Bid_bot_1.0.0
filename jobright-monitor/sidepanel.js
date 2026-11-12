@@ -883,19 +883,66 @@ function restoreSearch() {
 
 restoreSearch();
 
+// ---------------------------------------------------------------------------
+// Settings panels slide open/closed (ChatGPT, User, Search, and the desktop
+// app's Browser Profile) instead of popping — see .gpt-panel in
+// sidepanel.css for the transition itself. `hidden` stays the one true
+// record of whether a panel is actually visible: set the instant a panel
+// opens, since there is nothing to wait for; only once a closing panel's
+// slide has actually finished, since display:none would otherwise cut the
+// animation off before it is seen. Call this last in a showXPanel function,
+// after anything that changes what the panel's open height will be (filling
+// its fields, loading a list), so the height it slides to is the real one.
+// ---------------------------------------------------------------------------
+function setPanelVisible(el, open) {
+  if (open) {
+    el.hidden = false;
+    el.classList.add("slide-animating");
+    el.style.maxHeight = "0px";
+    void el.offsetHeight; // commits the 0px above before the target below starts the transition
+    const target = el.scrollHeight;
+    el.classList.add("slide-open");
+    el.style.maxHeight = `${target}px`;
+    el.addEventListener(
+      "transitionend",
+      () => {
+        el.classList.remove("slide-animating");
+        el.style.maxHeight = "none"; // free to grow after — a picked model, a loaded list
+      },
+      { once: true }
+    );
+  } else {
+    if (el.hidden) return;
+    el.classList.add("slide-animating");
+    el.style.maxHeight = `${el.scrollHeight}px`;
+    void el.offsetHeight;
+    el.classList.remove("slide-open");
+    el.style.maxHeight = "0px";
+    el.addEventListener(
+      "transitionend",
+      () => {
+        el.classList.remove("slide-animating");
+        el.hidden = true;
+        el.style.maxHeight = "";
+      },
+      { once: true }
+    );
+  }
+}
+
 // Search Settings: the icon opens and closes the panel, always on what is
 // saved; Save stores it and closes it. Only one settings panel is open at once.
 const searchPanelEl = $("searchPanel");
 const openSearchEl = $("openSearch");
 
 function showSearchPanel(open) {
-  searchPanelEl.hidden = !open;
   openSearchEl.setAttribute("aria-expanded", String(open));
   restoreSearch();
   if (open) {
     showGptPanel(false);
     showUserPanel(false);
   }
+  setPanelVisible(searchPanelEl, open);
 }
 
 openSearchEl.addEventListener("click", () => showSearchPanel(searchPanelEl.hidden));
@@ -1193,7 +1240,10 @@ function setModelControls(model) {
 function readGptForm() {
   return {
     apiKey: $("apiKey").value.trim(),
-    model: modelEl.value === CUSTOM_MODEL ? modelCustomEl.value.trim() : modelEl.value
+    model: modelEl.value === CUSTOM_MODEL ? modelCustomEl.value.trim() : modelEl.value,
+    aiMethod: gptMethod(),
+    chatgptSession: chatgptSessionEl.value,
+    chatgptModel: readChatgptModel()
   };
 }
 
@@ -1201,9 +1251,83 @@ function readForm() {
   return { country: countryEl.value, role: roleEl.value };
 }
 
+// API / Auto — which of them asks ChatGPT, picked above the fields each
+// one needs. "auto" also hides what the other one needs, so the panel only
+// ever shows the fields the picked method actually reads.
+const gptMethodApiEl = $("gpt-method-api");
+const gptMethodAutoEl = $("gpt-method-auto");
+const gptApiFieldsEl = $("gptApiFields");
+const gptAutoFieldsEl = $("gptAutoFields");
+const chatgptSessionEl = $("chatgptSession");
+const chatgptModelEl = $("chatgptModel");
+const chatgptModelCustomEl = $("chatgptModelCustom");
+const CUSTOM_CHATGPT_MODEL = "__custom__";
+
+// Chat and Work are two different ways to start a new ChatGPT session (the
+// toggle on its own new-chat screen), and each offers its own set of models —
+// confirmed against a live, signed-in account. Custom… stays on both lists
+// since the account's own picker can differ from what shipped here.
+const CHATGPT_SESSION_MODELS = {
+  chat: ["GPT-6", "GPT-5.6 Sol", "GPT-5.6 Terra"],
+  work: ["GPT-6.1 Terra", "GPT-6.1 Sol", "GPT-6 Astra", "GPT-6 Sol", "GPT-6 Luna", "GPT-5.6 Sol", "GPT-5.6 Terra", "GPT-5.6 Luna"]
+};
+
+// Rebuilds the model list for the session picked, keeping `keepValue` picked
+// if that session's list still carries it (Custom… otherwise, as a model the
+// list does not carry — a pinned snapshot, or one released after this build
+// — always does).
+function renderChatgptModelOptions(session, keepValue) {
+  chatgptModelEl.replaceChildren();
+  for (const name of CHATGPT_SESSION_MODELS[session] || CHATGPT_SESSION_MODELS.chat) chatgptModelEl.append(new Option(name, name));
+  chatgptModelEl.append(new Option("Custom… (type the name as ChatGPT's picker shows it)", CUSTOM_CHATGPT_MODEL));
+  setChatgptModelControls(keepValue);
+}
+
+chatgptSessionEl.addEventListener("change", () => renderChatgptModelOptions(chatgptSessionEl.value, readChatgptModel()));
+
+// A name the built-in list does not carry — ChatGPT's picker varies by plan,
+// and gets new models between builds of this panel — selects Custom… and
+// shows the free-text box, the same way the API model field does.
+const readChatgptModel = () => (chatgptModelEl.value === CUSTOM_CHATGPT_MODEL ? chatgptModelCustomEl.value.trim() : chatgptModelEl.value);
+
+function setChatgptModelControls(name) {
+  const known = [...chatgptModelEl.options].some((o) => o.value === name);
+  chatgptModelEl.value = known || !name ? name || chatgptModelEl.options[0].value : CUSTOM_CHATGPT_MODEL;
+  chatgptModelCustomEl.value = known || !name ? "" : name;
+  chatgptModelCustomEl.hidden = known || !name;
+}
+
+chatgptModelEl.addEventListener("change", () => {
+  chatgptModelCustomEl.hidden = chatgptModelEl.value !== CUSTOM_CHATGPT_MODEL;
+  if (!chatgptModelCustomEl.hidden) chatgptModelCustomEl.focus();
+});
+
+const gptMethod = () => (gptMethodAutoEl.getAttribute("aria-checked") === "true" ? "auto" : "api");
+
+function setGptMethod(method) {
+  const auto = method === "auto";
+  gptMethodApiEl.setAttribute("aria-checked", String(!auto));
+  gptMethodApiEl.tabIndex = auto ? -1 : 0;
+  gptMethodAutoEl.setAttribute("aria-checked", String(auto));
+  gptMethodAutoEl.tabIndex = auto ? 0 : -1;
+  gptApiFieldsEl.hidden = auto;
+  gptAutoFieldsEl.hidden = !auto;
+  loadModelsEl.hidden = auto; // API-only — Auto has no key's own model list to load
+}
+
+for (const [btn, method] of [[gptMethodApiEl, "api"], [gptMethodAutoEl, "auto"]]) {
+  btn.addEventListener("click", () => {
+    setGptMethod(method);
+    showTestStatus("");
+  });
+}
+
 function fillGptForm(settings) {
   $("apiKey").value = settings.apiKey ?? "";
   setModelControls(settings.model ?? "");
+  chatgptSessionEl.value = settings.chatgptSession === "work" ? "work" : "chat";
+  renderChatgptModelOptions(chatgptSessionEl.value, settings.chatgptModel ?? "");
+  setGptMethod(settings.aiMethod === "auto" ? "auto" : "api");
 }
 
 function fillForm(settings) {
@@ -1235,15 +1359,18 @@ function syncProfileButtons() {
     profileStatusEl.className = "hint dirty";
     profileStatusEl.textContent = "Unsaved changes.";
   } else {
-    showKeyState(savedSettings?.apiKey);
+    showKeyState(savedSettings?.apiKey, savedSettings?.aiMethod);
   }
 }
 
-function showKeyState(apiKey) {
+function showKeyState(apiKey, aiMethod) {
   profileStatusEl.className = "hint";
-  profileStatusEl.textContent = apiKey
-    ? "Key set. Resumes will be generated for jobs the collector does not have."
-    : "No key set — nothing will be saved, since a job is only sent once its resume is built.";
+  profileStatusEl.textContent =
+    aiMethod === "auto"
+      ? ""
+      : apiKey
+        ? "Key set. Resumes will be generated for jobs the collector does not have."
+        : "No key set — nothing will be saved, since a job is only sent once its resume is built.";
 }
 
 async function loadSettings() {
@@ -1284,9 +1411,9 @@ function showModelsStatus(text, kind = "") {
 const keyEnd = (key) => String(key || "").trim().slice(-4);
 
 function describeModels(list) {
-  const when = new Date(list.loadedAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
-  const snapshots = list.snapshots.length ? ` and ${list.snapshots.length} snapshot(s)` : "";
-  return `${list.models.length} model(s)${snapshots} available to this key · loaded ${when}`;
+  const when = new Date(list.loadedAt).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" });
+  const snapshots = list.snapshots.length ? `, ${list.snapshots.length} snapshot(s)` : "";
+  return `${list.models.length} model(s)${snapshots} · ${when}`;
 }
 
 // The list's options from a loaded list, or the built-in ones with none,
@@ -1499,7 +1626,8 @@ const BUILTIN_STYLES = new Map([
 // A built-in style by the name the list shows it under; an added one by its own.
 const styleLabel = (value) => BUILTIN_STYLES.get(value) ?? value;
 
-// The names of the styles a profile has added, from the last load.
+// The names of the added styles, from the last load — the same list for
+// every profile, since a style added under any one of them is shared by all.
 const ownStyles = (profileId) => profileStyleNames.get(profileId) ?? [];
 
 function el(tagName, className, text) {
@@ -1515,8 +1643,9 @@ function button(text) {
   return node;
 }
 
-// A profile's style picker: the built-in styles, then its own. A style it
-// was set to that has since been removed builds with the default, and says so.
+// A profile's style picker: the built-in styles, then every added style —
+// shared by all profiles, not just the one that added it. A style it was set
+// to that has since been removed builds with the default, and says so.
 function fillStyleOptions(select, profileId, selected) {
   select.replaceChildren();
   for (const [value, label] of BUILTIN_STYLES) select.add(new Option(label, value));
@@ -1541,92 +1670,106 @@ function fillStyleOptions(select, profileId, selected) {
 // hand it over unedited — if the rules in it ever drift from what the
 // builder actually requires (missingHoles, buildResumeHtml, the DE-1
 // template), fix it here too.
-const TEMPLATE_STYLE_PROMPT = `I'm attaching a screenshot of a resume. Recreate its visual design — layout, spacing, fonts/weights, colors, section order, dividers/rules, how headings and dates are styled — as closely as you can in one self-contained HTML file.
+const TEMPLATE_STYLE_PROMPT = `You are generating a resume TEMPLATE for a Chrome extension called Bid Bot. I'm attaching one or more images of a single resume (if there's more than one image, they're pages or sections of the SAME resume — treat them together and produce one unified template, not several).
 
-This isn't just a visual copy, though: the output has to be a TEMPLATE for a Chrome extension that builds resumes by string-replacing specific elements. It will be rejected if it doesn't follow these exact structural rules, so treat them as hard constraints, not suggestions — match the image's look, but keep this structure underneath it.
+GOAL: produce a self-contained HTML file that (a) visually matches the attached image(s) as closely as possible, and (b) exposes the exact structural hooks Bid Bot's builder needs to drop in real resume content by string-replacing elements — no templating engine, no build step, just matching ids/classes in plain HTML.
 
-REQUIRED (the extension refuses the template if any is missing):
-1. \`<p id="summary">...</p>\` — the summary/profile paragraph, wherever the image has one (or near the top if it doesn't).
+STEP 1 — READ THE IMAGE LIKE A DESIGN REVIEW. Before writing any code, state what you measured:
+- COLORS as hex values sampled from the actual pixels of THIS image: body text, heading/accent color, rule/divider color, background. Don't round to a "close enough" named color, and don't reuse a color from some other resume, a default palette, or any example in this prompt — every hex value must come from this image. Define them as CSS custom properties in \`:root\` (e.g. \`--heading: #114b5f;\`) and use \`var(--heading)\` etc. everywhere a heading/name/rule/accent appears, instead of hardcoding the hex value inline — that way the colors you listed are provably the colors actually applied.
+- SPACING in px: outer page margin, gap between sections (name → contact → summary → experience → education → …), gap between a job's heading and its bullet list, gap between one bullet and the next.
+- LINE-HEIGHT as a bare unitless ratio (never px or %): find a paragraph or bullet that wraps to 2+ lines, measure the pixel pitch between the tops of two consecutive wrapped lines, divide by that text's font-size. Do this once for the summary/paragraph text and once for bullets if they look different — these can differ even within one resume. This is ONLY about spacing between wrapped lines of the SAME block, never the gap between separate bullets or sections.
+
+STEP 2 — REQUIRED STRUCTURE (the template is rejected if any of this is missing):
+1. \`<p id="summary">...</p>\` — the summary/profile paragraph (near the top if the image has none).
 2. \`<div id="skills">...</div>\` — the skills section.
-3. At least one \`<div class="job"> ... <ul data-exp="0"> ... </ul> ... </div>\` block — the pattern the builder clones once per job, so match the image's FIRST (or most typical) job entry exactly. Fill it with realistic placeholder content matching the image's own content, since this block also doubles as the template's own preview.
+3. At least one \`<div class="job"> ... <ul data-exp="0">...</ul> ... </div>\` block, matching the image's first/most typical job entry — this block is both the pattern the builder clones per job AND the template's own preview, so fill it with realistic content drawn from the image. Inside it:
+   - one element with \`class="company"\`, one with \`class="role"\`
+   - EITHER \`class="location"\` + \`class="dates"\` as separate elements (optionally joined by \`<span class="sep">...</span>\` using the image's own separator, e.g. "|" or "•"), OR a single \`class="meta"\` element if the image combines them on one line
+   - \`<ul data-exp="0">\` with a few \`<li>\` bullets matching the image's bullet style
 
-Inside that job block, include:
-- one element with class="company", one with class="role"
-- EITHER class="location" and class="dates" as separate elements (optionally joined by \`<span class="sep">...</span>\` using whatever separator character/style the image uses, e.g. "|" or "•"), OR — if the image shows location and dates as one combined line — a single element with class="meta" instead.
-- \`<ul data-exp="0">\` holding a few \`<li>\` bullets matching the image's bullet style.
+STEP 3 — OPTIONAL STRUCTURE, include whenever the image has it (give each real placeholder content, not lorem ipsum):
+- \`<h1 class="name">\`, a \`<title>\` tag, \`class="title"\` for the headline under the name, \`<p class="contact">\` with contact items separated by \`<span class="sep">...</span>\` (links on their own line in the image go in a second \`<p class="contact links">\`)
+- repeatable \`<div class="edu-item">\` per school, each with \`class="school"\`, \`class="year"\`, and a repeatable \`class="degree"\` line for multiple degrees at one school
+- repeatable \`<div class="cert-item">\` with \`class="cert-name"\` inside, the whole block wrapped in \`class="cert-section"\` if the image shows a distinct certifications block
 
-OPTIONAL but include if the image has them (filled automatically if present, otherwise just left as placeholder, so give each real sample content):
-- \`<h1 class="name">\`, a \`<title>\` tag, class="title" for the headline under the name, and \`<p class="contact">\` with the contact items the image shows, separated by \`<span class="sep">...</span>\`. If the image puts links (LinkedIn/portfolio/GitHub) on their own separate line from the rest of the contact info, put those specifically in a second \`<p class="contact links">\`.
-- A repeatable \`<div class="edu-item">\` per school, with class="school", class="year", and a repeatable class="degree" line inside each (for multiple degrees at one school).
-- A repeatable \`<div class="cert-item">\` (wrap the whole section in something with class="cert-section" if the image has a distinct certifications block), with class="cert-name" inside each one.
+STEP 4 — LIVE PREVIEW, so the template can be opened directly in a browser and show itself filled in, not blank:
+- \`<script src="./data.js"></script>\` near the top of \`<head>\`
+- a \`<script type="module">\` at the end of \`<body>\` that converts the Bid Bot resume-data shape (below) into render-ready arrays with this EXACT \`toArrays\` function, copied verbatim:
+  \`\`\`js
+  function toArrays(d) {
+    if (!d || typeof d.SUMMARY === "string") return d;
+    const r = d.resume || d;
+    const c = d.contact || {};
+    return {
+      CONTACT: [d.name || "", d.title || "", ...[c.location, c.phone, c.email, c.linkedin || c.website].filter(Boolean)],
+      SUMMARY: r.summary || "",
+      SKILLS: r.skills || [],
+      EXPERIENCE: (r.experience || []).map((e) => [e.company, e.position || e.title || e.role, e.location, e.duration || e.dates, ...(e.content || e.bullets || [])]),
+      CERTIFICATIONS: (r.certifications || d.certifications || []).map((c2) => (typeof c2 === "string" ? c2 : c2?.name || "")),
+      EDUCATION: (r.education || []).map((e) => [e.school, [[e.degree, e.field]], e.year || e.duration])
+    };
+  }
+  \`\`\`
+- then, in that same script, call \`const data = toArrays(resume)\` — reading the BARE identifier \`resume\` that \`data.js\`'s own top-level \`const resume = {...}\` declares. Never \`window.resume\`: a top-level \`const\`/\`let\` in a classic script (\`data.js\` has no \`type="module"\`) never becomes a property of \`window\` — only \`var\`/\`function\` do — so \`window.resume\` is always \`undefined\` and silently leaves every hole unfilled, exactly as if the script never ran at all. This is not a style choice: it's exactly how Bid Bot's own reference template (Sisu_DE_1) reads it — \`const data = toArrays(resume)\` — copy that line verbatim, variable name included.
+  - \`#summary\` ← \`data.SUMMARY\`
+  - \`#skills\` ← one \`<p>\` per line in \`data.SKILLS\`, splitting on the first \`:\` into a \`.label\` span, a \`.colon\` span, and the rest as text
+  - \`h1.name\` / \`.title\` / \`.contact\` ← \`data.CONTACT\` as \`[name, title, ...items]\`, items joined with \`.sep\` spans, any \`https://\` item rendered as an \`<a>\` (LinkedIn links shown as the text "LinkedIn")
+  - the first \`.job\` is the pattern: clone it once per \`data.EXPERIENCE\` entry \`[company, role, location, dates, ...bullets]\`, fill \`.company\`/\`.role\`/\`.location\`/\`.dates\` (or \`.meta\`), set the clone's \`<ul>\` \`data-exp\` to its index, fill \`<li>\`s from the bullets, then remove the original pattern node(s)
+  - the same clone-fill-remove pattern for \`.edu-item\` from \`data.EDUCATION\` (\`[school, [[degree, field], ...], year]\`) and \`.cert-item\` from \`data.CERTIFICATIONS\` (plain strings); remove \`.cert-section\` entirely if there are none
+- this script is for LOCAL PREVIEW ONLY: Bid Bot strips every \`<script>\` when it actually builds a resume and fills the page by string-replacing elements by id/class directly, never by running this JS. So the ids/classes above must be correct and complete on their own, whether or not the script ever runs.
 
-Go through the visual match like a design review, measuring, not guessing:
+STEP 5 — ALSO PRODUCE a separate \`data.js\` file, realistic sample content matching the image, in exactly the JSON shape Bid Bot asks its resume-writing model to answer in:
+  \`\`\`js
+  const resume = {
+    name: "Name",
+    title: "Headline title",
+    contact: { email: "email", phone: "phone", linkedin: "https://linkedin.com/in/...", location: "City, ST ZIP" },
+    resume: {
+      summary: "...",
+      skills: ["Label: item, item, item"],
+      experience: [
+        { company: "Company", position: "Role", location: "Location", duration: "Start - End", content: ["bullet", "bullet"] }
+      ],
+      education: [{ degree: "Degree", field: "Field", school: "School", year: "Year" }],
+      certifications: []
+    },
+    cover_letter: "...",
+    ATS_score: "87"
+  };
+  \`\`\`
+  Previewing the template against this file through \`toArrays\` is what proves the template actually works against Bid Bot's real data, not a hand-shaped stand-in.
 
-1. COLORS — look at the actual pixels in the image. Pick out the exact text color, heading color, any accent/rule color, and background, as hex values. Don't guess a "close enough" color (e.g. a generic navy when the image uses a specific teal/slate) — sample it as precisely as you can.
+STEP 6 — PAGE DIMENSIONS MUST MATCH BID BOT'S Sisu_DE_1 TEMPLATE EXACTLY. Bid Bot's PDF builder adds its own fixed 15mm margin on every side automatically and reads \`@media print\` rules, overriding anything else on that element — so this is a DIMENSION/LAYOUT rule only, it does not fix any color:
+- never put page-margin spacing in a CSS \`margin\` on \`body\`; only \`padding\` is read for on-screen margin. A centering \`margin: 0 auto\` on \`body\` is fine, a margin standing in for the page margin itself is not.
+- do not style \`html\` at all — no background, no box-shadow, nothing.
+- \`body\` must carry this exact shape, character for character, down to every number and keyword — ONLY \`var(--body)\` may point at a different custom-property name, and that custom property must still resolve to the text color YOU sampled from the image in STEP 1, never to DE-1's own color:
+  \`\`\`css
+  body {
+    margin: 0 auto;
+    padding: 32px 40px 48px;
+    max-width: 8.5in;
+    font-family: "Segoe UI", Calibri, "Helvetica Neue", Arial, sans-serif;
+    font-size: 13.5px;
+    line-height: 1.45;
+    color: var(--body);
+    background: #fff;
+  }
+  @media print { body { padding: 0; font-size: 11pt; } }
+  \`\`\`
+- no \`box-shadow\`, no \`min-height\`, no fixed \`width\`, no \`-webkit-font-smoothing\`, no other \`font-family\` — the paper-like framing (shadow, gray backdrop) is drawn by Bid Bot's own preview panel around every template, so the template itself must not try to reproduce it.
+- EVERYTHING ELSE IS COLOR, NOT DIMENSION, AND MUST MATCH THE IMAGE: every hex value from STEP 1 — body text, headings, rules/dividers, accents — stays free to match the image and must actually differ from DE-1's teal palette unless the image itself happens to be teal. Only the \`margin\`/\`padding\`/\`max-width\`/\`font-size\`/\`line-height\`/\`background\` numbers and keywords above, and the \`html\` element, are locked to this shared baseline — nothing about color is.
 
-2. SPACING — measure, relative to the page: the margin around the whole page, the gap between sections (name → contact → summary → experience → education, etc.), the gap between a job's heading and its bullets, and the gap between bullets themselves.
+HARD RULES, even where they mean deviating slightly from the image:
+- the layout can never depend on JS running at build time — Bid Bot strips every \`<script>\` before use; script is only for the local-preview helper above.
+- one self-contained HTML file: inline \`<style>\` only, no external fonts or assets to host separately — use the closest system/web-safe font to the image.
+- every id/class named above must appear verbatim; Bid Bot matches on these exact strings, not on meaning.
 
-3. LINE SPACING — measure this precisely, don't eyeball it:
-   - Find a bullet or paragraph in the image that wraps onto at least two lines. Measure the pixel distance from the top of the text on the first wrapped line to the top of the text on the second wrapped line (baseline to baseline, or cap-height to cap-height — pick one and be consistent).
-   - Divide that distance by the font size you sampled for that same text. That ratio IS the line-height — state it explicitly before writing any code (e.g. "bullets: ~15px line pitch at 9.8pt font ≈ 1.42 unitless ratio").
-   - Do this separately for each block of wrapping text that looks visually different in the image (summary paragraph vs. bullets vs. any dense multi-line block) — they are not always the same ratio, even within one resume.
-   - This is strictly about spacing BETWEEN WRAPPED LINES OF THE SAME bullet/paragraph — never confuse it with the gap between one bullet and the next, or between a bullet list and the heading above/below it; those are margins from item 2.
-   - Write the result as a bare unitless number (e.g. \`1.45\`), never a px or % value — this project's PDF builder only reliably reads the unitless form.
+OUTPUT, in this order:
+1. A short list of what you measured and picked — colors as hex, line-height ratios with the math, margin/gap values — so I can catch a misread before the code.
+2. The complete HTML template file.
+3. The complete data.js file.
 
-4. LIVE PREVIEW — the template also needs to be able to render itself when opened directly in a browser, so I can actually see it filled in rather than a blank/placeholder page. Add:
-   - \`<script src="./data.js"></script>\` near the top.
-   - A \`<script type="module">\` at the end of the body that reads the global \`resume\` object \`data.js\` defines and fills the page from it:
-     - \`#summary\` ← \`resume.SUMMARY\`
-     - \`#skills\` ← one \`<p>\` per \`resume.SKILLS\` line, splitting on the first \`:\` into a \`.label\` span + \`.colon\` span + the rest
-     - \`h1.name\` / \`.title\` / \`.contact\` ← \`resume.CONTACT\` as \`[name, title, ...contactItems]\`, each extra item joined with a \`.sep\` span between them, any \`https://\` item turned into an \`<a>\` (LinkedIn links shown as the text "LinkedIn")
-     - the FIRST \`.job\` block is the pattern: clone it once per \`resume.EXPERIENCE\` entry (\`[company, role, location, dates, ...bullets]\`), fill \`.company\`/\`.role\`/\`.location\`/\`.dates\` (or \`.meta\`), set \`data-exp\` on its \`<ul>\` to the entry's index, fill \`<li>\`s from the bullets, then remove the original pattern block(s)
-     - same clone-fill-remove pattern for \`.edu-item\` from \`resume.EDUCATION\` (\`[school, [[degree, field], ...], year]\`) and \`.cert-item\` from \`resume.CERTIFICATIONS\` (plain strings) — if there are no certifications, remove \`.cert-section\` entirely instead
-   - Also give me a separate \`data.js\` file with realistic sample content matching what's actually in the screenshot, in exactly this shape:
-     \`\`\`
-     const resume = {
-       CONTACT: ["Name", "Title", "location", "phone", "email", "https://linkedin.com/in/..."],
-       SUMMARY: "...",
-       SKILLS: ["Label: item, item, item"],
-       EXPERIENCE: [["Company", "Role", "Location", "Dates", "bullet", "bullet"]],
-       CERTIFICATIONS: [],
-       EDUCATION: [["School", [["Degree", "Field"]], "Year"]]
-     };
-     \`\`\`
-   This script is for LOCAL PREVIEW ONLY — when this template is actually used, every \`<script>\` in it is stripped and the same content gets baked in by directly string-replacing the elements by their id/class, not by running this JS. So the structural ids/classes themselves must be correct and complete on their own, with or without the script running.
-
-5. PAGE MARGINS (PDF vs. browser preview) — this project's PDF builder adds its own fixed 15mm margin on every side of the page automatically, and reads \`@media print\` rules, overriding the normal ones for the same element. So:
-   - \`body\`'s plain \`padding\` controls how it looks when opened directly in a browser (for live preview) — keep whatever padding matches the image there.
-   - Never put page-margin spacing in a CSS \`margin\` on \`body\` — only \`padding\` is read for this. A \`margin\` on \`body\` is fine ONLY if it's purely for centering the page in a browser (e.g. \`margin: 0 auto;\`), never as a stand-in for the page margin itself.
-
-6. BODY & HTML — this project's other templates (Sisu_DE_1 above all) use one exact, unstyled \`html\`/\`body\` baseline, and it must be copied verbatim here, not reinvented or sampled from the image:
-   - Do not style \`html\` at all — no background, no box-shadow, nothing.
-   - \`body\` gets exactly this, character for character, with only the \`color\` value's variable name possibly differing to match this template's own theme variable names:
-     \`\`\`css
-     body {
-       margin: 0 auto;
-       padding: 32px 40px 48px;
-       max-width: 8.5in;
-       font-family: "Segoe UI", Calibri, "Helvetica Neue", Arial, sans-serif;
-       font-size: 13.5px;
-       line-height: 1.45;
-       color: var(--body);
-       background: #fff;
-     }
-     \`\`\`
-   - No \`box-shadow\`, no \`min-height\`, no fixed \`width\`, no \`-webkit-font-smoothing\`, no \`font-family\` other than the one above — the page's own paper-like look (the shadow framing it, the gray page background behind it) is already drawn by this project's own Preview panel around every template; the template's own \`body\`/\`html\` must not try to reproduce it.
-   - \`@media print { body { padding: 0; font-size: 11pt; } }\` stays exactly this, matching DE-1's own print rule — nothing more under it.
-   - Everything else — colors, fonts inside the content, headings, spacing between sections, the specific layout (centered vs. left-aligned, etc.) — stays free to match the image. Only \`html\`/\`body\` themselves are locked to this exact shared baseline.
-
-HARD RULES — do not break these even if it means deviating slightly from the image:
-- Any \`<script>\` is stripped when the extension builds a real resume, so the layout can never depend on JS running at build time. A script is only allowed as the self-contained live-preview helper above — never for anything structural or visual.
-- One self-contained HTML file: inline/embedded \`<style>\`, no external fonts or assets I'd have to host separately. Use system/web-safe fonts closest to what's in the image.
-- Every class/id name above must appear verbatim — the extension matches on these exact strings, not on meaning.
-
-Give me:
-- A short list of what you measured and picked (colors as hex, the line-height ratios with your math, the margin/gap values) before the code, so I can tell you if something's misread.
-- The corrected, complete HTML file, plus the data.js file.
-
-Output just those two files.`;
+Output nothing else.`;
 
 // Its resume style is its own as well: picked from the built-in styles and
 // the ones added under this card, which no other profile is offered. The
@@ -1700,6 +1843,22 @@ function profileCard(profile, open) {
   const style = el("select");
   style.id = idFor("style");
   fillStyleOptions(style, profile.id, values.resumeStyle);
+  const refreshStyles = el("button", "icon-btn style-refresh");
+  refreshStyles.type = "button";
+  refreshStyles.title = "Refresh resume style list";
+  refreshStyles.setAttribute("aria-label", "Refresh resume style list");
+  refreshStyles.innerHTML = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false"
+       fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M21 12a9 9 0 1 1-2.64-6.36L21 8"/>
+    <path d="M21 3v5h-5"/>
+  </svg>`;
+  const styleSelectRow = el("div", "controls style-select-row");
+  styleSelectRow.append(style, refreshStyles);
+  refreshStyles.addEventListener("click", async () => {
+    refreshStyles.disabled = true;
+    await loadProfiles();
+    showStatus("Resume style list refreshed.", "saved");
+  });
   const preview = button("Preview");
   const copy = button("Copy to editor");
   const remove = button("Remove style");
@@ -1780,8 +1939,8 @@ function profileCard(profile, open) {
     }
   });
 
-  // Said on the button before it is pressed, not after: a name this profile
-  // has already added replaces that style.
+  // Said on the button before it is pressed, not after: a name already
+  // added, by this profile or another, replaces that style.
   const syncAdd = () => (add.textContent = ownStyles(profile.id).includes(name.value.trim()) ? "Update style" : "Add new");
   syncAdd();
 
@@ -1895,7 +2054,10 @@ function profileCard(profile, open) {
     }
 
     editor.kept = html.value;
-    profileStyleNames.set(profile.id, reply.styles.map((s) => s.name));
+    // Shared by every profile, so every profile's cached list gets the
+    // same update, not just this card's.
+    const names = reply.styles.map((s) => s.name);
+    for (const p of profiles) profileStyleNames.set(p.id, names);
     fillStyleOptions(style, profile.id, reply.name);
     syncRemove();
     syncAdd();
@@ -1937,7 +2099,7 @@ function profileCard(profile, open) {
     summaryLabel,
     summaryText,
     styleSelectLabel,
-    style,
+    styleSelectRow,
     actions,
     adder,
     status
@@ -2002,22 +2164,33 @@ function showTestStatus(text, kind = "") {
 }
 
 testConnectionEl.addEventListener("click", async () => {
-  const apiKey = $("apiKey").value.trim();
-  const model = modelEl.value === CUSTOM_MODEL ? modelCustomEl.value.trim() : modelEl.value;
-
-  if (!apiKey) {
-    showTestStatus("Enter an API key first.", "warn");
-    return;
-  }
-  if (!model) {
-    showTestStatus("Enter a model id, or pick one from the list.", "warn");
-    return;
+  const method = gptMethod();
+  let request;
+  if (method === "auto") {
+    const chatgptModel = readChatgptModel();
+    if (!chatgptModel) {
+      showTestStatus("Enter the model name as ChatGPT's own picker shows it.", "warn");
+      return;
+    }
+    request = { type: "TEST_CONNECTION", method, chatgptModel, chatgptSession: chatgptSessionEl.value };
+  } else {
+    const apiKey = $("apiKey").value.trim();
+    const model = modelEl.value === CUSTOM_MODEL ? modelCustomEl.value.trim() : modelEl.value;
+    if (!apiKey) {
+      showTestStatus("Enter an API key first.", "warn");
+      return;
+    }
+    if (!model) {
+      showTestStatus("Enter a model id, or pick one from the list.", "warn");
+      return;
+    }
+    request = { type: "TEST_CONNECTION", method, apiKey, model };
   }
 
   testConnectionEl.disabled = true;
-  showTestStatus("Testing…");
+  showTestStatus(method === "auto" ? "Opening ChatGPT and asking it…" : "Testing…");
 
-  const reply = await send({ type: "TEST_CONNECTION", apiKey, model });
+  const reply = await send(request);
 
   testConnectionEl.disabled = false;
 
@@ -2159,7 +2332,7 @@ saveProfileEl.addEventListener("click", async () => {
     profileStatusEl.textContent = `Saved, except ${failed.join("; ")} — press Save to try again.`;
     return;
   }
-  showKeyState(savedSettings.apiKey);
+  showKeyState(savedSettings.apiKey, savedSettings.aiMethod);
   showUserPanel(false);
 });
 
@@ -2188,7 +2361,6 @@ function showGptStatus(text) {
 }
 
 function showGptPanel(open) {
-  gptPanelEl.hidden = !open;
   openChatgptEl.setAttribute("aria-expanded", String(open));
   showGptStatus("");
   if (open) { // one panel at a time
@@ -2196,13 +2368,18 @@ function showGptPanel(open) {
     showSearchPanel(false);
   }
   if (open && savedSettings) fillGptForm(savedSettings);
+  setPanelVisible(gptPanelEl, open);
 }
 
 openChatgptEl.addEventListener("click", () => showGptPanel(gptPanelEl.hidden));
 
 $("gptSave").addEventListener("click", async () => {
   const patch = readGptForm();
-  if (modelEl.value === CUSTOM_MODEL && !patch.model) return showGptStatus("Enter a model id, or pick one from the list.");
+  if (patch.aiMethod === "auto") {
+    if (!patch.chatgptModel) return showGptStatus("Enter the model name as ChatGPT's own picker shows it.");
+  } else if (modelEl.value === CUSTOM_MODEL && !patch.model) {
+    return showGptStatus("Enter a model id, or pick one from the list.");
+  }
   const reply = await send({ type: "SET_SETTINGS", patch });
   if (!reply.ok) return showGptStatus(`Could not save: ${reply.error}`);
   savedSettings = reply.settings;
@@ -2564,9 +2741,11 @@ const userPanelEl = $("userPanel");
 const openUserSettingsEl = $("openUserSettings");
 
 function showUserPanel(open) {
-  userPanelEl.hidden = !open;
   openUserSettingsEl.setAttribute("aria-expanded", String(open));
-  if (!open) return;
+  if (!open) {
+    setPanelVisible(userPanelEl, open);
+    return;
+  }
   showGptPanel(false); // one panel at a time
   showSearchPanel(false);
   // Fresh each time, so a profile just added or changed on the dashboard is
@@ -2574,6 +2753,7 @@ function showUserPanel(open) {
   openCards.clear();
   for (const card of profileListEl.querySelectorAll("details.profile-card")) card.open = false;
   loadProfiles();
+  setPanelVisible(userPanelEl, open);
 }
 
 openUserSettingsEl.addEventListener("click", () => showUserPanel(userPanelEl.hidden));

@@ -178,32 +178,15 @@ code, .mono { font-family: var(--mono); font-size: 0.95em; }
 .panel-head .btn { padding: 2px 10px; line-height: 1.2; }
 .panel-sub { margin: 2px 0 12px; color: var(--muted); font-size: 12px; }
 
-/* This tab's own numbers on the left as a 2x2 matrix, every tab's trend on
-   the right, in one row: the row owns the bottom margin, so its two children
-   sit flush against each other with none doubled up between them.
-   `align-items: stretch` (the flex default, named here as documentation) is
-   what pins them to one height -- the tiles grid stretches to match whatever
-   height the chart's own content settles the row at, and each tile sharing
-   its row equally (grid-template-rows: 1fr 1fr below) is what turns the
-   extra height into evenly taller tiles instead of dead space under a short
-   grid. */
-.overview-row { display: flex; align-items: stretch; gap: 12px; margin-bottom: 16px; }
-.overview-row .tiles { flex: 1; margin-bottom: 0; min-width: 0; }
-/* min-width: 0 overrides the flex default (auto, which floors a flex item at
-   its content's min-content size): without it, TabTrend's explicitly-sized
-   SVG (see .tab-trend-scroll) would hold this item -- and so the row's own
-   width measurement it feeds back into via ResizeObserver -- open to its own
-   content width, each round only feeding the next: measured width grows the
-   SVG, the wider SVG grows the next measured width. */
-.overview-row .tab-trend { flex: 2; margin-bottom: 0; min-width: 0; }
+/* This tab's own numbers, one row of figures -- no chart beside them
+   anymore, so the row is simply as tall as a tile. */
+.tiles { display: grid; grid-template-columns: repeat(4, 1fr); grid-template-rows: 1fr; gap: 12px; margin-bottom: 16px; }
 @media (max-width: 900px) {
-  .overview-row { flex-direction: column; }
+  .tiles { grid-template-columns: repeat(2, 1fr); grid-template-rows: repeat(2, 1fr); }
 }
 @media (max-width: 560px) {
-  .overview-row .tiles { grid-template-columns: 1fr; grid-template-rows: repeat(4, 1fr); }
+  .tiles { grid-template-columns: 1fr; grid-template-rows: repeat(4, 1fr); }
 }
-
-.tiles { display: grid; grid-template-columns: repeat(2, 1fr); grid-template-rows: 1fr 1fr; gap: 12px; }
 
 /* A counter, not a card: the number sits beside its name rather than under it,
    which halves the height without losing the line that says what it counts.

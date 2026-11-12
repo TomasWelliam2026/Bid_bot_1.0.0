@@ -140,10 +140,11 @@ function run(text, { bold = false, italic = false, size = 10, color = DEFAULT_IN
  * borders, which is the nearest thing WordprocessingML has to a box drawn
  * around flowing text.
  */
-function paragraph(runs, { before = 0, after = 60, indent = 0, hanging = 0, shading = null, borders = {}, rightTab = 0 } = {}) {
+function paragraph(runs, { before = 0, after = 60, indent = 0, hanging = 0, shading = null, borders = {}, rightTab = 0, align = null } = {}) {
   const parts = [];
   // A right-aligned tab stop, for text that sits hard against the right edge.
   if (rightTab) parts.push(`<w:tabs><w:tab w:val="right" w:pos="${rightTab}"/></w:tabs>`);
+  if (align === 'center' || align === 'right' || align === 'justify') parts.push(`<w:jc w:val="${align}"/>`);
   parts.push(`<w:spacing w:before="${before}" w:after="${after}"/>`);
   if (indent || hanging) {
     parts.push(`<w:ind w:left="${indent}"${hanging ? ` w:hanging="${hanging}"` : ''}/>`);
@@ -191,15 +192,26 @@ const TEXT_WIDTH = 11906 - 2 * 1134;
 
 /**
  * `display: grid; grid-template-columns: 1fr auto` over inline items, split
- * into the items of the 1fr column and the one in the auto column. Null for
- * anything else.
+ * into the items of the 1fr column and the one in the auto column. The same
+ * split applies to `display: flex; justify-content: space-between` over
+ * inline items -- a job's location and its dates, say -- which resumes use
+ * for exactly this "label left, value hard right" layout far more often than
+ * grid. Null for anything else.
  */
 function rightColumn(node, style) {
-  if (style.display !== 'grid') return null;
-  const tracks = String(style['grid-template-columns'] || '').trim().split(/\s+/);
-  if (tracks.length !== 2 || tracks[1] !== 'auto') return null;
+  const gridColumns = style.display === 'grid'
+    ? String(style['grid-template-columns'] || '').trim().split(/\s+/)
+    : null;
+  const isGrid = gridColumns && gridColumns.length === 2 && gridColumns[1] === 'auto';
+  const isFlexBetween = style.display === 'flex' && /\bspace-between\b/.test(style['justify-content'] || '');
+  if (!isGrid && !isFlexBetween) return null;
   const items = (node.children || []).filter((child) => child.tag !== '#text' || child.text.trim());
-  if (items.length < 2 || items.some(isBlock)) return null;
+  // Each item's own tag can be a block one -- a template's "degree"/"year"
+  // row is as often two <div>s as two <span>s -- as long as what is inside
+  // it is plain inline content runsOf() can read as one line. A block nested
+  // inside an item is the real wall: that needs its own layout, which a
+  // flattened run of text cannot give it.
+  if (items.length < 2 || items.some((item) => (item.children || []).some(isBlock))) return null;
   return { left: items.slice(0, -1), right: items[items.length - 1] };
 }
 
@@ -257,9 +269,33 @@ function styledBlocks(html) {
     return out;
   };
 
+  /**
+   * Flatten a rightColumn() item -- a grid/flex row's own direct item, which
+   * rightColumn already confirmed holds no nested block -- into runs. Unlike
+   * runsOf()'s own loop, this must not skip the item for being block-tagged
+   * itself (a row's items are as often <div>s as <span>s): only its
+   * descendants get that treatment, via the ordinary runsOf() recursion.
+   */
+  const flattenItems = (items, parentStyle, ancestors) => {
+    const out = [];
+    for (const item of items) {
+      const itemStyle = computeStyle(item, ancestors, sheet, parentStyle);
+      out.push(...runsOf(item, itemStyle, ancestors));
+    }
+    return out;
+  };
+
   const blocks = [];
 
-  const walk = (node, ancestors, inherited, inheritedFill, inheritedEdge, indent) => {
+  // `lead` carries a container's own padding-top down to whichever of its
+  // descendants draws first -- the only one it can actually show up in front
+  // of, since nothing here gives an empty container a paragraph of its own to
+  // carry spacing on. It is an object, not a plain number, so every recursive
+  // call sees the same box: the first real block drawn anywhere under this
+  // container consumes it (adds it to that block's own "before" and zeroes
+  // it), and every sibling after that -- at any depth -- finds it already
+  // spent, the same way CSS top margins/padding only ever show up once.
+  const walk = (node, ancestors, inherited, inheritedFill, inheritedEdge, indent, lead = { value: 0 }) => {
     for (const child of node.children || []) {
       if (!isBlock(child)) continue;
       const style = computeStyle(child, [...ancestors, node], sheet, inherited);
@@ -268,18 +304,26 @@ function styledBlocks(html) {
       const marginTop = points(style['margin-top'], variables, baseSize);
       const marginBottom = points(style['margin-bottom'], variables, baseSize);
       const paddingLeft = points(style['padding-left'], variables, baseSize);
+      const paddingTop = points(style['padding-top'], variables, baseSize);
       const fill = hex(colour(style.background || style['background-color'], variables)) || inheritedFill;
       // A box's own left edge, or the one its container is drawing: like the
       // fill, it belongs to every line inside the box, since the lines are all
       // WordprocessingML gives us to draw it on.
       const left = edge(style['border-left'], variables) || inheritedEdge;
       const under = edge(style['border-bottom'], variables);
+      // A non-<hr> element's own top border -- a decorative rule drawn as a
+      // plain <div> rather than an <hr>, which resumes do for a two-tone rule
+      // like a thick band over a thin bottom border, since <hr> only ever
+      // draws the one line its own border-top gives it.
+      const over = edge(style['border-top'], variables);
       const ownIndent = indent + twips(paddingLeft) + twips(points(style['margin-left'], variables, baseSize));
 
       if (child.tag === 'hr') {
+        const before = twips(marginTop) + lead.value;
+        lead.value = 0;
         blocks.push(
           paragraph([run(' ', { size: 2 })], {
-            before: twips(marginTop),
+            before,
             after: twips(marginBottom),
             borders: { bottom: edge(style['border-top'] || style.border, variables) || { width: 1, color: DEFAULT_INK } },
           }),
@@ -288,34 +332,47 @@ function styledBlocks(html) {
       }
 
       const children = child.children || [];
-      if (children.some(isBlock)) {
-        // A container: its own fill and edge pass down to what it holds.
-        walk(child, [...ancestors, node], style, fill, left, ownIndent);
+      // A grid/flex row is checked before the plain "has block children ->
+      // recurse as a container" path below, because its own items are very
+      // often block-tagged <div>s (a template's "degree"/"year" pair, say) --
+      // rightColumn itself is what decides whether that still reads as one
+      // row of flowing text rather than a container of separate blocks, not
+      // whether the items happen to be <div> or <span>.
+      const row = rightColumn(child, style);
+      if (!row && children.some(isBlock)) {
+        // A container: its own fill and edge pass down to what it holds. Its
+        // own padding-top has nowhere to live but in front of whatever draws
+        // first inside it, so it joins lead rather than being dropped here.
+        lead.value += twips(paddingTop);
+        walk(child, [...ancestors, node], style, fill, left, ownIndent, lead);
         continue;
       }
 
-      // A `1fr auto` grid row -- school on the left, years hard right -- is a
-      // right tab stop at the text edge, the years after the tab.
-      const row = rightColumn(child, style);
+      const itemAncestors = [...ancestors, node, child];
       const inlineRuns = row
         ? [
-            ...runsOf({ ...child, children: row.left }, style, [...ancestors, node]),
+            ...flattenItems(row.left, style, itemAncestors),
             '<w:r><w:tab/></w:r>',
-            ...runsOf({ ...child, children: [row.right] }, style, [...ancestors, node]),
+            ...flattenItems([row.right], style, itemAncestors),
           ]
         : runsOf(child, style, [...ancestors, node]);
-      if (!inlineRuns.length && !fill) continue;
+      // A border-only box -- a decorative rule drawn as an empty <div>, say --
+      // has no text and no fill either, but still has to leave its mark.
+      if (!inlineRuns.length && !fill && !left && !under && !over) continue;
 
       const bullet = child.tag === 'li';
+      const before = twips(marginTop) + twips(paddingTop) + lead.value;
+      lead.value = 0;
       blocks.push(
         paragraph(bullet ? [run('•  ', { size: sizeOf(style), color: hex(colour(style.color, variables)) || DEFAULT_INK }), ...inlineRuns] : inlineRuns, {
-          before: twips(marginTop),
+          before,
           after: twips(marginBottom),
           indent: bullet ? ownIndent + 280 : ownIndent,
           hanging: bullet ? 200 : 0,
           shading: fill,
-          borders: { left, bottom: under },
+          borders: { left, bottom: under, top: over },
           rightTab: row ? TEXT_WIDTH : 0,
+          align: row ? null : style['text-align'],
         }),
       );
     }

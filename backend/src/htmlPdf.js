@@ -163,13 +163,15 @@ function readCompound(part) {
   const clean = part.replace(/::?[a-z-]+(\([^)]*\))?/gi, '');
   if (!clean || clean === '>' || clean === '+' || clean === '~') return null;
   const classes = [...clean.matchAll(/\.([\w-]+)/g)].map((match) => match[1]);
+  const id = (clean.match(/#([\w-]+)/) || [])[1] || null;
   const tag = (clean.match(/^([a-z][a-z0-9]*)/i) || [])[1];
-  if (clean === '*') return { tag: null, classes: [], universal: true };
-  return { tag: tag ? tag.toLowerCase() : null, classes };
+  if (clean === '*') return { tag: null, classes: [], id: null, universal: true };
+  return { tag: tag ? tag.toLowerCase() : null, classes, id };
 }
 
 const matchesCompound = (node, part) =>
   (part.universal || !part.tag || node.tag === part.tag) &&
+  (!part.id || node.attrs?.id === part.id) &&
   part.classes.every((name) => node.classes.includes(name));
 
 /** Descendant combinators only -- the sheets here use nothing else. */
@@ -183,10 +185,10 @@ function matches(parts, node, ancestors) {
 }
 
 const specificity = (parts) =>
-  parts.reduce((total, part) => total + part.classes.length * 10 + (part.tag ? 1 : 0), 0);
+  parts.reduce((total, part) => total + (part.id ? 100 : 0) + part.classes.length * 10 + (part.tag ? 1 : 0), 0);
 
 /** Properties a child takes from its parent, as CSS defines inheritance. */
-const INHERITED = ['color', 'font-size', 'font-weight', 'font-style', 'line-height', 'letter-spacing', 'text-transform'];
+const INHERITED = ['color', 'font-size', 'font-weight', 'font-style', 'line-height', 'letter-spacing', 'text-transform', 'text-align'];
 
 /** The declarations that apply to one node, parent values included. */
 export function computeStyle(node, ancestors, sheet, inherited) {
@@ -408,13 +410,27 @@ export function renderHtmlToPdf(html, { url } = {}) {
    * the school and its years, say. The last item is the auto column, as wide
    * as its text and hard right; everything before it is the 1fr column and
    * wraps in what is left. Null for any other grid, which flows as blocks do.
+   *
+   * `display: flex; justify-content: space-between` over inline items -- a
+   * job's location and its dates, say -- reads the same way: everything but
+   * the last item on the left, the last item hard right. Flexbox can do much
+   * more than that, but this is the one layout resumes actually reach for, so
+   * it is the one approximated here rather than flex's full box model.
    */
   const splitRow = (node, style, ancestors) => {
-    if (style.display !== 'grid') return null;
-    const tracks = resolveVar(style['grid-template-columns'] || '', sheet.variables).trim().split(/\s+/);
-    if (tracks.length !== 2 || tracks[1] !== 'auto') return null;
+    const gridColumns = style.display === 'grid'
+      ? resolveVar(style['grid-template-columns'] || '', sheet.variables).trim().split(/\s+/)
+      : null;
+    const isGrid = gridColumns && gridColumns.length === 2 && gridColumns[1] === 'auto';
+    const isFlexBetween = style.display === 'flex' && /\bspace-between\b/.test(style['justify-content'] || '');
+    if (!isGrid && !isFlexBetween) return null;
     const items = (node.children || []).filter((child) => child.tag !== '#text' || child.text.trim());
-    if (items.length < 2 || items.some(isBlock)) return null;
+    // Each item's own tag can be a block one -- a template's "degree"/"year"
+    // row is as often two <div>s as two <span>s -- as long as what is inside
+    // it is plain inline content the way runs() reads it. A block nested
+    // inside an item is the real wall: that needs its own layout, which a
+    // flattened run of text cannot give it.
+    if (items.length < 2 || items.some((item) => (item.children || []).some(isBlock))) return null;
 
     const right = runs({ ...node, children: items.slice(-1) }, style, ancestors)
       .map((run) => ({ ...run, text: run.text.trim() }))
@@ -476,6 +492,8 @@ export function renderHtmlToPdf(html, { url } = {}) {
       }
       first = false;
       let cursor = x;
+      if (style['text-align'] === 'center') cursor = x + Math.max(0, (width - lineWidth) / 2);
+      else if (style['text-align'] === 'right') cursor = x + Math.max(0, width - lineWidth);
       for (const word of line) {
         if (word.pad) {
           cursor += word.pad * MM_PER_PT;
@@ -528,9 +546,13 @@ export function renderHtmlToPdf(html, { url } = {}) {
     const margin = box(style.margin, sheet.variables, baseSize);
     if (style['margin-top'] !== undefined) margin.top = points(style['margin-top'], sheet.variables, baseSize);
     if (style['margin-bottom'] !== undefined) margin.bottom = points(style['margin-bottom'], sheet.variables, baseSize);
+    if (style['margin-left'] !== undefined) margin.left = points(style['margin-left'], sheet.variables, baseSize);
+    if (style['margin-right'] !== undefined) margin.right = points(style['margin-right'], sheet.variables, baseSize);
     const padding = box(style.padding, sheet.variables, baseSize);
+    if (style['padding-top'] !== undefined) padding.top = points(style['padding-top'], sheet.variables, baseSize);
     if (style['padding-bottom'] !== undefined) padding.bottom = points(style['padding-bottom'], sheet.variables, baseSize);
     if (style['padding-left'] !== undefined) padding.left = points(style['padding-left'], sheet.variables, baseSize);
+    if (style['padding-right'] !== undefined) padding.right = points(style['padding-right'], sheet.variables, baseSize);
     return { margin, padding };
   };
 
@@ -556,6 +578,22 @@ export function renderHtmlToPdf(html, { url } = {}) {
       }
       state.y += margin.bottom * MM_PER_PT;
       return;
+    }
+
+    // A non-<hr> element's own top border -- a decorative rule drawn as a
+    // plain <div> rather than an <hr>, which resumes do for a two-tone rule
+    // like a thick band over a thin one, since <hr> only ever draws one line.
+    // Drawn here, before padding/content, the same way border-bottom is drawn
+    // after them below.
+    const over = border(style['border-top'], sheet.variables);
+    if (over) {
+      room(over.width * MM_PER_PT);
+      if (state.draw) {
+        doc.setDrawColor(...over.colour);
+        doc.setLineWidth(over.width * MM_PER_PT);
+        doc.line(x, state.y, x + width, state.y);
+      }
+      state.y += over.width * MM_PER_PT;
     }
 
     const background = colour(style.background || style['background-color'], sheet.variables);
@@ -584,8 +622,17 @@ export function renderHtmlToPdf(html, { url } = {}) {
 
     const children = node.children || [];
     const blocks = children.filter(isBlock);
+    // A grid/flex row is checked before the plain "has block children ->
+    // recurse as a container" path below, because its own items are very
+    // often block-tagged <div>s (a template's "degree"/"year" pair, say) --
+    // splitRow itself is what decides whether that still reads as one row of
+    // flowing text rather than a container of separate blocks, not whether
+    // the items happen to be <div> or <span>.
+    const row = splitRow(node, style, ancestors);
 
-    if (blocks.length) {
+    if (row) {
+      inline(row.left, inner.x, inner.width, style, row.right, row.gap);
+    } else if (blocks.length) {
       flow(blocks, [...ancestors, node], inner.x, inner.width, style);
     } else if (node.tag === 'li') {
       // ul li::before puts a bullet in the padding to the left of the text. The

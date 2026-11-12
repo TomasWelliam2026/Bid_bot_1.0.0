@@ -166,7 +166,10 @@ code {
    wants neither, so every border is cleared and only the underline reads as
    selection. */
 .tab {
-  flex: 1 1 auto;
+  /* Equal columns regardless of each tab's own text length — basis 0, not
+     auto, or "Generate JD & Resume" claims more width than "Auto Fill" and
+     the dividers between tabs land at uneven points. */
+  flex: 1 1 0;
   min-width: 0;
   padding: 10px 2px 8px;
   font: inherit;
@@ -536,6 +539,12 @@ header {
 .mode-body[hidden] { display: none; }
 
 #auto-controls[hidden] { display: none; }
+
+/* API / Auto switch atop ChatGPT Settings — the same segmented control as
+   Auto/Manual above, just reused for a second, unrelated choice. */
+#gptMethodSwitch { margin-bottom: 10px; }
+#gptApiFields[hidden],
+#gptAutoFields[hidden] { display: none; }
 
 /* The notes and the answer box under the manual form, which are the same
    elements the feed puts on a row. */
@@ -1040,6 +1049,22 @@ a.job-title:hover { color: var(--accent); text-decoration: underline; }
   --panel-line: color-mix(in srgb, #6fd6ee 35%, var(--line));
 }
 .gpt-panel[hidden] { display: none; }
+/* Slides open/closed (sidepanel.js's setPanelVisible) rather than popping:
+   max-height is driven inline per panel (its content varies too much for a
+   fixed value), opacity/transform are the same for all of them. Clipped
+   only while actually moving — "visible" the rest of the time, so a native
+   <select>'s own dropdown or anything else that escapes the box is not cut
+   off at rest. */
+.gpt-panel {
+  opacity: 0;
+  transform: translateY(-6px);
+  transition: max-height 0.26s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.2s ease, transform 0.22s ease;
+}
+.gpt-panel.slide-open { opacity: 1; transform: translateY(0); }
+.gpt-panel.slide-animating { overflow: hidden; }
+@media (prefers-reduced-motion: reduce) {
+  .gpt-panel { transition: none; opacity: 1; transform: none; }
+}
 /* Search Settings: the form itself needs no box of its own inside the panel. */
 .search-panel { margin-bottom: 10px; }
 .search-panel .search-form { margin: 0; padding: 0; background: none; border: 0; }
@@ -1146,7 +1171,9 @@ a.job-title:hover { color: var(--accent); text-decoration: underline; }
 .form textarea[hidden],
 .form .hint[hidden] { display: none; }
 .form #modelCustom { margin-top: 6px; }
-.form #modelCustom[hidden] { display: none; }
+.form #modelCustom[hidden],
+.form #chatgptModelCustom[hidden] { display: none; }
+.form #chatgptModelCustom { margin-top: 6px; }
 
 /* Short paired fields — first/last, city/state, zip/country — sit side by side
    until the panel is dragged narrow, then stack. */
@@ -1198,6 +1225,9 @@ a.job-title:hover { color: var(--accent); text-decoration: underline; }
 
 .style-actions { margin-top: 6px; }
 
+.style-select-row { display: flex; gap: var(--gap); align-items: center; }
+.style-select-row select { flex: 1; min-width: 0; }
+
 /* The Template prompt's text, open and selectable when the clipboard write
    it tries first does not go through. */
 .style-prompt-peek { margin-top: 8px; font-size: 12px; }
@@ -1240,7 +1270,12 @@ a.job-title:hover { color: var(--accent); text-decoration: underline; }
 .profile-card[open] > summary::before { transform: rotate(90deg); }
 .profile-name { flex: none; font-size: 13px; font-weight: 700; color: var(--brand); }
 .profile-sub {
+  /* Flush right on every card, not just after however long that card's own
+     name happens to be — one column of names, one column of badges, lined
+     up the same way down the list rather than each badge sitting wherever
+     its own name ends. */
   flex: 0 1 auto;
+  margin-left: auto;
   min-width: 0;
   overflow: hidden;
   padding: 1px 9px;
@@ -1317,3 +1352,6 @@ a.job-title:hover { color: var(--accent); text-decoration: underline; }
 .test-actions { margin-top: 6px; align-items: center; }
 .test-actions button { flex: none; }
 .test-actions .hint { margin: 0; }
+/* The status text takes whatever room the two icon buttons leave, rather
+   than each on a line of its own. */
+.test-status-col { flex: 1 1 auto; min-width: 0; }

@@ -3,7 +3,6 @@ import CsvImport from './components/CsvImport.jsx';
 import RecordsTable from './components/RecordsTable.jsx';
 import ReviewQueue from './components/ReviewQueue.jsx';
 import SheetSettings from './components/SheetSettings.jsx';
-import TabTrend from './components/TabTrend.jsx';
 import UserTabs from './components/UserTabs.jsx';
 import { API, useArchive } from './hooks/useArchive.js';
 import { useActiveUser } from './hooks/useActiveUser.js';
@@ -277,44 +276,37 @@ export default function App() {
         </div>
       )}
 
-      {/* This tab's own numbers on the left, how every tab has grown over
-          time on the right -- one row, the two sides pinned to the same
-          height (see .overview-row), so the four tiles stretch to fill
-          whatever height the chart on the right settles on rather than
-          leaving a gap under a shorter stack. */}
-      <div className="overview-row">
-        <div className="tiles">
-          <div className="panel tile">
-            <div className="tile-text">
-              <div className="tile-label">Applications</div>
-              <div className="tile-detail">in this tab</div>
-            </div>
-            <div className="tile-value">{tileCounts.total || 0}</div>
+      {/* This tab's own numbers, as a single row of figures -- no chart
+          alongside them. */}
+      <div className="tiles">
+        <div className="panel tile">
+          <div className="tile-text">
+            <div className="tile-label">Applications</div>
+            <div className="tile-detail">in this tab</div>
           </div>
-          <div className="panel tile">
-            <div className="tile-text">
-              <div className="tile-label">Filed</div>
-              <div className="tile-detail">PDFs written to disk</div>
-            </div>
-            <div className="tile-value good">{tileCounts.saved || 0}</div>
-          </div>
-          <div className="panel tile">
-            <div className="tile-text">
-              <div className="tile-label">Waiting</div>
-              <div className="tile-detail">{activeUser?.auto ? 'automatic mode is on' : 'awaiting your review'}</div>
-            </div>
-            <div className={pending.length ? 'tile-value warn' : 'tile-value'}>{tileCounts.pending || 0}</div>
-          </div>
-          <div className="panel tile">
-            <div className="tile-text">
-              <div className="tile-label">Rejected / failed</div>
-              <div className="tile-detail">nothing filed</div>
-            </div>
-            <div className="tile-value">{(tileCounts.rejected || 0) + (tileCounts.failed || 0)}</div>
-          </div>
+          <div className="tile-value">{tileCounts.total || 0}</div>
         </div>
-
-        <TabTrend users={users} records={records} activeId={activeId} />
+        <div className="panel tile">
+          <div className="tile-text">
+            <div className="tile-label">Filed</div>
+            <div className="tile-detail">PDFs written to disk</div>
+          </div>
+          <div className="tile-value good">{tileCounts.saved || 0}</div>
+        </div>
+        <div className="panel tile">
+          <div className="tile-text">
+            <div className="tile-label">Waiting</div>
+            <div className="tile-detail">{activeUser?.auto ? 'automatic mode is on' : 'awaiting your review'}</div>
+          </div>
+          <div className={pending.length ? 'tile-value warn' : 'tile-value'}>{tileCounts.pending || 0}</div>
+        </div>
+        <div className="panel tile">
+          <div className="tile-text">
+            <div className="tile-label">Rejected / failed</div>
+            <div className="tile-detail">nothing filed</div>
+          </div>
+          <div className="tile-value">{(tileCounts.rejected || 0) + (tileCounts.failed || 0)}</div>
+        </div>
       </div>
 
       <ReviewQueue records={pending} onApprove={approve} onReject={reject} />

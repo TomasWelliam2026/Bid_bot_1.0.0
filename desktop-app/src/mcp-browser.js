@@ -23,6 +23,9 @@ const POLL_MS = 500;
 const QUIET_EVERY = 8; // a tab nothing is happening in: every 8th poll, ~4s
 const LIST_EVERY = 3; // list_pages on every third poll; pages are polled each time
 const ANSWER_TIMEOUT_MS = 5 * 60 * 1000;
+// Well past CHATGPT_GENERATE_TIMEOUT_MS in background.js (10 minutes) — see
+// executeScript below for why a script run this way gets this long.
+const EXECUTE_SCRIPT_TIMEOUT_MS = 12 * 60 * 1000;
 const NO_RECEIVER = "Could not establish connection. Receiving end does not exist.";
 const PORT_CLOSED = "The message port closed before a response was received.";
 
@@ -265,11 +268,16 @@ class McpBrowser extends EventEmitter {
     this.setState("disconnected", "the browser closed, or the MCP server stopped");
   }
 
-  async call(name, args) {
+  // timeoutMs overrides the MCP client's own default request timeout (a
+  // flat 60s), for a call expected to run longer than that — the script a
+  // tool like evaluate_script runs is this app's own, and can legitimately
+  // take minutes (see executeScript below), so 60s would cut a perfectly
+  // healthy run short rather than mean anything went wrong.
+  async call(name, args, { timeoutMs } = {}) {
     if (!this.client && this.connecting) await this.connecting.catch(() => {});
     if (!this.client && this.ensureConnected && this.state !== "connecting") await this.ensureConnected();
     if (!this.client) throw new Error("not connected to Chrome — pick a browser and click Connect");
-    return this.client.callTool({ name, arguments: args });
+    return this.client.callTool({ name, arguments: args }, undefined, timeoutMs ? { timeout: timeoutMs } : undefined);
   }
 
   // id is the tab's id; the call goes to whatever page is in that tab now.
@@ -277,8 +285,8 @@ class McpBrowser extends EventEmitter {
   // in a tab for a new one as a site moves itself on (Gmail does, opening a
   // new message). The page list is read again until the tab has its new
   // page, and the script is run once more there.
-  async evaluate(id, fn, { format = "function" } = {}) {
-    const run = () => this.call("evaluate_script", { pageId: this.pageOf(id), function: fn, format, waitForStableDom: false });
+  async evaluate(id, fn, { format = "function", timeoutMs } = {}) {
+    const run = () => this.call("evaluate_script", { pageId: this.pageOf(id), function: fn, format, waitForStableDom: false }, { timeoutMs });
     try {
       return parseEvaluate(await run());
     } catch (err) {
@@ -821,6 +829,13 @@ class McpBrowser extends EventEmitter {
 
   // chrome.scripting.executeScript: files run in order, or one function with
   // JSON args. The answer is shaped as Chrome's: [{ result }].
+  //
+  // The function given is the caller's own script, awaited to completion
+  // here — chrome.scripting.executeScript in a real browser has no run-time
+  // limit of its own, and a script like the ChatGPT auto-answer one can
+  // legitimately run for minutes (it waits out a real generation rather than
+  // giving up on a timer), so this is given much longer than the MCP
+  // client's ordinary 60s request timeout rather than inheriting it.
   async executeScript({ target, files, func, args = [] }) {
     const tabId = Number(target?.tabId);
     if (!this.tabs.has(tabId)) throw new Error(`No tab with id: ${tabId}.`);
@@ -829,7 +844,7 @@ class McpBrowser extends EventEmitter {
       return [{ result: undefined }];
     }
     const source = typeof func === "function" ? func.toString() : String(func);
-    const result = await this.evaluate(tabId, `async () => (${source})(...${JSON.stringify(args)})`);
+    const result = await this.evaluate(tabId, `async () => (${source})(...${JSON.stringify(args)})`, { timeoutMs: EXECUTE_SCRIPT_TIMEOUT_MS });
     return [{ result }];
   }
 

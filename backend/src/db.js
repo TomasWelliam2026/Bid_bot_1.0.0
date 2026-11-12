@@ -108,7 +108,8 @@ export class Store {
         resume_docx_path TEXT,
         error         TEXT,
         created_at    TEXT NOT NULL,
-        decided_at    TEXT
+        decided_at    TEXT,
+        ats_score     TEXT          -- how well the model scored the resume against the job, 0-100
       );
 
       CREATE TABLE IF NOT EXISTS drafts (
@@ -194,6 +195,7 @@ export class Store {
     this.addColumn('sent_status', "TEXT NOT NULL DEFAULT 'unsent'");
     this.addColumn('sent_at', 'TEXT');
     this.addColumn('resume_docx_path', 'TEXT');
+    this.addColumn('ats_score', 'TEXT');
 
     this.addColumn('user_id', 'INTEGER');
     this.db.exec('CREATE INDEX IF NOT EXISTS records_user ON records (user_id)');
@@ -337,14 +339,14 @@ export class Store {
    * `sent_at` is the date on the row, being as close to when it reached the
    * sheet as anything here knows.
    */
-  insert({ company, jobTitle, jobUrl, status, mode, createdAt, sent = false, userId = null }) {
+  insert({ company, jobTitle, jobUrl, status, mode, createdAt, sent = false, userId = null, atsScore = null }) {
     const at = createdAt || new Date().toISOString();
     const result = this.db
       .prepare(
-        `INSERT INTO records (company, job_title, job_url, status, sent_status, sent_at, mode, created_at, user_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO records (company, job_title, job_url, status, sent_status, sent_at, mode, created_at, user_id, ats_score)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(company, jobTitle, jobUrl || null, status, sent ? 'sent' : 'unsent', sent ? at : null, mode, at, userId);
+      .run(company, jobTitle, jobUrl || null, status, sent ? 'sent' : 'unsent', sent ? at : null, mode, at, userId, atsScore || null);
     return Number(result.lastInsertRowid);
   }
 

@@ -298,12 +298,12 @@
       const r = d.resume || d;
       const c = d.contact || {};
       return {
-        CONTACT: [d.name, d.title, c.location, c.phone, c.email, c.linkedin].map((v) => v || ""),
+        CONTACT: [d.name, d.title, c.location, c.phone, c.email, c.linkedin || c.website].map((v) => v || ""),
         SUMMARY: r.summary || "",
         SKILLS: r.skills || [],
-        EXPERIENCE: (r.experience || []).map((e) => [e.company, e.position, e.location, e.duration, ...(e.content || [])]),
-        CERTIFICATIONS: r.certifications || [],
-        EDUCATION: (r.education || []).map((e) => [e.school, [[e.degree, e.field]], e.year])
+        EXPERIENCE: (r.experience || []).map((e) => [e.company, e.position || e.title || e.role, e.location, e.duration || e.dates, ...(e.content || e.bullets || [])]),
+        CERTIFICATIONS: (r.certifications || d.certifications || []).map((c2) => (typeof c2 === "string" ? c2 : c2?.name || "")),
+        EDUCATION: (r.education || []).map((e) => [e.school, [[e.degree, e.field]], e.year || e.duration])
       };
     }
 

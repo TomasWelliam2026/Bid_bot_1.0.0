@@ -97,6 +97,14 @@ async function cloudGet(api, token, path) {
 const folderKeys = ({ folder }) =>
   (folder && typeof folder === "object" ? [folder.uuid, folder.name] : [folder]).filter(Boolean).map((k) => String(k).toLowerCase());
 
+// Every folder Octo's cloud API knows of, for this token — the Browser
+// Profile panel's Folder names field offers these, rather than asking for a
+// name typed by hand and matched against this same list.
+async function listAllFolders({ token, api = OCTO_CLOUD } = {}) {
+  const { data = [] } = await cloudGet(api, token, "/folders");
+  return data.map((f) => ({ uuid: f.uuid, name: f.name })).sort((a, b) => a.name.localeCompare(b.name));
+}
+
 // { profiles: [{ uuid, name }], missing: names no folder has }
 async function listFolderProfiles({ token, folders, api = OCTO_CLOUD }) {
   const { data: known = [] } = await cloudGet(api, token, "/folders");
@@ -124,4 +132,4 @@ async function listFolderProfiles({ token, folders, api = OCTO_CLOUD }) {
   return { profiles, missing };
 }
 
-module.exports = { listOctoProfiles, listFolderProfiles, dataDirOf };
+module.exports = { listOctoProfiles, listFolderProfiles, listAllFolders, dataDirOf };
