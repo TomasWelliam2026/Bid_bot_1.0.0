@@ -1,6 +1,6 @@
 // Bid Bot for Windows.
 //
-// One always-on-top, resizable window, shown from its taskbar button, running the extension's own side panel
+// One always-on-top, resizable window, shown from a tray icon, running the extension's own side panel
 // page. The extension's background.js runs here in the main process, and
 // every browser action it takes goes to Google Chrome through the Chrome
 // DevTools MCP server. The bar along the top of the window picks which
@@ -10,7 +10,8 @@
 const path = require("node:path");
 const fs = require("node:fs");
 const { pathToFileURL } = require("node:url");
-const { app, BrowserWindow, ipcMain, protocol, net, shell, safeStorage, screen } = require("electron");
+const { execFile } = require("node:child_process");
+const { app, BrowserWindow, ipcMain, protocol, net, shell, safeStorage, screen, Tray, Menu, nativeImage } = require("electron");
 const { findChromes } = require("./chrome-finder");
 const { findRunningBrowsers, openDebugSetting, profileArgs } = require("./running-browsers");
 const { importFromExtension: importExt } = require("./extension-import");
@@ -289,9 +290,10 @@ function createWindow() {
   win = new BrowserWindow({
     width: bounds.width || 440,
     height: bounds.height || 860,
-    // Starts out of sight with only its taskbar button (see the taskbar
-    // button section below).
+    // Hidden at start: the bot lives in the tray and slides out of its icon
+    // (see the tray section below), so it has no taskbar button of its own.
     show: false,
+    skipTaskbar: true,
     minWidth: 340,
     minHeight: 420,
     resizable: true,
@@ -334,16 +336,21 @@ function createWindow() {
   win.once("ready-to-show", pinAcrossDesktops);
   win.on("restore", pinAcrossDesktops);
 
-  // Only the size is remembered: the position always comes from the taskbar button.
+  // Only the size is remembered: the position always comes from the tray icon.
   const remember = () => {
     if (!win || win.isMinimized() || win.isMaximized() || animating) return;
     const { width, height } = win.getBounds();
     saveSettings({ bounds: { width, height } });
   };
   win.on("resized", remember);
-  win.on("close", remember);
-  wireTaskbarButton();
-  win.once("ready-to-show", startOnTaskbar);
+  // Closing (title bar ×, Alt+F4) folds the bot back into the tray; only
+  // Quit in the tray menu ends the app.
+  win.on("close", (e) => {
+    remember();
+    if (quitting) return;
+    e.preventDefault();
+    collapseToTray();
+  });
   // The title bar's maximize button shows restore while maximized.
   const sendMaximized = () => win?.webContents.send("win:maximized", win.isMaximized());
   win.on("maximize", sendMaximized);
@@ -360,27 +367,22 @@ function createWindow() {
 }
 
 // ---------------------------------------------------------------------------
-// The taskbar button: the window expands out of it and collapses back into it
+// The tray icon: the window expands out of it and collapses back into it
 // ---------------------------------------------------------------------------
-//
-// The bot always has its button on the taskbar. "Hidden" is minimized at zero
-// opacity, so Windows' own minimize/restore animations show nothing and ours
-// does the work: clicking the button restores the window, which then slides
-// out from where the button was clicked, travelling its own height; clicking
-// the button again (or the panel's – / × buttons) slides it back and
-// minimizes it. Alt+F4 or "Close window" on the button quit the app.
 
+let tray = null;
+let quitting = false;
 let animating = false;
 let animTimer = null;
 let shown = false;
-let collapsing = false;
 const ANIM_MS = 220;
 
 // Where the window sits when shown, and the direction it travels from the
-// button: away from the taskbar, whichever screen edge that is on. The button
-// is where the mouse is when it was clicked; from the keyboard (Win+number,
-// Alt+Tab) the window lines up with the mouse along the taskbar instead.
-function anchorFor(size, point = screen.getCursorScreenPoint()) {
+// icon: away from the taskbar, whichever screen edge that is on.
+function anchorFor(size) {
+  const iconB = tray?.getBounds() || { x: 0, y: 0, width: 0, height: 0 };
+  const iconKnown = iconB.width > 0 && iconB.height > 0;
+  const point = iconKnown ? { x: iconB.x + iconB.width / 2, y: iconB.y + iconB.height / 2 } : screen.getCursorScreenPoint();
   const display = screen.getDisplayNearestPoint(point);
   const wa = display.workArea, db = display.bounds;
   let edge = "bottom";
@@ -421,8 +423,7 @@ function animate(from, to, opFrom, opTo, done) {
   step();
 }
 
-// Called once the window is up (restored by a button click, or shown).
-function expandFromTaskbar() {
+function expandFromTray() {
   if (!win) return;
   if (win.isMaximized()) win.unmaximize();
   const { width, height } = win.getBounds();
@@ -432,44 +433,73 @@ function expandFromTaskbar() {
   shown = true;
   win.setOpacity(0);
   win.setBounds(start);
-  if (!win.isVisible() || win.isMinimized()) win.show();
+  win.show();
   win.focus();
   animate(start, end, 0, 1);
 }
 
-function collapseToTaskbar() {
+function collapseToTray() {
   if (!win || !shown) return;
   shown = false;
-  collapsing = true;
   const b = win.getBounds();
-  const a = anchorFor(b, { x: b.x + b.width / 2, y: b.y + b.height / 2 });
+  const a = anchorFor(b);
   animate(b, { x: b.x + a.dx, y: b.y + a.dy, width: b.width, height: b.height }, win.getOpacity(), 0, () => {
-    if (win && !shown) win.minimize();
-    collapsing = false;
+    if (win && !shown) { win.hide(); win.setOpacity(1); }
   });
 }
 
-// Starts out of sight: minimized, at zero opacity, button on the taskbar.
-function startOnTaskbar() {
-  win.setOpacity(0);
-  win.showInactive();
-  win.minimize();
+// Clicking anywhere outside the window folds it back into the tray. Clicking
+// the tray icon itself also takes focus from the window first, so a fold that
+// just happened from that is the icon's click, not a reason to open again.
+let lastBlurFold = 0;
+function foldOnBlur() {
+  if (!shown || animating) return;
+  lastBlurFold = Date.now();
+  collapseToTray();
 }
 
-function wireTaskbarButton() {
-  // A click on the button when the bot is out of sight restores it.
-  win.on("restore", () => {
-    if (collapsing || shown) return;
-    expandFromTaskbar();
-  });
-  // A click on the button while the bot is in front minimizes it at once;
-  // bring it back for a moment so it can slide into the button instead.
-  win.on("minimize", () => {
-    if (collapsing || !shown) return;
-    collapsing = true;
-    win.restore();
-    collapsing = false;
-    collapseToTaskbar();
+const toggleFromTray = () => {
+  if (shown) return collapseToTray();
+  if (Date.now() - lastBlurFold < 400) return;
+  expandFromTray();
+};
+
+function createTray() {
+  const img = nativeImage.createFromPath(path.join(__dirname, "..", "assets", "logo.png")).resize({ width: 16, height: 16 });
+  tray = new Tray(img);
+  tray.setToolTip("Valiant Sisu Bid Bot");
+  keepTrayIconOnTaskbar();
+  tray.on("click", toggleFromTray);
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: "Show / Hide", click: toggleFromTray },
+    { type: "separator" },
+    { label: "Quit", click: () => { quitting = true; app.quit(); } }
+  ]));
+}
+
+// Windows 11 puts a new tray icon in the "^" overflow. Explorer records each
+// app's icon under HKCU\Control Panel\NotifyIconSettings, keyed by an id it
+// picks, with the exe's path; IsPromoted=1 on that entry is what Settings >
+// Personalization > Taskbar > "Other system tray icons" sets to keep the icon
+// on the taskbar. This sets it for the app's own entry (Explorer writes the
+// entry a moment after the icon first appears, so it looks a few times).
+// Explorer reads the flag when it starts; while it is running only that
+// Settings switch, or dragging the icon out of "^", moves the icon.
+// Best-effort: on failure the icon stays where Windows put it.
+function keepTrayIconOnTaskbar(triesLeft = 5) {
+  if (process.platform !== "win32") return;
+  const exe = process.execPath.replace(/'/g, "''");
+  const ps = [
+    "$n=0",
+    "Get-ChildItem 'HKCU:\\Control Panel\\NotifyIconSettings' -EA 0 | % {",
+    "  $p = Get-ItemProperty $_.PSPath",
+    `  if ($p.ExecutablePath -eq '${exe}') { $n++; if ($p.IsPromoted -ne 1) { Set-ItemProperty $_.PSPath IsPromoted 1 -Type DWord } }`,
+    "}",
+    "exit ([int]($n -eq 0))"
+  ].join("\n");
+  execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps], { windowsHide: true }, (err) => {
+    if (err && triesLeft > 1) setTimeout(() => keepTrayIconOnTaskbar(triesLeft - 1), 3000);
+    else if (err) console.error("[tray] could not keep the icon on the taskbar");
   });
 }
 
@@ -491,7 +521,7 @@ let importNote = null; // what was copied from the extension on connecting
 
 app.on("second-instance", () => {
   if (!win) return;
-  if (!shown) { if (win.isMinimized()) win.restore(); else expandFromTaskbar(); }
+  if (!shown) expandFromTray();
   else win.focus();
 });
 
@@ -720,16 +750,15 @@ app.whenReady().then(async () => {
   });
 
   // The panel's own title bar buttons.
-  ipcMain.handle("win:minimize", () => collapseToTaskbar());
+  ipcMain.handle("win:minimize", () => collapseToTray());
   ipcMain.handle("win:toggleMaximize", () => {
     if (!win) return false;
     if (win.isMaximized()) win.unmaximize();
     else win.maximize();
     return win.isMaximized();
   });
-  // The panel's × folds the bot into its taskbar button; Alt+F4 or the
-  // button's "Close window" quit.
-  ipcMain.handle("win:close", () => collapseToTaskbar());
+  // The panel's × folds the bot into the tray (see the window's close).
+  ipcMain.handle("win:close", () => collapseToTray());
   ipcMain.handle("win:isMaximized", () => !!win?.isMaximized());
 
   ipcMain.handle("app:onTop", (_e, on) => {
@@ -740,12 +769,16 @@ app.whenReady().then(async () => {
   });
 
   createWindow();
+  createTray();
   win.on("focus", rescan);
+  win.on("blur", foldOnBlur);
 });
 
 app.on("window-all-closed", () => app.quit());
 
 app.on("before-quit", () => {
+  quitting = true;
+  tray?.destroy();
   engine?.api.storage.flushNow();
   engine?.browser.disconnect().catch(() => {});
 });

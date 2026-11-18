@@ -1,9 +1,9 @@
 # Bid Bot for Windows
 
-The Jobright Live Feed extension as a Windows app. It lives as a button on
-the taskbar; click it and one small window slides out of it,
-stays on top of your other windows and can be resized,
-with the extension's own panel inside it — Generate, Auto Fill, Settings, all of it. You pick which
+The Jobright Live Feed extension as a Windows app. It lives as an icon in
+the taskbar's notification area, next to the clock; click the icon and one
+small window slides out of it, stays on top of your other windows and can be
+resized, with the extension's own panel inside it — Generate, Auto Fill, Settings, all of it. You pick which
 Google Chrome to use, press **Start**, and the app drives that Chrome.
 
 ## How it works
@@ -101,18 +101,25 @@ in the menu.
 **Pin on top** keeps the window above other windows; click it to let other
 windows cover it. The window remembers its size and pin.
 
-### The taskbar button
+### The tray icon
 
-The app starts with no window on screen — only the Bid Bot button on the
-taskbar, always in view (right-click it and **Pin to taskbar** to keep it
-there between runs too). Clicking the button expands the window out of it:
-the window is placed next to the button (above it with the taskbar at the
-bottom, beside or below it for a side or top taskbar) and slides out from
-the button over a distance equal to its own height. Click the button again,
-or the window's **–** or **×** button, and it slides back into the button —
-the run keeps going. To quit, press Alt+F4 in the window or right-click the
-button and choose **Close window**. Launching it a second time expands the
-running copy.
+The app starts with no window on screen — only the Bid Bot icon in the
+taskbar's notification area, next to the clock. Clicking the icon expands
+the window out of it: the window is placed next to the icon (above it with
+the taskbar at the bottom, beside or below it for a side or top taskbar) and
+slides out from the icon over a distance equal to its own height. Click the
+icon again, click anywhere outside the window, or use its **–** or **×**
+button, and it slides back into
+the icon and hides — the run keeps going. Right-click the icon for
+**Show / Hide** and **Quit**; Quit is the only way to close the app.
+Launching it a second time expands the running copy.
+
+**Keeping the icon in view.** Windows 11 puts a new tray icon behind the
+**^** arrow. The app asks Windows to show its icon on the taskbar, but
+Windows only applies that the next time you sign in. To have it there right
+away, do this once: **Settings → Personalization → Taskbar → Other system
+tray icons**, switch **Valiant Sisu Bid Bot** on (or drag the icon out of
+**^** onto the taskbar). Windows remembers it for this copy of the app.
 
 ## Your extension settings come along
 
