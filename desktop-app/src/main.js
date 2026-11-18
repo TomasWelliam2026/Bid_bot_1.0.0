@@ -1,6 +1,6 @@
 // Bid Bot for Windows.
 //
-// One always-on-top, resizable window running the extension's own side panel
+// One always-on-top, resizable window, shown from its taskbar button, running the extension's own side panel
 // page. The extension's background.js runs here in the main process, and
 // every browser action it takes goes to Google Chrome through the Chrome
 // DevTools MCP server. The bar along the top of the window picks which
@@ -10,7 +10,7 @@
 const path = require("node:path");
 const fs = require("node:fs");
 const { pathToFileURL } = require("node:url");
-const { app, BrowserWindow, ipcMain, protocol, net, shell, safeStorage } = require("electron");
+const { app, BrowserWindow, ipcMain, protocol, net, shell, safeStorage, screen } = require("electron");
 const { findChromes } = require("./chrome-finder");
 const { findRunningBrowsers, openDebugSetting, profileArgs } = require("./running-browsers");
 const { importFromExtension: importExt } = require("./extension-import");
@@ -289,8 +289,9 @@ function createWindow() {
   win = new BrowserWindow({
     width: bounds.width || 440,
     height: bounds.height || 860,
-    x: bounds.x,
-    y: bounds.y,
+    // Starts out of sight with only its taskbar button (see the taskbar
+    // button section below).
+    show: false,
     minWidth: 340,
     minHeight: 420,
     resizable: true,
@@ -333,13 +334,16 @@ function createWindow() {
   win.once("ready-to-show", pinAcrossDesktops);
   win.on("restore", pinAcrossDesktops);
 
+  // Only the size is remembered: the position always comes from the taskbar button.
   const remember = () => {
-    if (!win || win.isMinimized() || win.isMaximized()) return;
-    saveSettings({ bounds: win.getBounds() });
+    if (!win || win.isMinimized() || win.isMaximized() || animating) return;
+    const { width, height } = win.getBounds();
+    saveSettings({ bounds: { width, height } });
   };
   win.on("resized", remember);
-  win.on("moved", remember);
   win.on("close", remember);
+  wireTaskbarButton();
+  win.once("ready-to-show", startOnTaskbar);
   // The title bar's maximize button shows restore while maximized.
   const sendMaximized = () => win?.webContents.send("win:maximized", win.isMaximized());
   win.on("maximize", sendMaximized);
@@ -353,6 +357,120 @@ function createWindow() {
 
   win.loadURL(`${EXT_ORIGIN}sidepanel.html`);
   win.on("closed", () => (win = null));
+}
+
+// ---------------------------------------------------------------------------
+// The taskbar button: the window expands out of it and collapses back into it
+// ---------------------------------------------------------------------------
+//
+// The bot always has its button on the taskbar. "Hidden" is minimized at zero
+// opacity, so Windows' own minimize/restore animations show nothing and ours
+// does the work: clicking the button restores the window, which then slides
+// out from where the button was clicked, travelling its own height; clicking
+// the button again (or the panel's – / × buttons) slides it back and
+// minimizes it. Alt+F4 or "Close window" on the button quit the app.
+
+let animating = false;
+let animTimer = null;
+let shown = false;
+let collapsing = false;
+const ANIM_MS = 220;
+
+// Where the window sits when shown, and the direction it travels from the
+// button: away from the taskbar, whichever screen edge that is on. The button
+// is where the mouse is when it was clicked; from the keyboard (Win+number,
+// Alt+Tab) the window lines up with the mouse along the taskbar instead.
+function anchorFor(size, point = screen.getCursorScreenPoint()) {
+  const display = screen.getDisplayNearestPoint(point);
+  const wa = display.workArea, db = display.bounds;
+  let edge = "bottom";
+  if (wa.y > db.y) edge = "top";
+  else if (wa.x > db.x) edge = "left";
+  else if (wa.x + wa.width < db.x + db.width) edge = "right";
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(v, hi));
+  const { width: w, height: h } = size;
+  let x, y, dx = 0, dy = 0;
+  if (edge === "bottom" || edge === "top") {
+    x = clamp(Math.round(point.x - w / 2), wa.x, wa.x + wa.width - w);
+    y = edge === "bottom" ? wa.y + wa.height - h : wa.y;
+    dy = edge === "bottom" ? h : -h;
+  } else {
+    y = clamp(Math.round(point.y - h / 2), wa.y, wa.y + wa.height - h);
+    x = edge === "right" ? wa.x + wa.width - w : wa.x;
+    dx = edge === "right" ? w : -w;
+  }
+  // The trip out is the window's own height (its width for a side taskbar,
+  // which is the extent it travels along).
+  return { x, y, dx, dy };
+}
+
+const ease = (t) => 1 - Math.pow(1 - t, 3);
+
+function animate(from, to, opFrom, opTo, done) {
+  clearInterval(animTimer);
+  animating = true;
+  const t0 = Date.now();
+  const step = () => {
+    if (!win || win.isDestroyed()) { clearInterval(animTimer); animating = false; return; }
+    const t = Math.min(1, (Date.now() - t0) / ANIM_MS), k = ease(t);
+    win.setBounds({ x: Math.round(from.x + (to.x - from.x) * k), y: Math.round(from.y + (to.y - from.y) * k), width: to.width, height: to.height });
+    win.setOpacity(opFrom + (opTo - opFrom) * k);
+    if (t >= 1) { clearInterval(animTimer); animating = false; done?.(); }
+  };
+  animTimer = setInterval(step, 10);
+  step();
+}
+
+// Called once the window is up (restored by a button click, or shown).
+function expandFromTaskbar() {
+  if (!win) return;
+  if (win.isMaximized()) win.unmaximize();
+  const { width, height } = win.getBounds();
+  const a = anchorFor({ width, height });
+  const end = { x: a.x, y: a.y, width, height };
+  const start = { x: a.x + a.dx, y: a.y + a.dy, width, height };
+  shown = true;
+  win.setOpacity(0);
+  win.setBounds(start);
+  if (!win.isVisible() || win.isMinimized()) win.show();
+  win.focus();
+  animate(start, end, 0, 1);
+}
+
+function collapseToTaskbar() {
+  if (!win || !shown) return;
+  shown = false;
+  collapsing = true;
+  const b = win.getBounds();
+  const a = anchorFor(b, { x: b.x + b.width / 2, y: b.y + b.height / 2 });
+  animate(b, { x: b.x + a.dx, y: b.y + a.dy, width: b.width, height: b.height }, win.getOpacity(), 0, () => {
+    if (win && !shown) win.minimize();
+    collapsing = false;
+  });
+}
+
+// Starts out of sight: minimized, at zero opacity, button on the taskbar.
+function startOnTaskbar() {
+  win.setOpacity(0);
+  win.showInactive();
+  win.minimize();
+}
+
+function wireTaskbarButton() {
+  // A click on the button when the bot is out of sight restores it.
+  win.on("restore", () => {
+    if (collapsing || shown) return;
+    expandFromTaskbar();
+  });
+  // A click on the button while the bot is in front minimizes it at once;
+  // bring it back for a moment so it can slide into the button instead.
+  win.on("minimize", () => {
+    if (collapsing || !shown) return;
+    collapsing = true;
+    win.restore();
+    collapsing = false;
+    collapseToTaskbar();
+  });
 }
 
 const sendToWindow = (channel, ...args) => {
@@ -373,8 +491,8 @@ let importNote = null; // what was copied from the extension on connecting
 
 app.on("second-instance", () => {
   if (!win) return;
-  if (win.isMinimized()) win.restore();
-  win.focus();
+  if (!shown) { if (win.isMinimized()) win.restore(); else expandFromTaskbar(); }
+  else win.focus();
 });
 
 app.whenReady().then(async () => {
@@ -602,14 +720,16 @@ app.whenReady().then(async () => {
   });
 
   // The panel's own title bar buttons.
-  ipcMain.handle("win:minimize", () => win?.minimize());
+  ipcMain.handle("win:minimize", () => collapseToTaskbar());
   ipcMain.handle("win:toggleMaximize", () => {
     if (!win) return false;
     if (win.isMaximized()) win.unmaximize();
     else win.maximize();
     return win.isMaximized();
   });
-  ipcMain.handle("win:close", () => win?.close());
+  // The panel's × folds the bot into its taskbar button; Alt+F4 or the
+  // button's "Close window" quit.
+  ipcMain.handle("win:close", () => collapseToTaskbar());
   ipcMain.handle("win:isMaximized", () => !!win?.isMaximized());
 
   ipcMain.handle("app:onTop", (_e, on) => {
