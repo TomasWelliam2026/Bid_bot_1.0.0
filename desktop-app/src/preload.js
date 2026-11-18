@@ -1256,8 +1256,46 @@ function buildBar() {
   });
 }
 
-if (document.readyState === "loading") {
-  document.addEventListener("DOMContentLoaded", buildBar);
-} else {
+// Finished actions, told to the main process so it can pop a notification up
+// above the tray icon. The panel already reports each one in a status line;
+// these are the lines and the states that mean "done" rather than "working"
+// or "went wrong":
+//   #status       the run: a batch done, every search term done, the feed
+//                 done (plain, or "live" for a batch done mid-run)
+//   #manualStatus Generate → Manual: the resume saved ("saved")
+//   #rbStatus     Recruiter Bid: the email sent ("success")
+function watchFinishedActions() {
+  const done = {
+    status: (el, text) => {
+      const kind = el.className.trim();
+      if (kind === "live") return /^Batch \d+ done\b/.test(text);
+      return kind === "" && /\bdone\b/i.test(text);
+    },
+    manualStatus: (el) => el.classList.contains("saved"),
+    rbStatus: (el) => el.classList.contains("success")
+  };
+  const last = {};
+  for (const [id, isDone] of Object.entries(done)) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    last[id] = el.textContent.trim();
+    new MutationObserver(() => {
+      const text = el.textContent.trim();
+      if (el.hidden || !text) { last[id] = ""; return; }
+      if (text === last[id]) return;
+      last[id] = text;
+      if (isDone(el, text)) ipcRenderer.send("app:actionDone", text);
+    }).observe(el, { childList: true, characterData: true, subtree: true, attributes: true, attributeFilter: ["class", "hidden"] });
+  }
+}
+
+function onPanelReady() {
   buildBar();
+  watchFinishedActions();
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", onPanelReady);
+} else {
+  onPanelReady();
 }

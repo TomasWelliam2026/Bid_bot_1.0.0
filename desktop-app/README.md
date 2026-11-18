@@ -114,6 +114,12 @@ the icon and hides — the run keeps going. Right-click the icon for
 **Show / Hide** and **Quit**; Quit is the only way to close the app.
 Launching it a second time expands the running copy.
 
+**Done notifications.** While the window is folded away, a small dark
+card pops up just above the icon each time an action finishes — a batch of
+jobs written and sent, every search term or the whole feed done, a manual
+resume saved, a recruiter email sent — and fades after five seconds. Click
+it to open the bot.
+
 **Keeping the icon in view.** Windows 11 puts a new tray icon behind the
 **^** arrow. The app asks Windows to show its icon on the taskbar, but
 Windows only applies that the next time you sign in. To have it there right

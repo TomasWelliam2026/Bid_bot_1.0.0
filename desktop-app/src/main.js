@@ -431,6 +431,7 @@ function expandFromTray() {
   const end = { x: a.x, y: a.y, width, height };
   const start = { x: a.x + a.dx, y: a.y + a.dy, width, height };
   shown = true;
+  hideNotice();
   win.setOpacity(0);
   win.setBounds(start);
   win.show();
@@ -464,9 +465,120 @@ const toggleFromTray = () => {
   expandFromTray();
 };
 
+// Windows gives every tray icon the same small slot, so the logo is cropped
+// to the lion's face to fill as much of the
+// slot as it can, and handed over at 32px so high-DPI screens get it sharp.
+function trayImage() {
+  const logo = nativeImage.createFromPath(path.join(__dirname, "..", "assets", "logo.png"));
+  const { width, height } = logo.getSize();
+  // Zoomed in on the lion's face (a 170px square of the 256px logo; the horn
+  // tip and outer mane fall outside) so it reads big in the small slot.
+  const s = width / 256;
+  const side = Math.round(170 * s);
+  const x = Math.max(0, Math.min(Math.round(24 * s), width - side));
+  const y = Math.max(0, Math.min(Math.round(58 * s), height - side));
+  const small = logo.crop({ x, y, width: side, height: side }).resize({ width: 32, height: 32, quality: "best" });
+  // The thin lines wash out at this size: in the logo's own color, with its
+  // faint edge pixels made solid so they stand out on the taskbar.
+  const px = small.toBitmap(); // BGRA, premultiplied
+  for (let i = 0; i < px.length; i += 4) {
+    const a = px[i + 3];
+    if (a <= 40) continue;
+    const na = Math.min(255, Math.round(a * 1.6));
+    for (let c = 0; c < 3; c++) px[i + c] = Math.min(na, Math.round((px[i + c] * na) / a));
+    px[i + 3] = na;
+  }
+  return nativeImage.createFromBitmap(px, { width: 32, height: 32 });
+}
+
+// ---------------------------------------------------------------------------
+// The notification above the tray icon: a small tooltip-style card that says
+// an action is done, then fades. Shown only while the bot's window is folded
+// away (open, the window says so itself). Clicking it opens the bot.
+// ---------------------------------------------------------------------------
+
+let notice = null;
+let noticeTimer = null;
+const NOTICE_MS = 5000;
+const NOTICE_W = 300, NOTICE_H = 86;
+
+const noticeHtml = `<!doctype html><html><head><meta charset="utf-8"><style>
+html,body{margin:0;background:transparent;font:13px/1.35 "Segoe UI",sans-serif;overflow:hidden;user-select:none;cursor:pointer}
+.card{position:absolute;inset:6px 6px 14px 6px;background:#1f2430;color:#fff;border-radius:8px;
+  box-shadow:0 4px 14px rgba(0,0,0,.35);padding:9px 12px;box-sizing:border-box;display:flex;gap:10px;align-items:flex-start;
+  opacity:0;transform:translateY(6px);transition:opacity .18s,transform .18s}
+.card.on{opacity:1;transform:none}
+.card:after{content:"";position:absolute;bottom:-7px;left:var(--tip,50%);margin-left:-7px;border:7px solid transparent;border-bottom:0;border-top-color:#1f2430}
+body.below .card{inset:14px 6px 6px 6px}
+body.below .card:after{bottom:auto;top:-7px;border-top:0;border-bottom:7px solid #1f2430;border-left-color:transparent;border-right-color:transparent}
+.tick{flex:none;width:18px;height:18px;border-radius:50%;background:#2fb67c;color:#fff;font-size:12px;display:grid;place-items:center;margin-top:1px}
+.t{font-weight:600;font-size:12px;opacity:.75;margin-bottom:2px}
+.m{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+</style></head><body><div class="card" id="c"><div class="tick">✓</div><div><div class="t">Bid Bot</div><div class="m" id="m"></div></div></div>
+<script>
+const { ipcRenderer } = require("electron");
+ipcRenderer.on("notice", (_e, { text, tip, below }) => {
+  document.getElementById("m").textContent = text;
+  document.body.classList.toggle("below", !!below);
+  document.getElementById("c").style.setProperty("--tip", tip + "px");
+  const c = document.getElementById("c"); c.classList.remove("on"); void c.offsetWidth; c.classList.add("on");
+});
+ipcRenderer.on("notice:hide", () => document.getElementById("c").classList.remove("on"));
+document.addEventListener("click", () => ipcRenderer.send("notice:click"));
+</script></body></html>`;
+
+function ensureNotice() {
+  if (notice && !notice.isDestroyed()) return notice;
+  notice = new BrowserWindow({
+    width: NOTICE_W, height: NOTICE_H, show: false, frame: false, transparent: true,
+    resizable: false, movable: false, focusable: false, skipTaskbar: true,
+    alwaysOnTop: true, hasShadow: false,
+    webPreferences: { nodeIntegration: true, contextIsolation: false, sandbox: false }
+  });
+  notice.setAlwaysOnTop(true, "screen-saver");
+  notice.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(noticeHtml));
+  notice.on("closed", () => (notice = null));
+  return notice;
+}
+
+ipcMain.on("notice:click", () => {
+  hideNotice();
+  if (!shown) expandFromTray();
+});
+
+function hideNotice() {
+  clearTimeout(noticeTimer);
+  if (!notice || notice.isDestroyed() || !notice.isVisible()) return;
+  notice.webContents.send("notice:hide");
+  noticeTimer = setTimeout(() => notice?.hide(), 200);
+}
+
+// Places the card just off the tray icon on the taskbar's side, its arrow
+// pointing at the icon.
+function showNotice(text) {
+  if (!text || shown || !tray) return;
+  const n = ensureNotice();
+  const iconB = tray.getBounds();
+  const point = iconB.width ? { x: iconB.x + iconB.width / 2, y: iconB.y + iconB.height / 2 } : screen.getCursorScreenPoint();
+  const display = screen.getDisplayNearestPoint(point);
+  const wa = display.workArea;
+  const below = wa.y > display.bounds.y; // taskbar along the top
+  const x = Math.max(wa.x, Math.min(Math.round(point.x - NOTICE_W / 2), wa.x + wa.width - NOTICE_W));
+  const y = below ? wa.y : wa.y + wa.height - NOTICE_H;
+  const tip = Math.max(20, Math.min(Math.round(point.x - x), NOTICE_W - 20));
+  const send = () => {
+    n.setBounds({ x, y, width: NOTICE_W, height: NOTICE_H });
+    n.showInactive();
+    n.webContents.send("notice", { text, tip, below });
+    clearTimeout(noticeTimer);
+    noticeTimer = setTimeout(hideNotice, NOTICE_MS);
+  };
+  if (n.webContents.isLoading()) n.webContents.once("did-finish-load", send);
+  else send();
+}
+
 function createTray() {
-  const img = nativeImage.createFromPath(path.join(__dirname, "..", "assets", "logo.png")).resize({ width: 16, height: 16 });
-  tray = new Tray(img);
+  tray = new Tray(trayImage());
   tray.setToolTip("Valiant Sisu Bid Bot");
   keepTrayIconOnTaskbar();
   tray.on("click", toggleFromTray);
@@ -760,6 +872,10 @@ app.whenReady().then(async () => {
   // The panel's × folds the bot into the tray (see the window's close).
   ipcMain.handle("win:close", () => collapseToTray());
   ipcMain.handle("win:isMaximized", () => !!win?.isMaximized());
+
+  // The panel reports a finished action (see preload.js); it pops up above
+  // the tray icon.
+  ipcMain.on("app:actionDone", (_e, text) => showNotice(String(text || "").slice(0, 200)));
 
   ipcMain.handle("app:onTop", (_e, on) => {
     saveSettings({ alwaysOnTop: !!on });
