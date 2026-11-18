@@ -500,31 +500,71 @@ function trayImage() {
 let notice = null;
 let noticeTimer = null;
 const NOTICE_MS = 5000;
-const NOTICE_W = 300, NOTICE_H = 86;
+const NOTICE_W = 310, NOTICE_H = 100;
 
+// Animated after the notifications-toasts guidance: it rises out of the icon
+// with a slight overshoot and lands with a small squash (enter 300ms), the
+// tick draws itself once the card has landed (follow-through), a progress bar
+// shows the time left (scaleX, not width), hovering holds it, and before it
+// goes it dips to 95% for 100ms (anticipation), then drops back toward the
+// icon with an ease-in (exit 200ms). The page runs its own timing and tells
+// the main process when it is gone.
 const noticeHtml = `<!doctype html><html><head><meta charset="utf-8"><style>
 html,body{margin:0;background:transparent;font:13px/1.35 "Segoe UI",sans-serif;overflow:hidden;user-select:none;cursor:pointer}
-.card{position:absolute;inset:6px 6px 14px 6px;background:#1f2430;color:#fff;border-radius:8px;
-  box-shadow:0 4px 14px rgba(0,0,0,.35);padding:9px 12px;box-sizing:border-box;display:flex;gap:10px;align-items:flex-start;
-  opacity:0;transform:translateY(6px);transition:opacity .18s,transform .18s}
-.card.on{opacity:1;transform:none}
-.card:after{content:"";position:absolute;bottom:-7px;left:var(--tip,50%);margin-left:-7px;border:7px solid transparent;border-bottom:0;border-top-color:#1f2430}
-body.below .card{inset:14px 6px 6px 6px}
+.card{position:absolute;inset:12px 10px 18px 10px;background:#1f2430;color:#fff;border-radius:8px;
+  box-shadow:0 4px 14px rgba(0,0,0,.35);padding:10px 12px 12px;box-sizing:border-box;display:flex;gap:10px;align-items:flex-start;
+  opacity:0;transform-origin:var(--tip,50%) 100%}
+body.below .card{inset:18px 10px 12px 10px;transform-origin:var(--tip,50%) 0}
+.card:after{content:"";position:absolute;bottom:-7px;left:calc(var(--tip,50%) - 10px);margin-left:-7px;border:7px solid transparent;border-bottom:0;border-top-color:#1f2430}
 body.below .card:after{bottom:auto;top:-7px;border-top:0;border-bottom:7px solid #1f2430;border-left-color:transparent;border-right-color:transparent}
-.tick{flex:none;width:18px;height:18px;border-radius:50%;background:#2fb67c;color:#fff;font-size:12px;display:grid;place-items:center;margin-top:1px}
+.card.enter{animation:enter 300ms cubic-bezier(.34,1.56,.64,1) forwards}
+.card.shown{opacity:1}
+.card.dip{opacity:1;transform:scale(.95);transition:transform 100ms ease-out}
+.card.exit{animation:exit 200ms ease-in forwards}
+@keyframes enter{0%{opacity:0;transform:translateY(var(--from)) scale(.9)}
+  70%{opacity:1;transform:translateY(0) scale(1.02,.97)}
+  100%{opacity:1;transform:none}}
+@keyframes exit{from{opacity:1;transform:scale(.95)}to{opacity:0;transform:translateY(var(--from)) scale(.85)}}
+.tick{flex:none;width:20px;height:20px;border-radius:50%;background:#2fb67c;margin-top:1px;transform:scale(0)}
+.card.enter .tick,.card.shown .tick,.card.dip .tick{animation:pop 200ms 180ms cubic-bezier(.34,1.56,.64,1) forwards}
+.tick path{fill:none;stroke:#fff;stroke-width:2.4;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:14;stroke-dashoffset:14}
+.card.enter .tick path,.card.shown .tick path,.card.dip .tick path{animation:draw 300ms 300ms ease-out forwards}
+@keyframes pop{to{transform:scale(1)}}
+@keyframes draw{to{stroke-dashoffset:0}}
 .t{font-weight:600;font-size:12px;opacity:.75;margin-bottom:2px}
 .m{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-</style></head><body><div class="card" id="c"><div class="tick">✓</div><div><div class="t">Bid Bot</div><div class="m" id="m"></div></div></div>
+.bar{position:absolute;left:8px;right:8px;bottom:4px;height:2px;border-radius:2px;background:#2fb67c;opacity:.8;transform-origin:left;transform:scaleX(1)}
+.card.paused .bar{animation-play-state:paused!important}
+</style></head><body><div class="card" id="c"><svg class="tick" viewBox="0 0 20 20"><path d="M5.5 10.5l3 3 6-6.5"/></svg>
+<div><div class="t">Bid Bot</div><div class="m" id="m"></div></div><div class="bar" id="b"></div></div>
 <script>
 const { ipcRenderer } = require("electron");
-ipcRenderer.on("notice", (_e, { text, tip, below }) => {
+const c = document.getElementById("c"), bar = document.getElementById("b");
+let left = 0, started = 0, timer = null, leaving = false;
+const set = (cls) => { c.className = "card " + cls; };
+function arm(ms) { clearTimeout(timer); started = Date.now(); left = ms; timer = setTimeout(leave, ms); }
+function leave() {
+  if (leaving) return; leaving = true; clearTimeout(timer);
+  set("dip");
+  setTimeout(() => { set("exit"); setTimeout(() => ipcRenderer.send("notice:gone"), 200); }, 100);
+}
+ipcRenderer.on("notice", (_e, { text, tip, below, ms }) => {
+  leaving = false;
   document.getElementById("m").textContent = text;
   document.body.classList.toggle("below", !!below);
-  document.getElementById("c").style.setProperty("--tip", tip + "px");
-  const c = document.getElementById("c"); c.classList.remove("on"); void c.offsetWidth; c.classList.add("on");
+  c.style.setProperty("--tip", tip + "px");
+  c.style.setProperty("--from", below ? "-24px" : "24px");
+  set(""); void c.offsetWidth; set("enter");
+  setTimeout(() => { if (!leaving) set("shown"); }, 320);
+  bar.style.animation = "none"; void bar.offsetWidth;
+  bar.style.animation = "bar " + ms + "ms linear 300ms forwards";
+  arm(ms + 300);
 });
-ipcRenderer.on("notice:hide", () => document.getElementById("c").classList.remove("on"));
+ipcRenderer.on("notice:hide", leave);
+c.addEventListener("mouseenter", () => { if (leaving) return; clearTimeout(timer); left -= Date.now() - started; c.classList.add("paused"); });
+c.addEventListener("mouseleave", () => { if (leaving) return; c.classList.remove("paused"); arm(Math.max(600, left)); });
 document.addEventListener("click", () => ipcRenderer.send("notice:click"));
+const st = document.createElement("style"); st.textContent = "@keyframes bar{to{transform:scaleX(0)}}"; document.head.appendChild(st);
 </script></body></html>`;
 
 function ensureNotice() {
@@ -546,11 +586,18 @@ ipcMain.on("notice:click", () => {
   if (!shown) expandFromTray();
 });
 
-function hideNotice() {
+// The card plays its own exit and says when it is gone; the timer is only
+// a fallback in case it never does.
+ipcMain.on("notice:gone", () => {
   clearTimeout(noticeTimer);
+  notice?.hide();
+});
+
+function hideNotice() {
   if (!notice || notice.isDestroyed() || !notice.isVisible()) return;
   notice.webContents.send("notice:hide");
-  noticeTimer = setTimeout(() => notice?.hide(), 200);
+  clearTimeout(noticeTimer);
+  noticeTimer = setTimeout(() => notice?.hide(), 600);
 }
 
 // Places the card just off the tray icon on the taskbar's side, its arrow
@@ -569,9 +616,8 @@ function showNotice(text) {
   const send = () => {
     n.setBounds({ x, y, width: NOTICE_W, height: NOTICE_H });
     n.showInactive();
-    n.webContents.send("notice", { text, tip, below });
     clearTimeout(noticeTimer);
-    noticeTimer = setTimeout(hideNotice, NOTICE_MS);
+    n.webContents.send("notice", { text, tip, below, ms: NOTICE_MS });
   };
   if (n.webContents.isLoading()) n.webContents.once("did-finish-load", send);
   else send();
@@ -886,6 +932,7 @@ app.whenReady().then(async () => {
 
   createWindow();
   createTray();
+  ensureNotice(); // loaded now, so the first alert shows without delay
   win.on("focus", rescan);
   win.on("blur", foldOnBlur);
 });
