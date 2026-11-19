@@ -72,17 +72,9 @@ export default function App() {
     );
   }, [users, activeUser, activeId]);
 
-  const tableRecords = useMemo(
-    () =>
-      sharedTabs.size
-        ? records.filter(
-            (record) =>
-              record.user_id === activeId ||
-              (sharedTabs.has(record.user_id) && !(record.hidden_for ?? []).includes(activeId)),
-          )
-        : ownRecords,
-    [records, activeId, sharedTabs, ownRecords],
-  );
+  // Each tab's table shows only its own applications now -- no more folding
+  // in the other tabs that share its Country (C) and Role.
+  const tableRecords = ownRecords;
 
   // Unfiltered, so a tab you are not currently looking at can still show a
   // pending count on its own button -- without this, a submission waiting on
